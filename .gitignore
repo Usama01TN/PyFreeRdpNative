@@ -1,0 +1,28 @@
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Native libraries staged into the package
+pyfreerdp/_libs/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# IDEs
+.vscode/
+.idea/
+*.swp

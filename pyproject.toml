@@ -1,0 +1,84 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyfreerdp"
+version = "0.2.0"
+description = "Python bindings for FreeRDP - client + server + virtual channels + WinPR helpers."
+readme = "README.md"
+# 3.8 floor: pyfreerdp itself is Py-3-only, but we deliberately keep the
+# source written in Py2-syntax-compatible style (no f-strings, no annotations,
+# no dataclasses). The 3.8 floor is set by ctypes feature availability and
+# by what we test in CI, not by the syntax we use.
+requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "pyfreerdp contributors" },
+]
+keywords = ["rdp", "freerdp", "remote-desktop", "windows", "ctypes", "winpr", "channels"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "pytest-cov>=4",
+    "ruff>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/example/pyfreerdp"
+"Bug Tracker" = "https://github.com/example/pyfreerdp/issues"
+"FreeRDP Upstream" = "https://github.com/FreeRDP/FreeRDP"
+
+[project.scripts]
+pyfreerdp-build = "pyfreerdp.scripts.build_freerdp:main"
+
+[tool.setuptools.packages.find]
+include = ["pyfreerdp*"]
+exclude = ["tests*", "examples*", "scripts*"]
+
+[tool.setuptools.package-data]
+pyfreerdp = ["_libs/*", "_libs/**/*"]
+
+[tool.ruff]
+line-length = 100
+# Target a low Py-version so ruff doesn't suggest Py3-only upgrades. Combined
+# with the absence of the "UP" rule below, this keeps lint quiet about our
+# deliberately-old-style syntax.
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B"]
+# Deliberately omit "UP": pyupgrade-style rules would suggest f-strings,
+# walrus, etc. - the exact constructs we forbid.
+ignore = [
+    "E501",   # line length
+    "B008",   # mutable defaults in argparse Namespace usage
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra --strict-markers"
+testpaths = ["tests"]
+markers = [
+    "integration: requires a live RDP server (skipped by default)",
+    "needs_lib: requires libfreerdp installed on the host",
+]
