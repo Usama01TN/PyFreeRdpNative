@@ -57,6 +57,16 @@ from .server_settings import RdpServerSettings
 from .server import RdpServer
 from .peer import RdpPeer
 
+# --- Display events (rendering callbacks on RdpClient) ---
+from .display import (
+    PixelFormat,
+    BitmapRect,
+    BitmapUpdate,
+    PaletteUpdate,
+    SurfaceBits,
+    PointerUpdate,
+)
+
 # --- Channels (re-exported for flat namespace convenience) ---
 from .channels import (
     ChannelSpec,
@@ -115,6 +125,10 @@ __all__ = [
 
     # Server
     "RdpServer", "RdpServerSettings", "RdpPeer",
+
+    # Display events
+    "PixelFormat", "BitmapRect", "BitmapUpdate",
+    "PaletteUpdate", "SurfaceBits", "PointerUpdate",
 
     # Channels
     "ChannelSpec", "ChannelDirection", "ChannelManager",

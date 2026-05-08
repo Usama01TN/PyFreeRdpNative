@@ -301,3 +301,38 @@ All channel-related errors derive from `ChannelError`:
 
 Wrap channel operations in `try / except ChannelError` to handle both
 cases at once.
+
+## Rendering hooks (display callbacks)
+
+Bitmap data and encoded video frames don't arrive over a virtual channel
+in the protocol sense — they come through `rdpUpdate` callbacks and
+the GFX pipeline respectively. `pyfreerdp` exposes both as
+`RdpClient.on_*` callbacks alongside the channel framework:
+
+| Hook | Fires for | Event class |
+|---|---|---|
+| `on_bitmap_update` | classic TS_UPDATE_BITMAP path (RDP6/RLE/raw) | `BitmapUpdate` containing `BitmapRect` list |
+| `on_palette_update` | 8-bit color sessions only | `PaletteUpdate` |
+| `on_surface_bits` | `rdpgfx` encoded frames (H.264, RemoteFX, ...) | `SurfaceBits` |
+| `on_pointer_update` | cursor sprite changes | `PointerUpdate` (delivery path WIP) |
+
+**Important caveats:**
+
+- These callbacks fire on the FreeRDP event-loop thread. For Qt / GTK /
+  wx, marshal to the GUI thread before touching widgets.
+- `on_surface_bits` payloads are *encoded* — H.264 / RemoteFX-Progressive /
+  AVC444. The binding doesn't ship a decoder. Use PyAV (`pip install av`)
+  for H.264, or fall back to the bitmap path by disabling GFX in
+  `RdpSettings(gfx_h264=False, enable_remotefx=False)`.
+- Callback exceptions are caught and logged to stderr, then the C side
+  returns TRUE to keep the session alive. Don't rely on exceptions
+  bubbling out.
+
+Two complete PyQt5 viewer examples are in `examples/`:
+- `qt5_viewer_legacy.py` — uses `on_bitmap_update`. Works with any RDP
+  server, no extra Python deps beyond PyQt5.
+- `qt5_viewer_gfx.py` — uses `on_surface_bits` + PyAV. Faster and works
+  with modern Windows servers, requires `pip install av`.
+
+Both share `examples/qt5_common.py` for the connection dialog, input
+bridge, and worker-thread machinery.

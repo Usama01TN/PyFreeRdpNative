@@ -122,6 +122,22 @@ with RdpClient(settings) as client:
 
 See [docs/CHANNELS.md](docs/CHANNELS.md) for the full channel framework reference and which channels work end-to-end vs. ship as registration scaffolding only.
 
+## Quick start — full PyQt5 viewer
+
+Two complete GUI viewers ship in `examples/`:
+
+```bash
+# Legacy bitmap path (any server, no extra deps beyond PyQt5)
+pip install PyQt5
+python examples/qt5_viewer_legacy.py
+
+# rdpgfx + H.264 path (modern Windows servers, faster)
+pip install PyQt5 av
+python examples/qt5_viewer_gfx.py
+```
+
+Both demonstrate connection settings dialog, input injection, clipboard sync, drive redirection, display-resize, and a custom channel — wired into PyQt5's signal/slot system end to end.
+
 ## What you get
 
 **Client**

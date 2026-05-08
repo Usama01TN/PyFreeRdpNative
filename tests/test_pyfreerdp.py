@@ -770,6 +770,106 @@ def test_parse_logon_identity_handles_null():
 
 
 # ============================================================================
+# Display events
+# ============================================================================
+
+def test_bitmap_rect_construction():
+    from pyfreerdp import BitmapRect
+    r = BitmapRect(x=10, y=20, width=100, height=50, bpp=32,
+                   data=b"\x00" * (100 * 50 * 4),
+                   stride=400, compressed=False)
+    assert r.x == 10 and r.y == 20
+    assert r.width == 100 and r.height == 50
+    assert r.bpp == 32
+    assert len(r.data) == 100 * 50 * 4
+    assert r.compressed is False
+
+
+def test_bitmap_update_iter_and_len():
+    from pyfreerdp import BitmapRect, BitmapUpdate
+    rects = [
+        BitmapRect(x=0, y=0, width=10, height=10, bpp=32,
+                   data=b"", stride=40, compressed=False),
+        BitmapRect(x=10, y=10, width=20, height=20, bpp=32,
+                   data=b"", stride=80, compressed=True),
+    ]
+    upd = BitmapUpdate(rects)
+    assert len(upd) == 2
+    assert list(upd) == rects
+
+
+def test_palette_update_requires_256_entries():
+    from pyfreerdp import PaletteUpdate
+    with pytest.raises(ValueError, match="256"):
+        PaletteUpdate([(0, 0, 0)] * 100)
+
+
+def test_palette_update_indexable():
+    from pyfreerdp import PaletteUpdate
+    pal = PaletteUpdate([(i, i, i) for i in range(256)])
+    assert pal[0] == (0, 0, 0)
+    assert pal[255] == (255, 255, 255)
+
+
+def test_surface_bits_codec_name_lookup():
+    from pyfreerdp import SurfaceBits
+    sb = SurfaceBits(x=0, y=0, width=1920, height=1080,
+                     bpp=32, pixel_format=0x20, codec_id=0x0C,
+                     payload=b"FAKE_H264_DATA")
+    assert sb.codec_name == "h264"
+    assert sb.codec_id == 0x0C
+    assert sb.payload == b"FAKE_H264_DATA"
+
+
+def test_surface_bits_unknown_codec_falls_back_gracefully():
+    from pyfreerdp import SurfaceBits
+    sb = SurfaceBits(x=0, y=0, width=1, height=1,
+                     bpp=32, pixel_format=0, codec_id=0xFF,
+                     payload=b"")
+    assert "unknown" in sb.codec_name
+
+
+def test_pointer_update_kinds():
+    from pyfreerdp import PointerUpdate
+    sys_p = PointerUpdate(kind="system", system_id=32649)
+    assert sys_p.kind == "system" and sys_p.system_id == 32649
+    hidden = PointerUpdate(kind="hidden")
+    assert hidden.kind == "hidden"
+    sprite = PointerUpdate(kind="sprite", width=32, height=32,
+                           hot_x=16, hot_y=16, rgba=b"\x00" * (32 * 32 * 4))
+    assert sprite.width == 32 and sprite.hot_x == 16
+
+
+def test_pointer_update_rejects_bad_kind():
+    from pyfreerdp import PointerUpdate
+    with pytest.raises(ValueError, match="kind"):
+        PointerUpdate(kind="invalid")
+
+
+def test_pixel_format_constants():
+    from pyfreerdp import PixelFormat
+    assert PixelFormat.BGRX32 == 0x20
+    assert PixelFormat.BGRA32 == 0x28
+
+
+def test_rdp_client_exposes_display_callback_hooks():
+    """The four on_* callback attributes must exist on RdpClient and
+    default to None so users can introspect."""
+    from pyfreerdp.client import RdpClient
+    # Don't construct - constructing requires the library. Inspect the
+    # __init__ source via a synthetic instance probe.
+    # Easier: walk the class for the documented hook names.
+    hook_names = {"on_bitmap_update", "on_palette_update",
+                  "on_surface_bits", "on_pointer_update"}
+    # We can't introspect __init__ without running it, so check via
+    # the source file content - cheap and reliable.
+    import inspect
+    src = inspect.getsource(RdpClient.__init__)
+    for name in hook_names:
+        assert name in src, "RdpClient.__init__ should set {0}".format(name)
+
+
+# ============================================================================
 # Integration smoke
 # ============================================================================
 

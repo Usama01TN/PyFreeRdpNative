@@ -20,7 +20,7 @@ from the FreeRDP/WinPR header it lives in.
 Written in Py2-compatible syntax (no annotations, no f-strings).
 """
 
-from ctypes import POINTER, c_char_p, c_int, c_uint8
+from ctypes import POINTER, c_char_p, c_int, c_uint8, c_void_p
 
 from . import types as t
 
@@ -309,6 +309,64 @@ def bind_winpr(lib):
 
     # No "truly required" symbol set - WinPR is so feature-rich that any
     # subset may legitimately be missing. We surface errors at use-site.
+    return lib
+
+
+# ---------------------------------------------------------------------------
+# Display update path (client side)
+# ---------------------------------------------------------------------------
+
+def bind_display(lib):
+    """
+    Attach signatures for the bitmap-decompression / pointer / surface
+    helpers used by the Python display callbacks.
+
+    These live in libfreerdp-client3 (alongside the rest of the client
+    surface). Older builds may be missing some — we surface that at
+    use-site by leaving the attribute as None.
+    """
+    missing = []
+
+    def b(name, argtypes, restype):
+        return _bind_one(lib, name, argtypes, restype, missing)
+
+    # include/freerdp/codec/bitmap.h:
+    #   BOOL bitmap_decompress(const BYTE* srcData, BYTE* dstData,
+    #                          UINT32 width, UINT32 height,
+    #                          UINT32 srcSize,
+    #                          UINT32 srcFormat, UINT32 dstFormat);
+    # We expose this so Python can decompress RLE/RDP6 bitmap payloads
+    # without dropping back to the wire.
+    b("bitmap_decompress",
+      [POINTER(c_uint8), POINTER(c_uint8), t.UINT32, t.UINT32,
+       t.UINT32, t.UINT32, t.UINT32], t.BOOL)
+
+    # include/freerdp/codec/color.h:
+    #   BOOL freerdp_image_copy(BYTE* pDstData, UINT32 DstFormat,
+    #       UINT32 nDstStep, UINT32 nXDst, UINT32 nYDst,
+    #       UINT32 nWidth, UINT32 nHeight,
+    #       const BYTE* pSrcData, UINT32 SrcFormat,
+    #       UINT32 nSrcStep, UINT32 nXSrc, UINT32 nYSrc,
+    #       const gdiPalette* hPalette, UINT32 flags);
+    # Used to convert decoded bitmaps from the wire color format into
+    # whatever the embedder wants (typically BGRA8888 for Qt).
+    b("freerdp_image_copy",
+      [POINTER(c_uint8), t.UINT32, t.UINT32, t.UINT32, t.UINT32,
+       t.UINT32, t.UINT32,
+       POINTER(c_uint8), t.UINT32, t.UINT32, t.UINT32, t.UINT32,
+       c_void_p, t.UINT32], t.BOOL)
+
+    # include/freerdp/utils/pcap.h-adjacent — we need a helper to read
+    # rdpContext->update without offset arithmetic. FreeRDP doesn't
+    # export a bare accessor, so we read via the well-known offset:
+    # rdpContext layout (3.x) starts with:
+    #   freerdp* instance;       // offset 0
+    #   rdpSettings* settings;   // offset 1
+    #   rdpInput* input;         // offset 2
+    #   rdpUpdate* update;       // offset 3
+    # No symbol binding needed for that — see RdpClient._update_ptr.
+
+    # No required-set: features degrade if any of these are missing.
     return lib
 
 

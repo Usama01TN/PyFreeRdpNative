@@ -21,6 +21,7 @@ keyword-only `*` separators.
 """
 
 import ctypes
+import sys
 import threading
 import time
 
@@ -63,6 +64,7 @@ def _ensure_library():
                 "Or set PYFREERDP_LIBRARY=/abs/path/to/libfreerdp-client3.so")
         _api.bind_client(handle)
         _api.bind_channels(handle)
+        _api.bind_display(handle)
         _check_version(handle)
         _lib = handle
         return _lib
@@ -120,6 +122,22 @@ class RdpClient(object):
         self._connected = False
         self._stop_event = threading.Event()
         self._channel_manager = None
+
+        # Display callback hooks. Set by user before connect().
+        # Signatures:
+        #   on_bitmap_update(BitmapUpdate)
+        #   on_palette_update(PaletteUpdate)
+        #   on_surface_bits(SurfaceBits)
+        #   on_pointer_update(PointerUpdate)
+        self.on_bitmap_update = None
+        self.on_palette_update = None
+        self.on_surface_bits = None
+        self.on_pointer_update = None
+
+        # CFUNCTYPE-wrapped trampolines kept alive for the session's
+        # lifetime. Without these references, ctypes would GC the
+        # closures and the C side would call into freed memory.
+        self._trampolines = []
 
         self._allocate()
         self._apply_settings()
@@ -315,6 +333,7 @@ class RdpClient(object):
             # Fall-through if code didn't map to anything: raise generic.
             raise RdpConnectionError("freerdp_connect() failed")
         self._connected = True
+        self._install_display_callbacks()
 
     def disconnect(self):
         """Close the RDP session cleanly."""
@@ -385,6 +404,159 @@ class RdpClient(object):
         if not slot:
             raise RdpError("instance->input is NULL - not connected yet?")
         return ctypes.cast(slot, t.rdpInput_p)
+
+    # ------------------------------------------------------- display callbacks
+
+    def _context_ptr(self):
+        """Read instance->context (first pointer field in struct freerdp)."""
+        ctx_addr = ctypes.cast(self._instance,
+                               ctypes.POINTER(ctypes.c_void_p))[0]
+        if not ctx_addr:
+            raise RdpError("instance->context is NULL")
+        return ctx_addr
+
+    def _update_ptr(self):
+        """
+        Read context->update (slot 3 in struct rdpContext).
+
+        rdpContext layout (3.x):
+            freerdp* instance;     // offset 0
+            rdpSettings* settings; // offset 1
+            rdpInput* input;       // offset 2
+            rdpUpdate* update;     // offset 3
+            ...
+        """
+        ctx = self._context_ptr()
+        slots = ctypes.cast(ctypes.c_void_p(ctx),
+                            ctypes.POINTER(ctypes.c_void_p))
+        update_addr = slots[3]
+        if not update_addr:
+            raise RdpError("context->update is NULL - not connected yet?")
+        return update_addr
+
+    def _patch_update_slot(self, slot_index, c_callback):
+        """
+        Overwrite a function-pointer slot inside rdpUpdate with our trampoline.
+
+        The slot is a `void*`-sized value. ctypes.cast to c_void_p* gives
+        us pointer arithmetic. The callback's address is read via
+        ctypes.cast(c_callback, c_void_p).value.
+        """
+        update_addr = self._update_ptr()
+        slots = ctypes.cast(ctypes.c_void_p(update_addr),
+                            ctypes.POINTER(ctypes.c_void_p))
+        slots[slot_index] = ctypes.cast(c_callback, ctypes.c_void_p).value
+
+    def _install_display_callbacks(self):
+        """
+        Install C trampolines for whichever display callbacks the user
+        registered. Called from connect() once the handshake completes
+        and rdpContext->update is populated.
+
+        Each trampoline:
+          1. Receives the C struct from FreeRDP.
+          2. Decodes it into a high-level Python event object.
+          3. Invokes the user's callback.
+          4. Returns TRUE so FreeRDP keeps processing.
+
+        We catch and log any exception from the user callback - propagating
+        it through C would crash the session.
+        """
+        from .display import (
+            BitmapRect,
+            BitmapUpdate,
+            PaletteUpdate,
+            SurfaceBits,
+        )
+
+        if self.on_bitmap_update is not None:
+            user_cb = self.on_bitmap_update
+
+            def _bitmap_trampoline(ctx, update_p):
+                try:
+                    update = update_p.contents
+                    rects = []
+                    for i in range(update.number):
+                        bd = update.rectangles[i]
+                        # Pull the raw bitmap bytes out of the C buffer.
+                        if bd.bitmapDataStream and bd.bitmapLength:
+                            data = ctypes.string_at(
+                                bd.bitmapDataStream, bd.bitmapLength)
+                        else:
+                            data = b""
+                        rects.append(BitmapRect(
+                            x=bd.destLeft, y=bd.destTop,
+                            width=bd.width, height=bd.height,
+                            bpp=bd.bitsPerPixel,
+                            data=data,
+                            stride=bd.cbScanWidth,
+                            compressed=bool(bd.compressed),
+                        ))
+                    user_cb(BitmapUpdate(rects))
+                except Exception as e:
+                    sys.stderr.write(
+                        "pyfreerdp: bitmap_update callback raised: "
+                        "{0}\n".format(e))
+                return 1   # TRUE
+            cb = t.BITMAP_UPDATE_FN(_bitmap_trampoline)
+            self._trampolines.append(cb)
+            self._patch_update_slot(t.RDP_UPDATE_BITMAP_SLOT, cb)
+
+        if self.on_palette_update is not None:
+            user_cb = self.on_palette_update
+
+            def _palette_trampoline(ctx, palette_p):
+                try:
+                    pal = palette_p.contents
+                    entries = [(e.red, e.green, e.blue)
+                               for e in pal.entries]
+                    user_cb(PaletteUpdate(entries))
+                except Exception as e:
+                    sys.stderr.write(
+                        "pyfreerdp: palette_update callback raised: "
+                        "{0}\n".format(e))
+                return 1
+            cb = t.PALETTE_UPDATE_FN(_palette_trampoline)
+            self._trampolines.append(cb)
+            self._patch_update_slot(t.RDP_UPDATE_PALETTE_SLOT, cb)
+
+        if self.on_surface_bits is not None:
+            user_cb = self.on_surface_bits
+
+            def _surface_trampoline(ctx, sbc_p):
+                try:
+                    sbc = sbc_p.contents
+                    if sbc.bitmapData and sbc.bitmapDataLength:
+                        payload = ctypes.string_at(
+                            sbc.bitmapData, sbc.bitmapDataLength)
+                    else:
+                        payload = b""
+                    event = SurfaceBits(
+                        x=sbc.destLeft, y=sbc.destTop,
+                        width=sbc.width, height=sbc.height,
+                        bpp=sbc.bpp,
+                        pixel_format=sbc.format,
+                        codec_id=sbc.codecID,
+                        payload=payload,
+                        frame_id=sbc.frameId,
+                    )
+                    user_cb(event)
+                except Exception as e:
+                    sys.stderr.write(
+                        "pyfreerdp: surface_bits callback raised: "
+                        "{0}\n".format(e))
+                return 1
+            cb = t.SURFACE_BITS_FN(_surface_trampoline)
+            self._trampolines.append(cb)
+            self._patch_update_slot(t.RDP_UPDATE_SURFACE_BITS_SLOT, cb)
+
+        # Pointer updates take a different path (rdpPointer struct in
+        # rdpGraphics, not rdpUpdate). Surfacing those reliably needs
+        # FreeRDP's gdi backend to be active and we don't bind that
+        # subsystem yet. We expose the hook so embedders can set it,
+        # but currently it's a no-op until full pointer support lands.
+        # Tracked as a known limitation; PointerUpdate is real, the
+        # delivery path isn't.
 
     def send_key(self, scancode, pressed, extended=False):
         """Inject a scancode-based keypress. Use Microsoft RDP scancodes."""
