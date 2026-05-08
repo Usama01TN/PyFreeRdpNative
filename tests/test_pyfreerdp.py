@@ -18,7 +18,6 @@ they're skipped on default CI runs.
 
 Style: Py2-compatible (no f-strings, no annotations).
 """
-import os
 import sys
 
 import pytest
@@ -779,7 +778,16 @@ def test_can_locate_client_library_when_installed():
     path = find_freerdp_library()
     if path is None:
         pytest.skip("FreeRDP client not installed on this host")
-    assert os.path.isabs(path)
+    # On Linux, ctypes.util.find_library returns the SONAME (e.g.
+    # 'libfreerdp-client3.so.3'), not an absolute path - the dynamic
+    # linker resolves it via ld.so.cache. On macOS/Windows the result
+    # is typically absolute. Either way is fine; the real check is that
+    # the result is loadable.
+    assert isinstance(path, str) and path
+    assert "freerdp" in path.lower()
+    # Confirm it actually loads.
+    import ctypes
+    ctypes.CDLL(path)
 
 
 @pytest.mark.needs_lib
@@ -787,7 +795,10 @@ def test_can_locate_server_library_when_installed():
     path = find_freerdp_server_library()
     if path is None:
         pytest.skip("FreeRDP server not installed on this host")
-    assert os.path.isabs(path)
+    assert isinstance(path, str) and path
+    assert "freerdp" in path.lower() and "server" in path.lower()
+    import ctypes
+    ctypes.CDLL(path)
 
 
 @pytest.mark.needs_lib
@@ -795,4 +806,7 @@ def test_can_locate_winpr_library_when_installed():
     path = find_winpr_library()
     if path is None:
         pytest.skip("WinPR not installed on this host")
-    assert os.path.isabs(path)
+    assert isinstance(path, str) and path
+    assert "winpr" in path.lower()
+    import ctypes
+    ctypes.CDLL(path)
