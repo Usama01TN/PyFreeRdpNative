@@ -2,13 +2,11 @@
 Shared WinPR library handle. Loaded lazily on first use.
 """
 
-import ctypes
 import threading
 
 from ..bindings import api as _api
 from ..errors import FreeRdpNotFoundError
 from ..loader import load_winpr
-
 
 _lib = None
 _lock = threading.Lock()

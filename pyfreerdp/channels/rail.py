@@ -15,7 +15,7 @@ types covering shell integration); this binding focuses on the subset
 useful for "I'm building a RemoteApp viewer in Python".
 """
 
-from .base import ChannelSpec, ChannelDirection
+from .base import ChannelDirection, ChannelSpec
 
 
 class RailChannel(ChannelSpec):

@@ -20,7 +20,7 @@ forward data into your stack:
   * GraphicsPipelineChannel.on_frame -> push frames into your renderer.
 """
 
-from .base import ChannelSpec, ChannelDirection
+from .base import ChannelDirection, ChannelSpec
 
 
 class AudioOutChannel(ChannelSpec):

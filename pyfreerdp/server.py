@@ -31,13 +31,11 @@ import time
 
 from .bindings import api as _api
 from .bindings import types as t
+from .channels.base import ChannelManager
 from .errors import FreeRdpNotFoundError, RdpError
 from .loader import load_freerdp_server
-from .peer import RdpPeer
 from .server_settings import RdpServerSettings
 from .settings import SecurityProtocol
-from .channels.base import ChannelManager
-
 
 # Module-global server library handle. Loaded lazily on first server creation.
 _lib = None

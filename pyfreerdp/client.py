@@ -26,14 +26,16 @@ import time
 
 from .bindings import api as _api
 from .bindings import types as t
+from .channels.base import ChannelManager
 from .errors import (
-    FreeRdpNotFoundError, RdpError, RdpConnectionError, raise_for_connect_code,
+    FreeRdpNotFoundError,
+    RdpConnectionError,
+    RdpError,
+    raise_for_connect_code,
 )
 from .loader import load_freerdp
 from .settings import RdpSettings, SecurityProtocol
 from .version import FREERDP_MIN_VERSION
-from .channels.base import ChannelManager
-
 
 # Module-global library handle. Loaded lazily on first client construction.
 _lib = None

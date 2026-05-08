@@ -30,11 +30,9 @@ from pyfreerdp import (
     RdpServerSettings,
     RdpSettings,
     SecurityProtocol,
-    GfxCodec,
     # Channels
     ChannelSpec,
     ChannelDirection,
-    ChannelOpenError,
     ClipboardChannel,
     ClipboardFormat,
     DriveRedirection,

@@ -23,10 +23,17 @@ Written in Py2-compatible syntax (no annotations).
 
 import ctypes
 from ctypes import (
-    POINTER, c_char_p, c_int, c_uint, c_uint8, c_uint16, c_uint32, c_uint64,
-    c_void_p, c_size_t, CFUNCTYPE,
+    CFUNCTYPE,
+    POINTER,
+    c_char_p,
+    c_int,
+    c_size_t,
+    c_uint8,
+    c_uint16,
+    c_uint32,
+    c_uint64,
+    c_void_p,
 )
-
 
 # --- WinPR / FreeRDP scalar typedefs ----------------------------------------
 BOOL = c_int          # WinPR BOOL is `int`, not bool. Mismatch here is a

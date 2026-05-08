@@ -20,7 +20,7 @@ A CustomChannel is by default a static channel; pass dynamic=True to
 register as a DVC instead.
 """
 
-from .base import ChannelSpec, ChannelClosedError
+from .base import ChannelClosedError, ChannelSpec
 
 
 class CustomChannel(ChannelSpec):

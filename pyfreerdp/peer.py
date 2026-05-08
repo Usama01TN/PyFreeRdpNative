@@ -14,11 +14,9 @@ examples/server_echo.py for the standard pattern.
 Written in Py2-compatible syntax.
 """
 
-import ctypes
 import threading
 import time
 
-from .bindings import types as t
 from .errors import RdpError
 
 

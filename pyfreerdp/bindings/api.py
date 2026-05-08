@@ -20,11 +20,9 @@ from the FreeRDP/WinPR header it lives in.
 Written in Py2-compatible syntax (no annotations, no f-strings).
 """
 
-import ctypes
 from ctypes import POINTER, c_char_p, c_int, c_uint8
 
 from . import types as t
-
 
 # ---------------------------------------------------------------------------
 # Shared bind helper

@@ -29,7 +29,6 @@ import ctypes.util
 import os
 import sys
 
-
 # Module-level state set by the loaders so users can introspect what got
 # loaded. Three roles, three slots.
 _LOADED_CLIENT_PATH = None

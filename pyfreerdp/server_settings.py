@@ -11,7 +11,6 @@ Written in Py2-compatible syntax: no dataclass, no annotations, no f-strings.
 
 from .settings import SecurityProtocol
 
-
 _VALID_COLOR_DEPTHS = (8, 15, 16, 24, 32)
 
 

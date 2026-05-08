@@ -29,7 +29,7 @@ via a thread-safe state object.
 
 import threading
 
-from .base import ChannelSpec, ChannelClosedError
+from .base import ChannelClosedError, ChannelSpec
 
 
 class ClipboardFormat(object):

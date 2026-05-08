@@ -27,7 +27,7 @@ plugin which talks to the local filesystem via standard POSIX/Win32 calls.
 
 import os
 
-from .base import ChannelSpec, ChannelOpenError
+from .base import ChannelSpec
 
 
 class DriveRedirection(object):

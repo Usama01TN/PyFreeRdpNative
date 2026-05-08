@@ -17,7 +17,7 @@ Style: Py2-compatible.
 
 import threading
 
-from ..errors import ChannelError, RdpError
+from ..errors import ChannelError
 
 
 class ChannelDirection(object):

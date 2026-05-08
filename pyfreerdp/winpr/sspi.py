@@ -29,7 +29,6 @@ rewrite CredSSP from Python, this isn't your library.
 
 import ctypes
 
-from ..bindings import types as t
 from ..errors import WinPRError
 
 
@@ -200,7 +199,9 @@ def parse_logon_identity(identity_void_p):
 
     Use this from inside your Logon callback:
 
-        @t.PEER_LOGON_FN
+        from pyfreerdp.bindings.types import PEER_LOGON_FN
+
+        @PEER_LOGON_FN
         def on_logon(peer, identity_p, automatic):
             identity = parse_logon_identity(identity_p)
             if identity and check_password(identity.username,

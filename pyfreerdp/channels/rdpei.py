@@ -14,7 +14,7 @@ that handles serialization. We register it and expose a Python helper to
 emit single-contact events.
 """
 
-from .base import ChannelSpec, ChannelDirection
+from .base import ChannelDirection, ChannelSpec
 
 
 class MultitouchChannel(ChannelSpec):
