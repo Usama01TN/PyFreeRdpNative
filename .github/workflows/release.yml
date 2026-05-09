@@ -1,0 +1,363 @@
+name: release
+
+# Two distinct triggers, each producing a different end state:
+#
+#   * push to main              -> build, test multi-platform, publish to TestPyPI
+#   * push of a v* tag          -> build, test multi-platform, publish to PyPI,
+#                                   create signed GitHub release with assets
+#
+# Manual `workflow_dispatch` is also available for testing the build path
+# without publishing anywhere.
+#
+# This is a PURE-PYTHON wheel (py3-none-any). FreeRDP is NOT bundled - users
+# install libfreerdp-client3 from their package manager. The multi-platform
+# matrix is for testing that the platform-specific loader logic works against
+# real apt/brew/vcpkg-installed FreeRDP, not for producing different wheels.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish_target:
+        description: "Where to publish (none / testpypi / pypi)"
+        required: true
+        default: "none"
+        type: choice
+        options: [none, testpypi, pypi]
+
+# Cancel previous runs of this workflow on the same ref - saves CI minutes
+# when you push twice in quick succession.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build the universal wheel + sdist. One wheel covers every platform because
+  # this is a ctypes binding, not a C extension.
+  # ---------------------------------------------------------------------------
+  build:
+    name: build wheel + sdist
+    runs-on: ubuntu-latest
+    outputs:
+      wheel_filename: ${{ steps.identify.outputs.wheel }}
+      sdist_filename: ${{ steps.identify.outputs.sdist }}
+      version: ${{ steps.identify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full history so setuptools_scm-style fallbacks work if we
+          # ever switch to dynamic versioning. Cheap on a small repo.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Verify version matches tag (if tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          # Tag is refs/tags/v0.2.0 -> strip to 0.2.0.
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          PKG_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag version $TAG_VERSION does not match pyproject.toml version $PKG_VERSION"
+            echo "Bump pyproject.toml's [project].version before tagging."
+            exit 1
+          fi
+          echo "Version match confirmed: $PKG_VERSION"
+
+      - name: Build wheel + sdist
+        run: |
+          python -m build --wheel --sdist --outdir dist/
+
+      - name: Identify produced artifacts
+        id: identify
+        run: |
+          wheel=$(ls dist/*.whl | head -1)
+          sdist=$(ls dist/*.tar.gz | head -1)
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "wheel=$(basename $wheel)" >> "$GITHUB_OUTPUT"
+          echo "sdist=$(basename $sdist)" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Built wheel: $wheel"
+          echo "Built sdist: $sdist"
+
+      - name: Validate metadata
+        run: |
+          # twine's `check` catches the most common metadata issues:
+          # - README rendering errors
+          # - missing license / classifiers
+          # - long_description that PyPI will reject
+          twine check dist/*
+
+      - name: Verify wheel is platform-universal
+        run: |
+          # Sanity check: this should be py3-none-any.whl. If somebody
+          # accidentally adds a C extension and produces a platform-tagged
+          # wheel, fail loudly so we don't accidentally ship a Linux-only
+          # wheel as the universal release.
+          wheel_name=$(basename dist/*.whl)
+          case "$wheel_name" in
+            *-py3-none-any.whl)
+              echo "OK: wheel is universal ($wheel_name)"
+              ;;
+            *)
+              echo "::error::Wheel is platform-tagged: $wheel_name"
+              echo "This package should produce py3-none-any wheels."
+              echo "If you genuinely added a C extension, update this check."
+              exit 1
+              ;;
+          esac
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Multi-platform test matrix: install the freshly built wheel against real
+  # FreeRDP on each supported OS + Python combo. This catches loader bugs that
+  # don't show up in the source-tree CI run (e.g. wheel didn't include a
+  # required file, sys.path differences, etc.).
+  # ---------------------------------------------------------------------------
+  test-wheel:
+    name: test wheel (${{ matrix.os }} / py${{ matrix.python-version }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux x86_64 (most common), Linux aarch64 (ARM servers, AWS Graviton),
+        # macOS arm64 (Apple Silicon), Windows x86_64.
+        # We skip x86_64 macOS (Apple Silicon transition is done) and musllinux
+        # (smaller user base, harder to test FreeRDP install on Alpine).
+        include:
+          - os: ubuntu-latest
+            python-version: "3.11"
+            arch: x86_64
+          - os: ubuntu-latest
+            python-version: "3.12"
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            python-version: "3.12"
+            arch: aarch64
+          - os: macos-14
+            python-version: "3.12"
+            arch: arm64
+          - os: windows-latest
+            python-version: "3.12"
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Install FreeRDP (Linux apt)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libfreerdp-client3-3 \
+            libfreerdp-server3-3 \
+            libfreerdp3-3 \
+            libwinpr3-3 || \
+          sudo apt-get install -y \
+            libfreerdp-client2-2 libfreerdp2-2 libwinpr2-2
+          # The fallback to libfreerdp2 lets older runners (Ubuntu 22.04)
+          # at least exercise the loader path. Tests that need 3.x APIs
+          # will skip themselves via the version check.
+
+      - name: Install FreeRDP (macOS brew)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew update
+          brew install freerdp || true
+          # `|| true` because brew sometimes exits 1 on "already installed"
+          # in cached runners. We verify the install worked below.
+          brew --prefix freerdp
+
+      - name: Install FreeRDP (Windows vcpkg)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # vcpkg ships pre-installed on GitHub-hosted Windows runners but
+          # may not have FreeRDP cached. Install with binary caching from
+          # the GitHub Actions cache so subsequent runs are fast.
+          $env:VCPKG_BINARY_SOURCES = "clear;x-gha,readwrite"
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install freerdp:x64-windows
+          # Add the DLL directory to PATH so ctypes can find libfreerdp-client3.dll.
+          $dll_dir = "$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin"
+          echo "$dll_dir" | Out-File -FilePath $env:GITHUB_PATH -Append
+          echo "PYFREERDP_CLIENT_LIBRARY=$dll_dir\freerdp-client3.dll" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install pyfreerdp from the built wheel
+        shell: bash
+        run: |
+          # Install from the wheel artifact, NOT from the source tree.
+          # This is the whole point of this job - we want to confirm the
+          # wheel itself is functional, not just `pip install -e .`.
+          python -m pip install --upgrade pip
+          pip install dist/*.whl
+          pip install pytest pytest-cov
+
+      - name: Smoke test - import + version
+        shell: bash
+        run: |
+          python -c "
+          import pyfreerdp
+          print('pyfreerdp version:', pyfreerdp.__version__)
+          print('exports:', len(pyfreerdp.__all__))
+          assert pyfreerdp.__version__, 'version is empty'
+          assert len(pyfreerdp.__all__) > 40, 'public API surface unexpectedly small'
+          "
+
+      - name: Run tests against installed wheel
+        shell: bash
+        run: |
+          # Run from a directory that has NO pyfreerdp/ source tree, so
+          # we're 100% testing the wheel's installed copy.
+          mkdir -p /tmp/wheel-test
+          cp -r tests /tmp/wheel-test/
+          cp pyproject.toml /tmp/wheel-test/
+          cd /tmp/wheel-test
+          # The needs_lib tests should now PASS since FreeRDP is installed.
+          pytest tests/ -v
+
+      - name: Confirm loader found the system FreeRDP
+        shell: bash
+        run: |
+          python -c "
+          import pyfreerdp
+          c = pyfreerdp.find_freerdp_library()
+          s = pyfreerdp.find_freerdp_server_library()
+          w = pyfreerdp.find_winpr_library()
+          print('client:', c)
+          print('server:', s)
+          print('winpr: ', w)
+          # Client library is the must-have. Server + winpr are nice-to-have
+          # depending on what the package manager bundled.
+          assert c, 'pyfreerdp could not locate libfreerdp-client3 - loader regression?'
+          "
+
+  # ---------------------------------------------------------------------------
+  # Publish to TestPyPI on push to main. Trusted publishing (OIDC) so we don't
+  # have to manage tokens.
+  # ---------------------------------------------------------------------------
+  publish-testpypi:
+    name: publish to TestPyPI
+    needs: [build, test-wheel]
+    if: |
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/pyfreerdp
+    permissions:
+      id-token: write   # required for OIDC trusted publishing
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          # skip-existing because every push to main reuses the same
+          # version number until we tag - TestPyPI would otherwise reject
+          # duplicate uploads. This is the documented workaround.
+          skip-existing: true
+
+  # ---------------------------------------------------------------------------
+  # Publish to real PyPI on tag push (or manual dispatch with publish_target=pypi).
+  # Trusted publishing (OIDC).
+  # ---------------------------------------------------------------------------
+  publish-pypi:
+    name: publish to PyPI
+    needs: [build, test-wheel]
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_target == 'pypi')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pyfreerdp
+    permissions:
+      id-token: write
+      attestations: write   # for SLSA build provenance
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      # Generate Sigstore signatures + SLSA build provenance attestations
+      # before publishing. PyPI now displays these on the project page and
+      # consumers can verify them with `slsa-verifier` or PEP 740 tooling.
+      - name: Generate SLSA build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "dist/*"
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        # Trusted publisher must be configured at:
+        #   https://pypi.org/manage/project/pyfreerdp/settings/publishing/
+        # with: workflow=release.yml, environment=pypi.
+
+  # ---------------------------------------------------------------------------
+  # Cut a GitHub release with attached wheel + sdist + signatures on tag push.
+  # ---------------------------------------------------------------------------
+  github-release:
+    name: GitHub release
+    needs: [build, test-wheel, publish-pypi]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Sign artifacts with Sigstore
+        uses: sigstore/gh-action-sigstore-python@v3.0.0
+        with:
+          inputs: |
+            ./dist/*.whl
+            ./dist/*.tar.gz
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" \
+            --title "$tag" \
+            --generate-notes \
+            --verify-tag \
+            ./dist/*
