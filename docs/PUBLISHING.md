@@ -52,7 +52,7 @@ Edit `pyproject.toml` and replace the placeholder `github.com/example/pyfreerdp`
 
 2. **Update changelog / docs** as needed.
 
-3. **Commit and push to main.** The `release` workflow runs the multi-platform test matrix and publishes to TestPyPI. Confirm `pip install -i https://test.pypi.org/simple/ pyfreerdp==X.Y.Z` works in a clean venv.
+3. **Commit and push to main.** The `release` workflow runs the multi-platform test matrix and publishes to TestPyPI. It also creates/overwrites a rolling pre-release at https://github.com/`<owner>`/`<repo>`/releases/tag/main-latest. Confirm `pip install -i https://test.pypi.org/simple/ pyfreerdp==X.Y.Z` works in a clean venv.
 
 4. **Tag and push:**
 
@@ -67,6 +67,24 @@ Edit `pyproject.toml` and replace the placeholder `github.com/example/pyfreerdp`
    - Generates SLSA build provenance attestations (visible on the PyPI project page)
    - Signs the wheel + sdist with Sigstore
    - Cuts a GitHub release with the artifacts attached and signatures
+
+## Rolling pre-release for sharing dev builds
+
+Every push to `main` creates or overwrites a `main-latest` GitHub Release with the freshly built wheel and sdist attached. This gives you a stable URL you can share with people who want to try the current development build without waiting for a tag:
+
+```bash
+pip install --force-reinstall \
+    https://github.com/<owner>/<repo>/releases/download/main-latest/pyfreerdp-0.2.0-py3-none-any.whl
+```
+
+The release is marked as a prerelease so the repo homepage's "Latest release" badge keeps pointing at the most recent `v*` tag, not at this rolling build.
+
+A few things to know about rolling builds:
+
+- **The version number is the same as what's in `pyproject.toml`.** If you've bumped to `0.3.0` in main but haven't tagged yet, the rolling build will be `pyfreerdp-0.3.0-py3-none-any.whl`. That can collide with future installs — `--force-reinstall` is your friend.
+- **No Sigstore signatures or SLSA attestations.** Those are reserved for tagged releases. Rolling builds are convenience-grade, not security-grade.
+- **The previous `main-latest` is deleted on each new push.** If you need a permanent record of a specific build, grab it from the workflow run's artifacts before the next push, or just `git checkout` that commit and run the build locally.
+- **`workflow_dispatch` runs use a stamped dev version** (e.g. `0.2.0.dev123+abc1234`) so multiple manual builds don't collide. Push-to-main builds use the bare `pyproject.toml` version because they only land on TestPyPI (which uses `skip-existing`) and the rolling release (which is overwritten).
 
 ## Troubleshooting
 
