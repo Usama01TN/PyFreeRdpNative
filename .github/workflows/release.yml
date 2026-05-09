@@ -77,6 +77,55 @@ jobs:
           fi
           echo "Version match confirmed: $PKG_VERSION"
 
+      - name: Stamp dev version (workflow_dispatch only)
+        # When you run this workflow manually multiple times in one day,
+        # we want each build's wheel to have a unique version so they
+        # don't collide if someone pip-installs both. Format:
+        #     0.2.0.dev<run_number>+<short_sha>
+        # PEP 440 sorts dev releases below the base, and the +sha is a
+        # local version label that PyPI rejects on upload. That's fine —
+        # workflow_dispatch builds aren't supposed to land on PyPI.
+        #
+        # We deliberately DON'T stamp on push-to-main: those builds go to
+        # TestPyPI (which also rejects local labels) and to the rolling
+        # GitHub Release. Both work fine with the plain 0.2.0 version
+        # because TestPyPI uses skip-existing and the rolling release
+        # is overwritten each push.
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          BASE_VERSION=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          DEV_VERSION="${BASE_VERSION}.dev${GITHUB_RUN_NUMBER}+$(echo $GITHUB_SHA | cut -c1-7)"
+          echo "Stamping dev version: $DEV_VERSION"
+          python <<EOF
+          import re, pathlib
+          # 1. Patch pyproject.toml -- this is what setuptools reads to
+          #    set the wheel filename and dist-info metadata.
+          p = pathlib.Path("pyproject.toml")
+          src = p.read_text()
+          new = re.sub(
+              r'(?m)^(version\s*=\s*)"[^"]+"',
+              r'\1"${DEV_VERSION}"',
+              src,
+              count=1,
+          )
+          assert new != src, "Failed to find version line in pyproject.toml"
+          p.write_text(new)
+
+          # 2. Patch pyfreerdp/version.py so pyfreerdp.__version__ matches.
+          v = pathlib.Path("pyfreerdp/version.py")
+          src = v.read_text()
+          new = re.sub(
+              r'(?m)^(__version__\s*=\s*)"[^"]+"',
+              r'\1"${DEV_VERSION}"',
+              src,
+              count=1,
+          )
+          assert new != src, "Failed to find __version__ line in version.py"
+          v.write_text(new)
+          EOF
+          grep '^version' pyproject.toml
+          grep '^__version__' pyfreerdp/version.py
+
       - name: Build wheel + sdist
         run: |
           python -m build --wheel --sdist --outdir dist/
@@ -272,7 +321,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: testpypi
-      url: https://test.pypi.org/p/pyfreerdp
+      url: https://test.pypi.org/p/PyFreeRdpNative
     permissions:
       id-token: write   # required for OIDC trusted publishing
     steps:
@@ -289,6 +338,111 @@ jobs:
           skip-existing: true
 
   # ---------------------------------------------------------------------------
+  # Rolling pre-release on every push to main. Overwrites a single
+  # `main-latest` tag and release each time, so there's always exactly one
+  # public download URL for "the current dev build":
+  #
+  #   https://github.com/<owner>/<repo>/releases/tag/main-latest
+  #
+  # Marked as a prerelease so it doesn't show as the project's "Latest"
+  # on the repo homepage (the most recent v* tag retains that slot).
+  # ---------------------------------------------------------------------------
+  rolling-release:
+    name: rolling pre-release (main-latest)
+    needs: [build, test-wheel]
+    if: |
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to delete + recreate the tag and release
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Delete previous main-latest release and tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Delete the GitHub release if it exists. `|| true` because the
+          # very first run won't have one to delete.
+          gh release delete main-latest --cleanup-tag --yes 2>/dev/null || true
+          # Belt-and-braces: also delete the tag directly in case the
+          # release was already gone but the tag lingered.
+          git push origin --delete main-latest 2>/dev/null || true
+          # Note: `--cleanup-tag` above usually handles this, but if a
+          # previous run was interrupted between release creation and
+          # tag-cleanup, we'd be left with an orphan tag.
+
+      - name: Create rolling pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Capture the metadata we'll embed in the release body.
+          BUILD_SHA: ${{ github.sha }}
+          BUILD_RUN: ${{ github.run_number }}
+        run: |
+          # Build a release body that's actually useful: link back to
+          # the workflow run, show install instructions, list what's in
+          # main since the last v* tag.
+          last_tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "")
+          if [ -n "$last_tag" ]; then
+            commit_log=$(git log --oneline "${last_tag}..HEAD" 2>/dev/null | head -30)
+          else
+            commit_log=$(git log --oneline -n 30)
+          fi
+          short_sha=$(echo "$BUILD_SHA" | cut -c1-7)
+
+          cat > /tmp/release_body.md <<MARKDOWN
+          ## Rolling development build
+
+          This is an **automatic pre-release** built from the latest commit on \`main\`.
+          It's overwritten on every push to main, so the URL is stable but the contents change.
+
+          - **Commit:** [\`$short_sha\`](https://github.com/$GITHUB_REPOSITORY/commit/$BUILD_SHA)
+          - **Build:** [#$BUILD_RUN](https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
+          - **Built at:** $(date -u +"%Y-%m-%d %H:%M UTC")
+
+          ### Install
+
+          \`\`\`bash
+          # Latest dev build (this release):
+          pip install --force-reinstall \\
+              https://github.com/$GITHUB_REPOSITORY/releases/download/main-latest/$(ls dist/*.whl | xargs basename)
+
+          # Or grab the sdist:
+          pip install --force-reinstall \\
+              https://github.com/$GITHUB_REPOSITORY/releases/download/main-latest/$(ls dist/*.tar.gz | xargs basename)
+          \`\`\`
+
+          You'll need libfreerdp installed separately - see the [README](https://github.com/$GITHUB_REPOSITORY#installation) for platform commands.
+
+          ### Caveats
+
+          - **Not on PyPI.** Use the URL above. Real releases land on PyPI when a \`v*\` tag is pushed.
+          - **No backwards-compat guarantees.** This is unreleased code; APIs may change before the next tagged release.
+          - **No signatures.** Tagged releases get Sigstore signatures and SLSA provenance; rolling builds don't.
+
+          ### Recent commits since last release
+
+          $(if [ -n "$last_tag" ]; then echo "Since [$last_tag](https://github.com/$GITHUB_REPOSITORY/releases/tag/$last_tag):"; else echo "All commits (no tagged release yet):"; fi)
+
+          \`\`\`
+          $commit_log
+          \`\`\`
+          MARKDOWN
+
+          gh release create main-latest \
+            --title "main-latest (rolling dev build)" \
+            --notes-file /tmp/release_body.md \
+            --prerelease \
+            --target "$BUILD_SHA" \
+            ./dist/*
+
+  # ---------------------------------------------------------------------------
   # Publish to real PyPI on tag push (or manual dispatch with publish_target=pypi).
   # Trusted publishing (OIDC).
   # ---------------------------------------------------------------------------
@@ -301,7 +455,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: pypi
-      url: https://pypi.org/p/pyfreerdp
+      url: https://pypi.org/p/PyFreeRdpNative
     permissions:
       id-token: write
       attestations: write   # for SLSA build provenance
@@ -322,7 +476,7 @@ jobs:
 
       - uses: pypa/gh-action-pypi-publish@release/v1
         # Trusted publisher must be configured at:
-        #   https://pypi.org/manage/project/pyfreerdp/settings/publishing/
+        #   https://pypi.org/manage/project/PyFreeRdpNative/settings/publishing/
         # with: workflow=release.yml, environment=pypi.
 
   # ---------------------------------------------------------------------------
