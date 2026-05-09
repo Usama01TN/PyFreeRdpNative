@@ -259,5 +259,6 @@ Apache-2.0. FreeRDP itself is Apache-2.0 with some optional components under dif
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — design rationale, lifecycle diagrams, server callback model
 - [docs/CHANNELS.md](docs/CHANNELS.md) — virtual channel reference, wire-protocol expectations
 - [docs/MOBILE.md](docs/MOBILE.md) — Android + iOS specifics, Chaquopy/BeeWare integration
+- [docs/PUBLISHING.md](docs/PUBLISHING.md) — wheel build + PyPI release workflow setup
 - [FreeRDP project](https://github.com/FreeRDP/FreeRDP)
 - FreeRDP API headers — [`include/freerdp/peer.h`](https://github.com/FreeRDP/FreeRDP/blob/master/include/freerdp/peer.h), [`include/freerdp/listener.h`](https://github.com/FreeRDP/FreeRDP/blob/master/include/freerdp/listener.h), [`include/freerdp/freerdp.h`](https://github.com/FreeRDP/FreeRDP/blob/master/include/freerdp/freerdp.h)
