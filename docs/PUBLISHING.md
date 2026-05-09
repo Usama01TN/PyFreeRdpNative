@@ -25,9 +25,9 @@ Go to https://pypi.org/manage/account/publishing/ and add a "pending publisher" 
 
 | Field | Value |
 |---|---|
-| PyPI Project Name | `pyfreerdp` |
+| PyPI Project Name | `PyFreeRdpNative` |
 | Owner | *your-github-username-or-org* |
-| Repository name | `pyfreerdp` (or whatever your repo is named) |
+| Repository name | `PyFreeRdpNative` (or whatever your repo is named) |
 | Workflow name | `release.yml` |
 | Environment name | `pypi` |
 
