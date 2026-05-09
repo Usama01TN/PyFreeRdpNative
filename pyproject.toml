@@ -92,3 +92,90 @@ markers = [
     "integration: requires a live RDP server (skipped by default)",
     "needs_lib: requires libfreerdp installed on the host",
 ]
+
+# ---------------------------------------------------------------------------
+# cibuildwheel — bundled wheel builder configuration
+# ---------------------------------------------------------------------------
+# When .github/workflows/wheels.yml runs `cibuildwheel`, this section
+# controls what gets built. The default `python -m build` (used by
+# release.yml) ignores this section entirely and produces the universal
+# `py3-none-any` wheel.
+#
+# Reference: https://cibuildwheel.pypa.io/en/stable/options/
+
+[tool.cibuildwheel]
+# Build for CPython 3.8 through 3.13. PyPy intentionally excluded -
+# the binding works on it but adds matrix complexity for ~3% of users.
+build = "cp38-* cp39-* cp310-* cp311-* cp312-* cp313-*"
+# Skip 32-bit and PowerPC. PyPI download stats agree these are sub-1%.
+skip = "*-win32 *-manylinux_i686 *_ppc64le *_s390x *-musllinux_aarch64"
+
+# Force the bundled-wheel build path. This switches setup.py into
+# Extension mode, producing platform-tagged wheels.
+environment = { PYFREERDP_BUILD_BUNDLED = "1" }
+
+# Build deps come pre-installed via CIBW_BEFORE_ALL (FreeRDP itself).
+# At per-Python build time we just need the standard wheel toolchain.
+build-frontend = "build"
+
+# After each wheel is built, install it into a fresh venv and run our
+# tests. This catches "the wheel imports but the bundled libs don't
+# load" regressions, which auditwheel/delocate alone can't catch.
+test-requires = "pytest"
+test-command = "pytest {project}/tests -v -m 'not integration'"
+
+# --- Linux-specific overrides ----------------------------------------------
+
+[tool.cibuildwheel.linux]
+# manylinux_2_28 = RHEL 8 base. Compatible with anything from
+# Ubuntu 18.04 / Debian 10 / RHEL 8 onward (covering ~all live distros).
+# musllinux_1_2 = Alpine 3.19+ base.
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+musllinux-x86_64-image = "musllinux_1_2"
+
+# CIBW_BEFORE_ALL runs once per architecture (BEFORE the per-Python build
+# loop). It installs build deps and compiles FreeRDP into pyfreerdp/_libs/.
+before-all = "bash {project}/.github/cibw-scripts/before_all_linux.sh {project}"
+
+# auditwheel rewrites the wheel after building to bundle libfreerdp +
+# its transitive deps. The `--wheel-dir` rewrite is implicit; we just
+# need to make sure auditwheel can find the libs we built.
+repair-wheel-command = """\
+    LD_LIBRARY_PATH=/tmp/freerdp-prefix/lib:/tmp/freerdp-prefix/lib64:$LD_LIBRARY_PATH \
+    auditwheel repair -w {dest_dir} {wheel}\
+"""
+
+# Pass GITHUB_TOKEN through to the container so get_freerdp_version.sh
+# isn't rate-limited by GitHub's API.
+environment-pass = ["GITHUB_TOKEN", "PYFREERDP_FREERDP_REF"]
+
+# --- macOS-specific overrides ---------------------------------------------
+
+[tool.cibuildwheel.macos]
+before-all = "bash {project}/.github/cibw-scripts/before_all_macos.sh {project}"
+
+# delocate scans the wheel for dyld-loaded dylibs and copies them in,
+# rewriting install_names to use @loader_path so the bundle is portable.
+repair-wheel-command = """\
+    DYLD_LIBRARY_PATH=/tmp/freerdp-prefix/lib:$DYLD_LIBRARY_PATH \
+    delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}\
+"""
+
+# Apple's BSDish APIs are stable from macOS 11; targeting older is a
+# pain (no <stdatomic.h> idioms FreeRDP uses since 3.0).
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0", PYFREERDP_BUILD_BUNDLED = "1" }
+
+# --- Windows-specific overrides -------------------------------------------
+
+[tool.cibuildwheel.windows]
+before-all = "pwsh {project}/.github/cibw-scripts/before_all_windows.ps1 {project}"
+
+# delvewheel is the Windows equivalent of auditwheel/delocate. It bundles
+# DLLs the wheel's pyd depends on (FreeRDP DLLs + vcpkg-built OpenSSL,
+# zlib, libpng, libjpeg-turbo) into a private subdir, rewrites the pyd's
+# import table to load them from there.
+before-build = "pip install delvewheel"
+repair-wheel-command = """\
+    delvewheel repair --add-path %FREERDP_BIN_DIR%;%VCPKG_BIN_DIR% -w {dest_dir} {wheel}\
+"""

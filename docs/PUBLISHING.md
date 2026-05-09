@@ -103,12 +103,50 @@ Homebrew installed FreeRDP to a non-standard prefix. Set `PYFREERDP_CLIENT_LIBRA
 **Trusted publisher OIDC fails with "no pending publisher matches"**
 The configuration on PyPI doesn't match the workflow exactly — workflow filename, environment name, and repository name all must match character-for-character. Check the values again at https://pypi.org/manage/account/publishing/.
 
-## Why no bundled wheels?
+## Bundled wheels
 
-Bundling FreeRDP into the wheel (so `pip install pyfreerdp` Just Works without `apt install libfreerdp-client3`) is technically possible with `cibuildwheel` + `auditwheel`/`delocate`/`delvewheel`. We deliberately don't, because:
+Alongside the universal `py3-none-any` wheel, PyPI also receives platform-tagged **bundled wheels** that ship `libfreerdp` and its transitive dependencies inside the wheel itself. Users on common platforms get a working install with no `apt install` step:
 
-- FreeRDP has many C dependencies (OpenSSL, zlib, X11/Wayland on Linux). Bundling them safely is a real ongoing maintenance burden.
-- Distros already ship FreeRDP with security updates. A bundled wheel ships whatever version we last rebuilt, creating a parallel security update path that's worse than the distro one.
-- iOS distribution (App Store) requires static linking, which bundled wheels don't help with anyway.
+```bash
+# On Linux x86_64, macOS arm64, Windows x64, etc:
+pip install PyFreeRdpNative
+# pip automatically picks the bundled platform-tagged wheel.
 
-If you want a turnkey single-pip-install workflow for users who don't have FreeRDP, the right path is `PYFREERDP_BUILD_FREERDP=1 pip install pyfreerdp` which triggers `scripts/build_freerdp.py` at install time. That's documented in the README.
+# On unusual platforms (FreeBSD, Linux ppc64le, ...):
+pip install PyFreeRdpNative
+# pip falls back to the universal wheel; install FreeRDP via your
+# package manager.
+```
+
+The `.github/workflows/wheels.yml` workflow handles bundled wheels:
+
+| Trigger | Action |
+|---|---|
+| Push of `v*` tag | Build all 6 platforms, publish to PyPI |
+| Weekly cron (Monday 03:17 UTC) | Build all 6 platforms against latest stable FreeRDP, publish to TestPyPI as `0.2.0.dev<YYYYWW>` |
+| `workflow_dispatch` | Manual run, choose where (if anywhere) to publish |
+
+The cron rebuild keeps bundled wheels fresh against OpenSSL CVEs and other dep updates. If a cron run fails, the workflow opens a `cron-failure`-labeled issue automatically.
+
+### Detecting which wheel is installed
+
+```python
+import pyfreerdp
+try:
+    from pyfreerdp import _native
+    print("Bundled wheel, FreeRDP", _native.FREERDP_VERSION)
+except ImportError:
+    print("Universal wheel; using system-installed FreeRDP")
+```
+
+### Maintenance burden
+
+Bundled wheels mean **you take on responsibility for FreeRDP's security updates**. When OpenSSL ships a CVE (every 2-3 months), every bundled wheel on PyPI contains the old, vulnerable libssl until you publish a new release. The weekly cron handles this *automatically* by rebuilding against the latest stable underlying images, but if the cron breaks and you don't notice, users can be running stale OpenSSL for weeks.
+
+Mitigations already in place:
+- Weekly cron auto-bumps the FreeRDP version and rebuilds against the latest manylinux/musllinux/macOS images
+- Failed cron runs open a GitHub issue
+- Bundled wheels publish to **TestPyPI** on cron, not real PyPI - users opt into the dev rebuilds explicitly
+- Tagged releases publish to real PyPI; you have to actively cut a release to push a new bundled wheel to the masses
+
+If you're not prepared to monitor the cron and cut frequent releases, drop the cron schedule from `wheels.yml` and only build bundled wheels on tag pushes. Users will be on stale OpenSSL between releases — make that a release-frequency commitment.
