@@ -1,0 +1,340 @@
+name: wheels
+
+# Build platform-tagged BUNDLED wheels - libfreerdp + transitive deps
+# baked into each wheel so users can `pip install` without first
+# installing FreeRDP via apt/brew/vcpkg. This is the heavy/slow path;
+# the universal py3-none-any wheel built by release.yml remains the
+# default "system FreeRDP" install path.
+#
+# Triggers:
+#   * push of a v* tag         -> publish to PyPI alongside release.yml's wheel
+#   * weekly cron (Monday 3am) -> rebuild against latest FreeRDP, push to TestPyPI
+#   * workflow_dispatch        -> manual run for debugging
+#   * called from release.yml  -> tag pushes wait for these wheels before publishing
+#
+# Build time: ~30-45 min wall clock with parallel matrix; Linux aarch64
+# is usually the slowest leg.
+
+on:
+  push:
+    tags: ["v*"]
+  schedule:
+    # Mondays 03:17 UTC. Off-the-hour to avoid the cron stampede.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      freerdp_ref:
+        description: "FreeRDP version to build (default: latest stable)"
+        required: false
+        default: ""
+      publish_target:
+        description: "Where to publish: none / testpypi / pypi"
+        required: true
+        default: "none"
+        type: choice
+        options: [none, testpypi, pypi]
+  workflow_call:
+    inputs:
+      publish_target:
+        type: string
+        required: false
+        default: "none"
+    outputs:
+      artifact_name:
+        description: "Name of the artifact containing all built wheels"
+        value: ${{ jobs.collect.outputs.artifact_name }}
+
+concurrency:
+  group: wheels-${{ github.ref }}
+  cancel-in-progress: false   # wheels are slow; don't cancel mid-build
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # The build matrix. Each cell produces one or more wheels for the (os, arch)
+  # pair. cibuildwheel handles the per-Python-version inner loop.
+  # ---------------------------------------------------------------------------
+  build-wheels:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64-manylinux
+            runner: ubuntu-latest
+            archs: "x86_64"
+            build_filter: "*manylinux*"
+
+          - label: linux-x86_64-musllinux
+            runner: ubuntu-latest
+            archs: "x86_64"
+            build_filter: "*musllinux*"
+
+          - label: linux-aarch64-manylinux
+            # ubuntu-24.04-arm is a free Linux ARM runner (since late 2024).
+            # Native build, no QEMU emulation - much faster than x86_64
+            # runners with QEMU.
+            runner: ubuntu-24.04-arm
+            archs: "aarch64"
+            build_filter: "*manylinux*"
+
+          - label: macos-x86_64
+            # macos-13 is the last Intel runner GitHub provides. macos-14
+            # and newer are arm64 only.
+            runner: macos-13
+            archs: "x86_64"
+            build_filter: "*"
+
+          - label: macos-arm64
+            runner: macos-14
+            archs: "arm64"
+            build_filter: "*"
+
+          - label: windows-x64
+            runner: windows-latest
+            archs: "AMD64"
+            build_filter: "*"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve FreeRDP version
+        id: freerdp
+        shell: bash
+        run: |
+          # Honor manual override from workflow_dispatch input first.
+          if [ -n "${{ inputs.freerdp_ref || '' }}" ]; then
+            ver="${{ inputs.freerdp_ref }}"
+            echo "Using manually specified version: $ver"
+          else
+            ver=$(bash .github/cibw-scripts/get_freerdp_version.sh)
+            echo "Resolved latest FreeRDP: $ver"
+          fi
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run cibuildwheel
+        uses: pypa/cibuildwheel@v2.21
+        env:
+          # Restrict the per-cell matrix to one architecture / image-class
+          # so the parallel jobs don't trample each other's wheelhouse.
+          CIBW_ARCHS: ${{ matrix.archs }}
+          CIBW_BUILD: ${{ matrix.build_filter }}
+          # Pin the FreeRDP version uniformly across the matrix. Without
+          # this, each cell could resolve a different "latest" if a new
+          # FreeRDP release shipped during the build window.
+          PYFREERDP_FREERDP_REF: ${{ steps.freerdp.outputs.version }}
+          # Pass GITHUB_TOKEN to the container for non-rate-limited API
+          # access. CIBW_ENVIRONMENT_PASS_LINUX is the official mechanism;
+          # macOS / Windows scripts read GITHUB_TOKEN directly from env.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Inspect built wheels
+        shell: bash
+        run: |
+          ls -la wheelhouse/
+          # Use `python -m zipfile` to peek at one wheel's metadata,
+          # confirming the bundled libs landed in there.
+          for w in wheelhouse/*.whl; do
+            echo "=== $w ==="
+            python -c "
+            import zipfile
+            with zipfile.ZipFile('$w') as z:
+                names = z.namelist()
+                libs = [n for n in names if '_libs' in n or '.libs' in n or '.dylibs' in n]
+                print('  bundled lib files:', len(libs))
+                for n in libs[:10]:
+                    info = z.getinfo(n)
+                    print('   ', n, '({} bytes)'.format(info.file_size))
+            "
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.label }}
+          path: wheelhouse/*.whl
+          retention-days: 14
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Collect all per-cell wheels into a single artifact for downstream
+  # publishing. Saves the publish job from having to know about the matrix.
+  # ---------------------------------------------------------------------------
+  collect:
+    name: collect wheels
+    needs: build-wheels
+    runs-on: ubuntu-latest
+    outputs:
+      artifact_name: bundled-wheels
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist/
+
+      - name: Summarize collected wheels
+        run: |
+          echo "Total wheels collected: $(ls dist/*.whl | wc -l)"
+          ls -lh dist/
+
+      - name: Verify expected platform tags are present
+        run: |
+          # Sanity-check that we got at least one wheel per architecture.
+          # Detect missing legs (e.g. silent macOS arm64 failure that
+          # didn't fail the matrix because of fail-fast: false).
+          missing=()
+          for tag in manylinux musllinux macosx_x86_64 macosx_arm64 win_amd64; do
+            if ! ls dist/*${tag}*.whl >/dev/null 2>&1; then
+              missing+=("$tag")
+            fi
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::warning::Missing platform tags: ${missing[*]}"
+            echo "If this is intentional, edit the matrix in wheels.yml."
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundled-wheels
+          path: dist/*.whl
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Publish bundled wheels to PyPI on tag push or manual dispatch with
+  # publish_target=pypi. They go up alongside the universal wheel built by
+  # release.yml, so PyPI's project page shows BOTH the py3-none-any wheel
+  # AND the platform-tagged bundled wheels. pip prefers platform-tagged
+  # wheels by default - so users on Linux x86_64 get the bundled wheel,
+  # and users on weird archs (FreeBSD, etc.) fall back to the universal
+  # one and install FreeRDP via their package manager.
+  # ---------------------------------------------------------------------------
+  publish-pypi:
+    name: publish bundled wheels to PyPI
+    needs: collect
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_target == 'pypi') ||
+      (github.event_name == 'workflow_call' && inputs.publish_target == 'pypi')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/PyFreeRdpNative
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundled-wheels
+          path: dist/
+
+      - name: Generate SLSA build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "dist/*.whl"
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Bundled wheels go up to the same project as the universal
+          # wheel. PyPI uses the platform tag to disambiguate; pip on
+          # Linux x86_64 picks the manylinux wheel, pip on macOS arm64
+          # picks the macosx_arm64 wheel, etc.
+          # `skip-existing: false` because each tag push ships unique
+          # files (different version numbers).
+          skip-existing: false
+
+  # ---------------------------------------------------------------------------
+  # Publish bundled wheels to TestPyPI on weekly cron + workflow_dispatch.
+  # The cron rebuild's purpose is to keep wheels fresh against OpenSSL
+  # CVEs and FreeRDP releases - we publish to TestPyPI rather than PyPI
+  # so consumers don't get a new "release" every Monday morning, but the
+  # wheel is available to pull manually for testing.
+  # ---------------------------------------------------------------------------
+  publish-testpypi:
+    name: publish bundled wheels to TestPyPI
+    needs: collect
+    if: |
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_target == 'testpypi')
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/PyFreeRdpNative
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: bundled-wheels
+          path: dist/
+
+      # Stamp a dev version so weekly rebuilds don't collide. PEP 440
+      # post-release marker derived from date + run number.
+      - name: Stamp weekly dev version
+        if: github.event_name == 'schedule'
+        run: |
+          # Read the version that's baked into the wheel filenames and
+          # rename the wheels with a .dev<weeknum> suffix. This is purely
+          # a filename rewrite - the wheel content is unchanged.
+          WEEK=$(date +%Y%W)
+          for w in dist/*.whl; do
+            new=$(echo "$w" | sed "s/-py3-none/.dev${WEEK}-py3-none/" | sed -E "s/-([0-9]+\.[0-9]+\.[0-9]+)-cp/-\1.dev${WEEK}-cp/")
+            if [ "$w" != "$new" ]; then
+              mv "$w" "$new"
+              echo "Renamed: $(basename $w) -> $(basename $new)"
+            fi
+          done
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true
+
+  # ---------------------------------------------------------------------------
+  # Open an issue if the weekly cron failed. Without this notification you
+  # discover stale wheels weeks later when a user reports an OpenSSL CVE.
+  # ---------------------------------------------------------------------------
+  notify-cron-failure:
+    name: notify on cron failure
+    needs: [build-wheels, collect]
+    if: |
+      always() &&
+      github.event_name == 'schedule' &&
+      (needs.build-wheels.result == 'failure' || needs.collect.result == 'failure')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Open issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Don't open a duplicate if there's already an open one.
+          existing=$(gh issue list --label cron-failure --state open --json number -q 'length')
+          if [ "$existing" -gt 0 ]; then
+            echo "Existing cron-failure issue is open; not opening another."
+            exit 0
+          fi
+          gh issue create \
+            --title "Weekly wheel rebuild failed ($(date +%Y-%m-%d))" \
+            --label cron-failure \
+            --body "The scheduled wheel rebuild failed. This usually means one of:
+
+          - FreeRDP shipped a new release with a broken build
+          - One of FreeRDP's deps (OpenSSL, etc.) had a breaking ABI change
+          - The cibuildwheel runner image changed in an incompatible way
+
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Until this is fixed, the bundled wheels on PyPI may contain stale OpenSSL etc."
