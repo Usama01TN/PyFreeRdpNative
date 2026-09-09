@@ -876,7 +876,139 @@ for stem in stems:
                           + stems, env=env)
 
 
-def install_into_package(artifacts):
+# ---------------------------------------------------------------------------
+# Windows: bundle the third-party DLLs the FreeRDP DLLs import
+# ---------------------------------------------------------------------------
+
+# Never copy these: the Universal CRT / VC++ runtime ship with Windows or
+# the VC++ redistributable (and with Python itself), and vcpkg's per-triplet
+# bin/ can even contain a wrong-architecture copy (x64 vcruntime140_1.dll in
+# arm64-windows).
+_WIN_SYSTEM_DLL_PREFIXES = ("api-ms-", "ext-ms-", "ucrtbase", "vcruntime",
+                            "msvcp", "msvcr", "concrt", "kernel32", "user32",
+                            "advapi32", "ws2_32", "crypt32", "secur32",
+                            "ntdll", "ole32", "oleaut32", "shell32", "gdi32",
+                            "winmm", "iphlpapi", "bcrypt", "ncrypt", "rpcrt4",
+                            "shlwapi", "setupapi", "cfgmgr32", "dbghelp",
+                            "winspool", "wtsapi32", "userenv", "credui",
+                            "netapi32", "mpr", "version", "comdlg32",
+                            "d3d11", "dxgi", "mf", "mfplat", "mfreadwrite",
+                            "mfuuid", "strmiids", "ksuser", "avrt", "wsock32",
+                            "python")
+
+
+def pe_imports(path):
+    """Return the DLL names imported by a PE file (pure-Python parser)."""
+    import struct
+    with open(path, "rb") as fh:
+        data = fh.read()
+    pe_off = struct.unpack_from("<I", data, 0x3C)[0]
+    if data[pe_off:pe_off + 4] != b"PE\0\0":
+        raise ValueError("not a PE file: {0}".format(path))
+    coff = pe_off + 4
+    nsections = struct.unpack_from("<H", data, coff + 2)[0]
+    opt_size = struct.unpack_from("<H", data, coff + 16)[0]
+    opt = coff + 20
+    magic = struct.unpack_from("<H", data, opt)[0]
+    dd_off = opt + (112 if magic == 0x20B else 96)   # PE32+ vs PE32
+    imp_rva = struct.unpack_from("<I", data, dd_off + 8)[0]  # dir[1]
+    if not imp_rva:
+        return []
+    sections = []
+    sec = opt + opt_size
+    for i in range(nsections):
+        vsize, va, rawsize, raw = struct.unpack_from("<IIII", data,
+                                                     sec + i * 40 + 8)
+        sections.append((va, max(vsize, rawsize), raw))
+
+    def rva2off(rva):
+        for va, size, raw in sections:
+            if va <= rva < va + size:
+                return rva - va + raw
+        raise ValueError("bad RVA {0:#x} in {1}".format(rva, path))
+
+    names = []
+    desc = rva2off(imp_rva)
+    while True:
+        name_rva = struct.unpack_from("<I", data, desc + 12)[0]
+        if not name_rva:
+            break
+        off = rva2off(name_rva)
+        end = data.index(b"\0", off)
+        names.append(data[off:end].decode("ascii", "replace"))
+        desc += 20
+    return names
+
+
+def pe_machine(path):
+    import struct
+    with open(path, "rb") as fh:
+        data = fh.read(4096)
+    off = struct.unpack_from("<I", data, 0x3C)[0]
+    return struct.unpack_from("<H", data, off + 4)[0]
+
+
+def _vcpkg_bin_dir(arch):
+    vcpkg = (os.environ.get("VCPKG_ROOT")
+             or os.environ.get("VCPKG_INSTALLATION_ROOT"))
+    if not vcpkg:
+        return None
+    triplet = os.environ.get("VCPKG_DEFAULT_TRIPLET",
+                             WINDOWS_ARCHS[host_windows_arch(arch)][1])
+    d = os.path.join(vcpkg, "installed", triplet, "bin")
+    return d if os.path.isdir(d) else None
+
+
+def bundle_windows_runtime_deps(out_dir, arch="host"):
+    """
+    Walk the import tables of the staged FreeRDP DLLs and copy every
+    third-party DLL they (transitively) need from vcpkg's bin/ into
+    out_dir, so the directory is loadable as-is. System and CRT DLLs are
+    skipped; anything copied must have the same PE machine type as the
+    FreeRDP DLLs.
+    """
+    src_dir = _vcpkg_bin_dir(arch)
+    if not src_dir:
+        print("[deps] no vcpkg bin dir found; not bundling runtime DLLs")
+        return
+    available = {}
+    for fn in os.listdir(src_dir):
+        if fn.lower().endswith(".dll"):
+            available[fn.lower()] = os.path.join(src_dir, fn)
+
+    staged = [os.path.join(out_dir, f) for f in os.listdir(out_dir)
+              if f.lower().endswith(".dll")]
+    if not staged:
+        return
+    want_machine = pe_machine(staged[0])
+
+    queue = list(staged)
+    seen = set(os.path.basename(p).lower() for p in staged)
+    copied = []
+    while queue:
+        dll = queue.pop()
+        for dep in pe_imports(dll):
+            dep_l = dep.lower()
+            if dep_l in seen or dep_l.startswith(_WIN_SYSTEM_DLL_PREFIXES):
+                continue
+            seen.add(dep_l)
+            src_path = available.get(dep_l)
+            if not src_path:
+                # Not in vcpkg: assume it's a Windows system DLL.
+                continue
+            if pe_machine(src_path) != want_machine:
+                raise SystemExit(
+                    "[deps] {0} in {1} has the wrong architecture for this "
+                    "build".format(dep, src_dir))
+            dst = os.path.join(out_dir, os.path.basename(src_path))
+            shutil.copy2(src_path, dst)
+            copied.append(os.path.basename(src_path))
+            queue.append(dst)
+    print("[deps] bundled {0} runtime DLL(s) from {1}: {2}".format(
+        len(copied), src_dir, ", ".join(sorted(copied)) or "none"))
+
+
+def install_into_package(artifacts, arch="host"):
     out = os.path.join(package_root(), "pyfreerdp", "_libs")
     if not os.path.isdir(out):
         os.makedirs(out)
@@ -899,6 +1031,8 @@ def install_into_package(artifacts):
     print("[install] {0} libraries staged into {1}".format(count, out))
     for d in sorted(module_dirs):
         print("[install] loadable modules staged into {0}".format(d))
+    if platform.system() == "Windows":
+        bundle_windows_runtime_deps(out, arch)
     _fix_rpath(out)
     return out
 
@@ -1292,7 +1426,7 @@ def main():
             return 3
         if not args.skip_verify:
             verify_artifacts(artifacts, args.profile)
-        out = install_into_package(artifacts)
+        out = install_into_package(artifacts, arch=args.arch)
         if not args.skip_verify:
             verify_loadable(out, args.profile, arch=args.arch)
         print("\nDone. Library installed under {0}.".format(out))
