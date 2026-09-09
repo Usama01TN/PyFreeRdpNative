@@ -63,6 +63,8 @@ permissions:
   contents: read
 
 env:
+  # Keep Python's own output in order with cmake's in the job log.
+  PYTHONUNBUFFERED: "1"
   # Defaults for non-dispatch triggers. Dispatch inputs override below.
   FREERDP_REF: ${{ inputs.freerdp_ref || '3.16.0' }}
   DESKTOP_PROFILE: ${{ inputs.profile || 'full' }}
