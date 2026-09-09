@@ -19,6 +19,9 @@ name: build-freerdp
 #   * release published  - (release.yml cuts v* releases) builds + attaches
 #                          libs to a release named freerdp-libs-<freerdp_ref>
 #
+# Targets: Linux x86_64/aarch64, macOS arm64/x86_64, Windows x64/x86/arm64,
+# Android arm64-v8a/x86_64, iOS device (arm64) + arm64 simulator.
+#
 # Every job writes its direct artifact download URL into the run's
 # Summary tab; the final `links` job collects them all into one table.
 
@@ -96,9 +99,26 @@ jobs:
             # Intel image GitHub provides (until Aug 2027).
             runner: macos-15-intel
             cap_profile: minimal
+          # Windows: x64 is native; x86 and arm64 are cross-compiled on the
+          # same VS 2022 image (-A Win32 / -A ARM64 + matching vcpkg triplet).
           - label: windows-x64
             runner: windows-2022
             cap_profile: minimal
+            win_arch: x64
+            vcpkg_triplet: x64-windows
+            python_arch: x64
+          - label: windows-x86
+            runner: windows-2022
+            cap_profile: minimal
+            win_arch: x86
+            vcpkg_triplet: x86-windows
+            python_arch: x86      # 32-bit Python so the load test is real
+          - label: windows-arm64
+            runner: windows-2022
+            cap_profile: minimal
+            win_arch: arm64
+            vcpkg_triplet: arm64-windows
+            python_arch: x64      # cross build; loaded on windows-11-arm below
     # Matrix jobs can't emit per-cell outputs, so each cell writes its
     # link into the step summary and the `links` job re-reads the run's
     # artifact list via the API.
@@ -108,6 +128,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          architecture: ${{ matrix.python_arch || 'x64' }}
 
       - name: Resolve effective profile
         id: profile
@@ -174,11 +195,12 @@ jobs:
           VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
         run: |
           $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT "vcpkg.exe"
-          & $vcpkg install --triplet x64-windows openssl zlib
+          $triplet = "${{ matrix.vcpkg_triplet }}"
+          & $vcpkg install --triplet $triplet openssl zlib
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
           # build_freerdp.py picks up VCPKG_INSTALLATION_ROOT automatically
-          # and passes the vcpkg toolchain file to CMake.
-          "VCPKG_DEFAULT_TRIPLET=x64-windows" | Out-File -Append -FilePath $env:GITHUB_ENV
+          # and passes the vcpkg toolchain file + this triplet to CMake.
+          "VCPKG_DEFAULT_TRIPLET=$triplet" | Out-File -Append -FilePath $env:GITHUB_ENV
 
       # ---- build ----------------------------------------------------------
 
@@ -198,6 +220,7 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then jobs=$(sysctl -n hw.ncpu);
           elif [ "$RUNNER_OS" = "Windows" ]; then jobs=$NUMBER_OF_PROCESSORS;
           else jobs=$(nproc); fi
+          if [ -n "${{ matrix.win_arch }}" ]; then args="$args --arch ${{ matrix.win_arch }}"; fi
           python scripts/build_freerdp.py \
             --target host \
             --ref "$FREERDP_REF" \
@@ -210,13 +233,38 @@ jobs:
         run: |
           # freerdp3.dll / winpr3.dll import libssl / libcrypto / zlib from
           # vcpkg. Ship them alongside so the artifact is loadable as-is.
-          $src = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\x64-windows\bin"
+          $src = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\${{ matrix.vcpkg_triplet }}\bin"
           Get-ChildItem "$src\*.dll" | Copy-Item -Destination "pyfreerdp\_libs" -Force
           Get-ChildItem "pyfreerdp\_libs"
 
       # ---- verify ---------------------------------------------------------
 
+      - name: Verify PE machine type (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob, struct, sys
+          want = {"x64": 0x8664, "x86": 0x14C, "arm64": 0xAA64}["${{ matrix.win_arch }}"]
+          names = {0x8664: "x64", 0x14C: "x86", 0xAA64: "arm64"}
+          bad = []
+          for dll in glob.glob("pyfreerdp/_libs/*.dll"):
+              with open(dll, "rb") as fh:
+                  data = fh.read(4096)
+              off = struct.unpack_from("<I", data, 0x3C)[0]
+              machine = struct.unpack_from("<H", data, off + 4)[0]
+              print("%-40s %s" % (dll, names.get(machine, hex(machine))))
+              if machine != want:
+                  bad.append(dll)
+          if bad:
+              sys.exit("wrong machine type: %s" % bad)
+          print("all DLLs are ${{ matrix.win_arch }}")
+          PY
+
       - name: Verify libraries load and channels are present
+        # The arm64 Windows DLLs are cross-compiled and can't be loaded on
+        # this x64 runner; a separate job loads them on windows-11-arm.
+        if: matrix.win_arch != 'arm64'
         shell: bash
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/pyfreerdp/_libs
@@ -426,12 +474,176 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
+  # Load-test the cross-compiled Windows arm64 DLLs on a real arm64 runner.
+  # windows-11-arm is a free public-preview runner for public repos.
+  # ---------------------------------------------------------------------------
+  verify-windows-arm64:
+    name: verify windows-arm64 on windows-11-arm
+    needs: desktop
+    if: always() && needs.desktop.result != 'cancelled'
+    runs-on: windows-11-arm
+    continue-on-error: true   # preview runner; don't fail the run if it's unavailable
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: freerdp-*-windows-arm64-*
+          merge-multiple: true
+          path: dl/
+      - name: Unpack and load
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem dl/*.zip | Select-Object -First 1
+          if (-not $zip) { throw "no windows-arm64 artifact found" }
+          Expand-Archive $zip.FullName -DestinationPath unpacked
+          $libs = Resolve-Path "unpacked/_libs"
+          Get-ChildItem $libs
+          python -c @"
+          import ctypes, os
+          libs = r'$libs'
+          os.add_dll_directory(libs)
+          for name in ('winpr3.dll', 'freerdp3.dll', 'freerdp-client3.dll', 'freerdp-server3.dll'):
+              ctypes.CDLL(os.path.join(libs, name)); print('loaded', name)
+          srv = ctypes.CDLL(os.path.join(libs, 'freerdp-server3.dll'))
+          for sym in ('cliprdr_server_context_new', 'rdpgfx_server_context_new', 'rail_server_context_new'):
+              getattr(srv, sym); print('server channel ok:', sym)
+          print('windows-arm64 OK')
+          "@
+      - name: Note in summary
+        shell: bash
+        run: echo "### windows-arm64 — loaded natively on windows-11-arm ✅" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # iOS. Static archives (libfreerdp3.a, libfreerdp-client3.a,
+  # libfreerdp-server3.a, libwinpr3.a) for the arm64 device and the arm64
+  # simulator. OpenSSL is cross-built first with its ios64-xcrun /
+  # iossimulator-arm64-xcrun targets and shipped alongside as .a files.
+  # ---------------------------------------------------------------------------
+  ios:
+    name: ios-${{ matrix.label }}
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: arm64
+            platform: OS64
+            openssl_target: ios64-xcrun
+          - label: simulator-arm64
+            platform: SIMULATORARM64
+            openssl_target: iossimulator-arm64-xcrun
+    env:
+      OPENSSL_VERSION: "3.3.2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install host tools
+        run: |
+          brew update >/dev/null
+          brew install cmake ninja
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Cache cross-built OpenSSL
+        id: ssl-cache
+        uses: actions/cache@v4
+        with:
+          path: openssl-ios-${{ matrix.platform }}
+          key: openssl-${{ env.OPENSSL_VERSION }}-ios-${{ matrix.platform }}-xcode${{ hashFiles('/Applications/Xcode.app/Contents/version.plist') }}
+
+      - name: Cross-build OpenSSL (${{ matrix.openssl_target }})
+        if: steps.ssl-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          curl -fsSL -o openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          tar xzf openssl.tar.gz
+          cd "openssl-${OPENSSL_VERSION}"
+          ./Configure ${{ matrix.openssl_target }} \
+            no-shared no-tests no-docs no-dso no-engine \
+            --prefix="$GITHUB_WORKSPACE/openssl-ios-${{ matrix.platform }}" \
+            --openssldir="$GITHUB_WORKSPACE/openssl-ios-${{ matrix.platform }}/ssl"
+          make -j"$(sysctl -n hw.ncpu)" build_libs
+          make install_dev
+          lipo -info "$GITHUB_WORKSPACE/openssl-ios-${{ matrix.platform }}/lib/libssl.a"
+
+      - name: Build FreeRDP ${{ env.FREERDP_REF }} for iOS ${{ matrix.platform }}
+        env:
+          PYFREERDP_EXTRA_CMAKE: >-
+            -DOPENSSL_ROOT_DIR=${{ github.workspace }}/openssl-ios-${{ matrix.platform }}
+            -DOPENSSL_USE_STATIC_LIBS=ON
+            -DCMAKE_FIND_ROOT_PATH=${{ github.workspace }}/openssl-ios-${{ matrix.platform }}
+            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/openssl-ios-${{ matrix.platform }}
+        run: |
+          python scripts/build_freerdp.py \
+            --target ios --ios-platform ${{ matrix.platform }} \
+            --ref "$FREERDP_REF" --profile minimal --jobs "$(sysctl -n hw.ncpu)"
+          # Ship OpenSSL's static libs too - consumers must link them.
+          cp openssl-ios-${{ matrix.platform }}/lib/libssl.a \
+             openssl-ios-${{ matrix.platform }}/lib/libcrypto.a \
+             pyfreerdp/_libs/ios/${{ matrix.platform }}/
+          ls -la pyfreerdp/_libs/ios/${{ matrix.platform }}/
+
+      - name: Verify architecture and channel symbols
+        run: |
+          set -e
+          d=pyfreerdp/_libs/ios/${{ matrix.platform }}
+          for a in $d/*.a; do
+            lipo -info "$a" | grep -q arm64 || { echo "::error::$a is not arm64"; exit 1; }
+          done
+          nm "$d/libfreerdp-server3.a" | grep -q " T _cliprdr_server_context_new"
+          nm "$d/libfreerdp-server3.a" | grep -q " T _rdpgfx_server_context_new"
+          nm "$d/libfreerdp-client3.a" | grep -q "_cliprdr_VirtualChannelEntryEx"
+          echo "arm64 archives with client + server channels present"
+
+      - name: Package
+        id: pkg
+        run: |
+          name="freerdp-${FREERDP_REF}-ios-${{ matrix.label }}-minimal"
+          mkdir -p out
+          {
+            echo "FreeRDP ref:  $FREERDP_REF"
+            echo "Platform:     iOS ${{ matrix.platform }} (static, OpenSSL ${OPENSSL_VERSION}, $(xcodebuild -version | head -1))"
+            echo "Repo commit:  $GITHUB_SHA"
+            echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Link order: freerdp-client3 / freerdp-server3, freerdp3, winpr3, ssl, crypto"
+            echo "Frameworks: Foundation, Security, CoreFoundation, SystemConfiguration"
+          } > pyfreerdp/_libs/ios/${{ matrix.platform }}/BUILD-INFO.txt
+          tar -C pyfreerdp/_libs/ios -czf "out/$name.tar.gz" ${{ matrix.platform }}
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "file=out/$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: ${{ steps.pkg.outputs.file }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Publish artifact link to job summary
+        run: |
+          {
+            echo "### ios-${{ matrix.label }} — FreeRDP $FREERDP_REF (minimal, static)"
+            echo
+            echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
   # Collect every artifact link into one table, and optionally attach the
   # files to a GitHub release so the URLs outlive the 30-day artifact TTL.
   # ---------------------------------------------------------------------------
   links:
     name: artifact links
-    needs: [desktop, android]
+    needs: [desktop, android, ios]
     if: always() && (needs.desktop.result != 'cancelled')
     runs-on: ubuntu-24.04
     permissions:
@@ -469,9 +681,9 @@ jobs:
             done < artifacts.tsv
             echo
             echo "Artifacts expire after 30 days. GitHub wraps each file in a .zip; inside is the .tar.gz / .zip of \`pyfreerdp/_libs\`."
-            if [ "${{ needs.desktop.result }}" != "success" ] || [ "${{ needs.android.result }}" != "success" ]; then
+            if [ "${{ needs.desktop.result }}" != "success" ] || [ "${{ needs.android.result }}" != "success" ] || [ "${{ needs.ios.result }}" != "success" ]; then
               echo
-              echo "> ⚠️ Some build legs failed (desktop: ${{ needs.desktop.result }}, android: ${{ needs.android.result }}). Missing platforms are absent from the table."
+              echo "> ⚠️ Some build legs failed (desktop: ${{ needs.desktop.result }}, android: ${{ needs.android.result }}, ios: ${{ needs.ios.result }}). Missing platforms are absent from the table."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
