@@ -91,42 +91,17 @@ jobs:
           "
 
   # ---------------------------------------------------------------------------
-  # Detect whether the FreeRDP build script (or this workflow) changed. A
-  # real path diff against the push/PR base - `github.event.head_commit.
-  # modified` only looks at the single head commit and is not populated
-  # for every push type, so gating on it skipped the build silently.
-  # ---------------------------------------------------------------------------
-  changes:
-    name: detect changed paths
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      build_script: ${{ steps.filter.outputs.build_script }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            build_script:
-              - 'scripts/build_freerdp.py'
-              - '.github/workflows/ci.yml'
-
-  # ---------------------------------------------------------------------------
   # Build FreeRDP from source with --profile=full and verify all libraries
   # (client, server, winpr) plus the client/server channels land in
-  # pyfreerdp/_libs/. Slow path: runs on workflow_dispatch, or when the
-  # build script / this workflow changed in the push or PR.
+  # pyfreerdp/_libs/. Runs on every push / PR / manual dispatch: an earlier
+  # version gated this on "did scripts/build_freerdp.py change?", and both
+  # the head_commit.modified check and a paths-filter job skipped it when it
+  # should have run. ~10 min on a 4-core runner is cheaper than a silently
+  # skipped build.
   # ---------------------------------------------------------------------------
   build-from-source:
     name: build FreeRDP from source (--profile=full)
     runs-on: ubuntu-latest
-    needs: changes
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      needs.changes.outputs.build_script == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
