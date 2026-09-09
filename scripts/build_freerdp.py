@@ -1110,14 +1110,27 @@ def build_ios(src, jobs, profile, enable_channels=None,
         "-DWITH_CLIENT_IOS=OFF",            # native iOS client is an Xcode app
         "-DWITH_CLIENT_SDL=OFF",
         "-DWITH_PLATFORM_SERVER=OFF",
+        "-DWITH_SAMPLE=OFF",
         "-DWITH_KRB5=OFF",
         "-DENABLE_BITCODE=OFF",
-        # Tool executables (winpr-makecert etc.) would otherwise demand a
-        # signing identity the CI runner doesn't have.
-        "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO",
-        "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO",
-        "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY=",
+        "-DDEPLOYMENT_TARGET=13.0",
     ]
+    # Generator. Static archives don't need Xcode, and the Xcode generator
+    # is the fragile part of iOS builds: multi-config output dirs
+    # (Release-iphoneos/) that `cmake --install` has to resolve, code-signing
+    # phases for the tool executables, and much slower builds. Prefer Ninja
+    # (single-config, plain install); fall back to Xcode only if ninja is
+    # missing, in which case disable code signing.
+    if have("ninja"):
+        generator = ["-G", "Ninja"]
+    else:
+        print("[ios] ninja not found; falling back to the Xcode generator")
+        generator = ["-G", "Xcode"]
+        opts += [
+            "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO",
+            "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO",
+            "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY=",
+        ]
     opts = dedupe_defines(opts)
     # OpenSSL for iOS is not on the runner; callers hand us a cross-built
     # prefix via PYFREERDP_EXTRA_CMAKE, e.g.
@@ -1129,20 +1142,46 @@ def build_ios(src, jobs, profile, enable_channels=None,
         "-DCMAKE_TOOLCHAIN_FILE={0}".format(toolchain),
         "-DPLATFORM={0}".format(ios_platform),
         "-DCMAKE_INSTALL_PREFIX={0}".format(install_dir),
-    ] + opts + extra + ["-G", "Xcode"]
+    ] + opts + extra + generator
     run(cfg)
     if channels_enabled:
         verify_channel_cache(build_dir, expected_channel_cache(
             profile, "iOS", enable_channels, disable_channels))
     run(["cmake", "--build", build_dir, "--config", "Release",
          "--parallel", str(jobs)])
-    run(["cmake", "--install", build_dir, "--config", "Release"])
+
+    # Install is only used to get the archives into one directory. If it
+    # fails (historically: Xcode generator path resolution), fall back to
+    # harvesting the .a files straight from the build tree - the libraries
+    # themselves were already built successfully by the step above.
+    rc = run(["cmake", "--install", build_dir, "--config", "Release"],
+             check=False)
+    if rc == 0:
+        archives = glob.glob(os.path.join(install_dir, "lib", "*.a"))
+    else:
+        print("\n[ios] WARNING: cmake --install exited {0}; look for a "
+              "'CMake Error' line above (it is printed before the "
+              "surrounding 'Installing:' lines because cmake buffers "
+              "stdout). Collecting archives from the build tree "
+              "instead.".format(rc))
+        archives = []
+        for root, _dirs, files in os.walk(build_dir):
+            for fn in files:
+                if fn.endswith(".a") and not fn.startswith("libfreerdp-test"):
+                    archives.append(os.path.join(root, fn))
+        # Only ship the public libraries (the tree also holds object
+        # library archives on some generators).
+        keep = ("libwinpr", "libfreerdp", "librdtk", "libfreerdp-client",
+                "libfreerdp-server")
+        archives = [a for a in archives
+                    if os.path.basename(a).startswith(keep)]
+
     target = os.path.join(package_root(), "pyfreerdp", "_libs", "ios",
                           ios_platform)
     if not os.path.isdir(target):
         os.makedirs(target)
     staged = []
-    for a in glob.glob(os.path.join(install_dir, "lib", "*.a")):
+    for a in sorted(archives):
         dst = os.path.join(target, os.path.basename(a))
         shutil.copy2(a, dst)
         staged.append(os.path.basename(a).lower())
