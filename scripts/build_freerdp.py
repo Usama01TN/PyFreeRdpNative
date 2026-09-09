@@ -685,6 +685,18 @@ def _shared_lib_ext(sysname):
     return ".so"
 
 
+# MSVC runtime / UCRT DLLs. FreeRDP's CMakeCPack.cmake installs these into
+# <prefix>/bin via InstallRequiredSystemLibraries, and on a cross build it
+# picks the *host* toolchain's copies (x64 vcruntime140_1.dll in an arm64
+# install). They belong to the VC++ redistributable, not to us.
+_MSVC_CRT_PREFIXES = ("msvcp", "vcruntime", "concrt", "vcomp", "vccorlib",
+                      "mfc", "ucrtbase", "api-ms-", "ext-ms-")
+
+
+def _is_msvc_crt_dll(filename):
+    return filename.lower().startswith(_MSVC_CRT_PREFIXES)
+
+
 def collect_host_artifacts(prefix):
     """
     Return a list of (path, relative_subdir) tuples.
@@ -699,6 +711,10 @@ def collect_host_artifacts(prefix):
 
     if sysname == "Windows":
         for p in glob.glob(os.path.join(prefix, "bin", "*.dll")):
+            if _is_msvc_crt_dll(os.path.basename(p)):
+                print("[collect] skipping CRT runtime {0}".format(
+                    os.path.basename(p)))
+                continue
             candidates.append((p, ""))
         # Modules on Windows land next to the exe or in bin/freerdp3/.
         bindir = os.path.join(prefix, "bin")
@@ -708,7 +724,7 @@ def collect_host_artifacts(prefix):
             for root, _dirs, files in os.walk(d):
                 rel = os.path.relpath(root, bindir)
                 for fn in files:
-                    if fn.lower().endswith(".dll"):
+                    if fn.lower().endswith(".dll") and not _is_msvc_crt_dll(fn):
                         candidates.append((os.path.join(root, fn), rel))
         return candidates
 
@@ -756,6 +772,19 @@ def verify_artifacts(artifacts, profile):
                 profile, missing, sorted(set(core_names))))
     print("[verify] core libraries present: {0}".format(
         EXPECTED_LIBS[profile]))
+
+    if platform.system() == "Windows":
+        machines = {}
+        for p, _sub in artifacts:
+            if p.lower().endswith(".dll"):
+                machines.setdefault(pe_machine(p), []).append(
+                    os.path.basename(p))
+        if len(machines) > 1:
+            raise SystemExit(
+                "\nStaged DLLs have mixed architectures: {0}".format(
+                    dict((hex(k), v) for k, v in machines.items())))
+        print("[verify] all DLLs share PE machine type {0}".format(
+            ", ".join(hex(m) for m in machines)))
 
 
 def _ensure_patchelf():
