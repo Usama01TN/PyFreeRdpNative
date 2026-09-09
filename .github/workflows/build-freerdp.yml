@@ -108,7 +108,6 @@ jobs:
             cap_profile: minimal
             win_arch: x64
             vcpkg_triplet: x64-windows
-            python_arch: x64
           - label: windows-x86
             runner: windows-2022
             cap_profile: minimal
@@ -120,7 +119,7 @@ jobs:
             cap_profile: minimal
             win_arch: arm64
             vcpkg_triplet: arm64-windows
-            python_arch: x64      # cross build; loaded on windows-11-arm below
+            # cross build on x64; loaded natively in verify-windows-arm64
     # Matrix jobs can't emit per-cell outputs, so each cell writes its
     # link into the step summary and the `links` job re-reads the run's
     # artifact list via the API.
@@ -130,7 +129,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          architecture: ${{ matrix.python_arch || 'x64' }}
+          # Only Windows cells set this (x86 needs a 32-bit interpreter for
+          # the load test). An empty value lets setup-python pick the
+          # runner's own architecture - forcing 'x64' here downloads an
+          # x86_64 Python onto the aarch64 runner (Exec format error).
+          architecture: ${{ matrix.python_arch }}
 
       - name: Resolve effective profile
         id: profile
