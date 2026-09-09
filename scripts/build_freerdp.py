@@ -758,6 +758,124 @@ def verify_artifacts(artifacts, profile):
         EXPECTED_LIBS[profile]))
 
 
+def _ensure_patchelf():
+    """
+    Return a path to a working `patchelf`. Try PATH first, then install the
+    PyPI wheel (which ships a static binary) into the running interpreter.
+    """
+    if have("patchelf"):
+        return "patchelf"
+    print("[rpath] patchelf not on PATH - installing the PyPI package")
+    for extra in ([], ["--break-system-packages"], ["--user"]):
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "--quiet",
+                 "patchelf"] + extra,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            break
+        except subprocess.CalledProcessError:
+            continue
+    import sysconfig
+    for d in (sysconfig.get_path("scripts"),
+              os.path.join(os.path.expanduser("~"), ".local", "bin")):
+        cand = os.path.join(d or "", "patchelf")
+        if d and os.path.isfile(cand):
+            return cand
+    if have("patchelf"):
+        return "patchelf"
+    raise SystemExit(
+        "patchelf is required to make the staged .so files relocatable "
+        "(RUNPATH=$ORIGIN). Install it with `pip install patchelf` or "
+        "`apt-get install patchelf` and re-run.")
+
+
+def _fix_rpath(out_dir):
+    """
+    FreeRDP installs its libraries with RUNPATH '$ORIGIN/../lib:$ORIGIN/..'
+    (cmake/ConfigureRPATH.cmake forces CMAKE_INSTALL_RPATH as an INTERNAL
+    cache entry, and CMake's install step strips any -rpath we add through
+    linker flags). That is right inside an install prefix but wrong once
+    the files sit flat in pyfreerdp/_libs/: dlopen('.../_libs/
+    libfreerdp-client3.so.3') can't find libfreerdp3.so.3 next to it.
+
+    Rewrite every staged shared object so it looks in its own directory
+    (and, for modules in subdirectories, back up to the _libs root).
+    """
+    sysname = platform.system()
+    if sysname == "Windows":
+        return  # DLLs resolve siblings from their own directory already
+    fixed = 0
+    for root, _dirs, files in os.walk(out_dir):
+        rel = os.path.relpath(out_dir, root)          # "." or "../.."
+        for fn in files:
+            path = os.path.join(root, fn)
+            if os.path.islink(path):
+                continue
+            if sysname == "Linux":
+                if ".so" not in fn:
+                    continue
+                rpath = "$ORIGIN" if rel == "." else "$ORIGIN:$ORIGIN/" + rel
+                subprocess.check_call([_ensure_patchelf(), "--set-rpath",
+                                       rpath, path])
+                fixed += 1
+            elif sysname == "Darwin":
+                if not fn.endswith(".dylib") and ".so" not in fn:
+                    continue
+                want = ("@loader_path" if rel == "."
+                        else "@loader_path/" + rel)
+                have_rpaths = subprocess.check_output(
+                    ["otool", "-l", path]).decode(errors="replace")
+                if want not in have_rpaths:
+                    subprocess.check_call(["install_name_tool", "-add_rpath",
+                                           want, path])
+                fixed += 1
+    print("[rpath] made {0} shared objects relocatable ({1})".format(
+        fixed, "$ORIGIN" if sysname == "Linux" else "@loader_path"))
+
+
+def verify_loadable(out_dir, profile, arch="host"):
+    """
+    Do exactly what pyfreerdp's tests do: ctypes-load the staged client and
+    server libraries by absolute path, cold, in a fresh interpreter, without
+    loading their dependencies first and without LD_LIBRARY_PATH.
+    """
+    sysname = platform.system()
+    if sysname == "Windows" and host_windows_arch(arch) != \
+            host_windows_arch("host"):
+        print("[verify] cross-compiled Windows target; skipping load test")
+        return
+    want_client, want_server = PROFILE_SIDES[profile]
+    stems = ["winpr3", "freerdp3"]
+    if want_client:
+        stems.append("freerdp-client3")
+    if want_server:
+        stems.append("freerdp-server3")
+    ext = _shared_lib_ext(sysname)
+    code = r'''
+import ctypes, glob, os, sys
+out, ext, stems = sys.argv[1], sys.argv[2], sys.argv[3:]
+if sys.platform == "win32":
+    os.add_dll_directory(out)
+for stem in stems:
+    cands = sorted(p for p in glob.glob(os.path.join(out, "*" + stem + "*"))
+                   if ext in os.path.basename(p) and os.path.isfile(p))
+    if not cands:
+        sys.exit("no file for %s in %s" % (stem, out))
+    path = cands[0]
+    try:
+        ctypes.CDLL(path)
+    except OSError as e:
+        sys.exit("FAILED to load %s: %s" % (path, e))
+    print("[verify] loads cold: %s" % os.path.basename(path))
+'''
+    env = dict(os.environ)
+    for k in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+              "DYLD_FALLBACK_LIBRARY_PATH"):
+        env.pop(k, None)
+    subprocess.check_call([sys.executable, "-c", code, out_dir, ext]
+                          + stems, env=env)
+
+
 def install_into_package(artifacts):
     out = os.path.join(package_root(), "pyfreerdp", "_libs")
     if not os.path.isdir(out):
@@ -781,6 +899,8 @@ def install_into_package(artifacts):
     print("[install] {0} libraries staged into {1}".format(count, out))
     for d in sorted(module_dirs):
         print("[install] loadable modules staged into {0}".format(d))
+    _fix_rpath(out)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1133,9 +1253,10 @@ def main():
             return 3
         if not args.skip_verify:
             verify_artifacts(artifacts, args.profile)
-        install_into_package(artifacts)
-        print("\nDone. Library installed under {0}.".format(
-            os.path.join(package_root(), "pyfreerdp", "_libs")))
+        out = install_into_package(artifacts)
+        if not args.skip_verify:
+            verify_loadable(out, args.profile, arch=args.arch)
+        print("\nDone. Library installed under {0}.".format(out))
         return 0
 
     if args.target == "android":
