@@ -491,10 +491,24 @@ def cmake_options_for(profile, host_os, enable_channels=None,
     elif host_os == "Darwin":
         opts += [
             "-DWITH_X11=OFF", "-DWITH_WAYLAND=OFF", "-DWITH_ALSA=OFF",
+            # Upstream: "Mac platform server implementation no longer
+            # compiles". The GUI clients aren't needed for a binding.
+            "-DWITH_PLATFORM_SERVER=OFF",
+            "-DWITH_CLIENT_MAC=OFF", "-DWITH_CLIENT_SDL=OFF",
+            # Relocatable dylibs: install names use @rpath so the files
+            # can be moved into pyfreerdp/_libs and bundled by delocate.
+            "-DCMAKE_INSTALL_NAME_DIR=@rpath",
+            "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0",
         ]
     elif host_os == "Windows":
         opts += [
             "-DWITH_X11=OFF", "-DWITH_WAYLAND=OFF",
+            # No cairo in the default vcpkg set (it is a very long build);
+            # scaling is unavailable unless you add it via
+            # PYFREERDP_EXTRA_CMAKE.
+            "-DWITH_CAIRO=OFF",
+            "-DWITH_PLATFORM_SERVER=OFF",
+            "-DWITH_CLIENT_WINDOWS=OFF", "-DWITH_CLIENT_SDL=OFF",
         ]
 
     opts += channel_options(profile, host_os, enable_channels,
@@ -530,7 +544,32 @@ def host_dependency_probe(host_os):
               "NLA still works (NTLM), but Kerberos/SSO logins won't. "
               "Install libkrb5-dev / krb5-devel for full support.")
         opts.append("-DWITH_KRB5=OFF")
-    if host_os == "Linux" and not _pkg_config_has("cairo"):
+    if host_os == "Darwin":
+        if not os.environ.get("OPENSSL_ROOT_DIR") and have("brew"):
+            # Homebrew's openssl@3 is keg-only, so CMake won't find it
+            # without a hint.
+            try:
+                pfx = subprocess.check_output(
+                    ["brew", "--prefix", "openssl@3"],
+                    stderr=subprocess.DEVNULL).decode().strip()
+            except (OSError, subprocess.CalledProcessError):
+                pfx = ""
+            if pfx and os.path.isdir(pfx):
+                opts.append("-DOPENSSL_ROOT_DIR={0}".format(pfx))
+    if host_os == "Windows":
+        extra = os.environ.get("PYFREERDP_EXTRA_CMAKE", "")
+        vcpkg = (os.environ.get("VCPKG_ROOT")
+                 or os.environ.get("VCPKG_INSTALLATION_ROOT"))
+        if vcpkg and "CMAKE_TOOLCHAIN_FILE" not in extra:
+            tc = os.path.join(vcpkg, "scripts", "buildsystems", "vcpkg.cmake")
+            if os.path.isfile(tc):
+                triplet = os.environ.get("VCPKG_DEFAULT_TRIPLET",
+                                         "x64-windows")
+                opts += ["-DCMAKE_TOOLCHAIN_FILE={0}".format(tc),
+                         "-DVCPKG_TARGET_TRIPLET={0}".format(triplet)]
+                print("[probe] using vcpkg toolchain {0} ({1})".format(
+                    tc, triplet))
+    if host_os in ("Linux", "Darwin") and not _pkg_config_has("cairo"):
         print("\n[warn] cairo.pc not found - building with WITH_CAIRO=OFF. "
               "Screen scaling (SmartSizing) will be unavailable. Install "
               "libcairo2-dev / cairo-devel to enable it.")
@@ -569,7 +608,14 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
 
     cfg = ["cmake", "-S", src, "-B", build_dir,
            "-DCMAKE_INSTALL_PREFIX={0}".format(prefix)] + opts + extra
-    if have("ninja"):
+    if any(o in ("-G", "-A") or o.startswith(("-G", "-A")) for o in extra):
+        pass  # caller picked a generator via PYFREERDP_EXTRA_CMAKE
+    elif host_os == "Windows":
+        # Visual Studio generator: works without a vcvars shell, unlike
+        # Ninja+cl. Pick the platform from the host architecture.
+        arch = "ARM64" if platform.machine().upper() == "ARM64" else "x64"
+        cfg += ["-A", arch]
+    elif have("ninja"):
         cfg += ["-G", "Ninja"]
 
     run(cfg)
@@ -823,13 +869,21 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
                              enable_channels=enable_channels,
                              disable_channels=disable_channels,
                              channels_enabled=channels_enabled)
-    opts = [o for o in opts if not o.startswith(
-        ("-DWITH_X11=", "-DWITH_WAYLAND=", "-DWITH_ALSA=", "-DWITH_PULSE="))]
     opts += [
         "-DWITH_X11=OFF", "-DWITH_WAYLAND=OFF",
         "-DWITH_PULSE=OFF", "-DWITH_ALSA=OFF",
         "-DWITH_CUPS=OFF", "-DWITH_PCSC=OFF",
+        # No cairo in the NDK; and winpr's Android unicode backend goes
+        # through JNI, which a non-Java host (Python) can't provide.
+        "-DWITH_CAIRO=OFF",
+        "-DWITH_UNICODE_BUILTIN=ON",
+        "-DWITH_CLIENT_SDL=OFF",
     ]
+    opts = dedupe_defines(opts)
+    # OpenSSL for Android is not in the NDK. Callers point us at a
+    # cross-built copy with PYFREERDP_EXTRA_CMAKE, e.g.
+    #   -DOPENSSL_ROOT_DIR=/path -DCMAKE_FIND_ROOT_PATH=/path
+    extra = os.environ.get("PYFREERDP_EXTRA_CMAKE", "").split()
 
     cfg = [
         "cmake", "-S", src, "-B", build_dir,
@@ -838,7 +892,7 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
         "-DANDROID_PLATFORM=android-{0}".format(api_level),
         "-DANDROID_STL=c++_shared",
         "-DCMAKE_INSTALL_PREFIX={0}".format(install_dir),
-    ] + opts + ["-G", "Ninja"]
+    ] + opts + extra + ["-G", "Ninja"]
     require_tools(["cmake", "ninja"])
     run(cfg)
     if channels_enabled:
