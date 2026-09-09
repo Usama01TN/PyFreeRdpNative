@@ -1,0 +1,518 @@
+name: build-freerdp
+
+# Build libfreerdp (client + server + winpr, with all client/server virtual
+# channels) from source on every platform we ship, using
+# scripts/build_freerdp.py, and publish the resulting libraries as
+# downloadable artifacts.
+#
+# This is NOT the wheel pipeline (see wheels.yml). It produces raw native
+# libraries - the contents of pyfreerdp/_libs/ - so they can be:
+#   * inspected / smoke-tested independently of Python packaging,
+#   * downloaded by users who want prebuilt FreeRDP without a wheel,
+#   * attached to a GitHub release with stable URLs.
+#
+# Triggers:
+#   * workflow_dispatch  - pick FreeRDP ref, profile, optional channel
+#                          overrides, and whether to publish a release
+#   * push to main       - only when the build script or this workflow
+#                          changes (it's a slow, expensive workflow)
+#   * release published  - (release.yml cuts v* releases) builds + attaches
+#                          libs to a release named freerdp-libs-<freerdp_ref>
+#
+# Every job writes its direct artifact download URL into the run's
+# Summary tab; the final `links` job collects them all into one table.
+
+on:
+  workflow_dispatch:
+    inputs:
+      freerdp_ref:
+        description: "FreeRDP git ref (tag/branch/sha) to build"
+        required: false
+        default: "3.16.0"
+      profile:
+        description: "Build profile for desktop targets"
+        required: false
+        default: "full"
+        type: choice
+        options: [full, minimal, client-only, server-only]
+      enable_channels:
+        description: "Extra channels to enable, space separated (e.g. 'urbdrc printer')"
+        required: false
+        default: ""
+      publish_release:
+        description: "Attach libraries to a GitHub release (freerdp-libs-<ref>)"
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - "scripts/build_freerdp.py"
+      - ".github/workflows/build-freerdp.yml"
+  release:
+    types: [published]
+
+concurrency:
+  group: build-freerdp-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Defaults for non-dispatch triggers. Dispatch inputs override below.
+  FREERDP_REF: ${{ inputs.freerdp_ref || '3.16.0' }}
+  DESKTOP_PROFILE: ${{ inputs.profile || 'full' }}
+  ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Desktop hosts. One job per (OS, arch); each runs the script with
+  # --target host and uploads pyfreerdp/_libs/ as an artifact.
+  #
+  # Profiles: Linux gets the requested profile (default full = shadow +
+  # proxy too). macOS and Windows are capped at 'minimal' (client + server
+  # libraries, no shadow/proxy) because upstream's shadow/platform servers
+  # don't build cleanly there; that's all the Python binding loads anyway.
+  # ---------------------------------------------------------------------------
+  desktop:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            runner: ubuntu-24.04
+            cap_profile: ""
+          - label: linux-aarch64
+            runner: ubuntu-24.04-arm
+            cap_profile: ""
+          - label: macos-arm64
+            runner: macos-15
+            cap_profile: minimal
+          - label: macos-x86_64
+            # macos-13 was retired Dec 2025; macos-15-intel is the last
+            # Intel image GitHub provides (until Aug 2027).
+            runner: macos-15-intel
+            cap_profile: minimal
+          - label: windows-x64
+            runner: windows-2022
+            cap_profile: minimal
+    # Matrix jobs can't emit per-cell outputs, so each cell writes its
+    # link into the step summary and the `links` job re-reads the run's
+    # artifact list via the API.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve effective profile
+        id: profile
+        shell: bash
+        run: |
+          prof="${DESKTOP_PROFILE}"
+          cap="${{ matrix.cap_profile }}"
+          # full -> minimal on platforms that can't build shadow/proxy.
+          if [ -n "$cap" ] && [ "$prof" = "full" ]; then
+            echo "Capping profile full -> $cap on ${{ matrix.label }}"
+            prof="$cap"
+          fi
+          echo "profile=$prof" >> "$GITHUB_OUTPUT"
+
+      # ---- dependencies ---------------------------------------------------
+
+      - name: Install build deps (apt)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git pkg-config \
+            libssl-dev zlib1g-dev libkrb5-dev libcjson-dev libicu-dev \
+            libx11-dev libxext-dev libxrandr-dev libxinerama-dev \
+            libxfixes-dev libxcursor-dev libxi-dev libxv-dev \
+            libxkbfile-dev libxkbcommon-dev \
+            libwayland-dev wayland-protocols \
+            libasound2-dev libpng-dev libjpeg-dev libcairo2-dev
+          # Optional channel deps, only if the user asked for them.
+          extra=""
+          for ch in $ENABLE_CHANNELS; do
+            case "$ch" in
+              urbdrc)  extra="$extra libusb-1.0-0-dev" ;;
+              printer) extra="$extra libcups2-dev" ;;
+              rdpecam) extra="$extra libavcodec-dev libavutil-dev libswscale-dev libv4l-dev" ;;
+              tsmf)    extra="$extra libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev" ;;
+            esac
+          done
+          if [ -n "$extra" ]; then sudo apt-get install -y --no-install-recommends $extra; fi
+
+      - name: Install build deps (brew)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew update >/dev/null
+          # cairo = image scaler (WITH_CAIRO), openssl@3 = TLS.
+          brew install cmake ninja pkg-config openssl@3 cairo libpng jpeg-turbo
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      - name: Export GitHub Actions cache vars for vcpkg
+        if: runner.os == 'Windows'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Install build deps (vcpkg)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+        run: |
+          $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT "vcpkg.exe"
+          & $vcpkg install --triplet x64-windows openssl zlib
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
+          # build_freerdp.py picks up VCPKG_INSTALLATION_ROOT automatically
+          # and passes the vcpkg toolchain file to CMake.
+          "VCPKG_DEFAULT_TRIPLET=x64-windows" | Out-File -Append -FilePath $env:GITHUB_ENV
+
+      # ---- build ----------------------------------------------------------
+
+      - name: Show channel plan
+        shell: bash
+        run: |
+          args=""
+          for ch in $ENABLE_CHANNELS; do args="$args --enable-channel $ch"; done
+          python scripts/build_freerdp.py --list-channels \
+            --profile "${{ steps.profile.outputs.profile }}" $args
+
+      - name: Build FreeRDP ${{ env.FREERDP_REF }}
+        shell: bash
+        run: |
+          args=""
+          for ch in $ENABLE_CHANNELS; do args="$args --enable-channel $ch"; done
+          if [ "$RUNNER_OS" = "macOS" ]; then jobs=$(sysctl -n hw.ncpu);
+          elif [ "$RUNNER_OS" = "Windows" ]; then jobs=$NUMBER_OF_PROCESSORS;
+          else jobs=$(nproc); fi
+          python scripts/build_freerdp.py \
+            --target host \
+            --ref "$FREERDP_REF" \
+            --profile "${{ steps.profile.outputs.profile }}" \
+            --jobs "$jobs" $args
+
+      - name: Bundle vcpkg runtime DLLs next to the FreeRDP DLLs
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # freerdp3.dll / winpr3.dll import libssl / libcrypto / zlib from
+          # vcpkg. Ship them alongside so the artifact is loadable as-is.
+          $src = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\x64-windows\bin"
+          Get-ChildItem "$src\*.dll" | Copy-Item -Destination "pyfreerdp\_libs" -Force
+          Get-ChildItem "pyfreerdp\_libs"
+
+      # ---- verify ---------------------------------------------------------
+
+      - name: Verify libraries load and channels are present
+        shell: bash
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/pyfreerdp/_libs
+          DYLD_LIBRARY_PATH: ${{ github.workspace }}/pyfreerdp/_libs
+        run: |
+          set -e
+          ls -la pyfreerdp/_libs/
+          python - <<'PY'
+          import ctypes, glob, os, platform, sys
+          libs = "pyfreerdp/_libs"
+          ext = {"Windows": ".dll", "Darwin": ".dylib"}.get(platform.system(), ".so")
+          def find(stem):
+              hits = sorted(p for p in glob.glob(os.path.join(libs, "*%s*" % stem))
+                            if ext in p and os.path.isfile(p))
+              assert hits, "missing %s" % stem
+              return hits[0]
+          if platform.system() == "Windows":
+              os.add_dll_directory(os.path.abspath(libs))
+          for stem in ("winpr3", "freerdp3", "freerdp-client3", "freerdp-server3"):
+              path = find(stem)
+              lib = ctypes.CDLL(path)
+              print("loaded", os.path.basename(path))
+          srv = ctypes.CDLL(find("freerdp-server3"))
+          # A few server-side channel entry points that must exist when
+          # WITH_SERVER_CHANNELS built everything.
+          for sym in ("cliprdr_server_context_new", "rdpsnd_server_context_new",
+                      "rdpgfx_server_context_new", "rail_server_context_new",
+                      "drdynvc_server_context_new", "disp_server_context_new"):
+              getattr(srv, sym)
+              print("server channel ok:", sym)
+          print("OK")
+          PY
+
+      # ---- package + upload -----------------------------------------------
+
+      - name: Package libraries
+        id: pkg
+        shell: bash
+        run: |
+          name="freerdp-${FREERDP_REF}-${{ matrix.label }}-${{ steps.profile.outputs.profile }}"
+          mkdir -p out
+          {
+            echo "FreeRDP ref:  $FREERDP_REF"
+            echo "Profile:      ${{ steps.profile.outputs.profile }}"
+            echo "Platform:     ${{ matrix.label }} ($RUNNER_OS, $(uname -m 2>/dev/null || echo x64))"
+            echo "Extra chans:  ${ENABLE_CHANNELS:-none}"
+            echo "Repo commit:  $GITHUB_SHA"
+            echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Files:"
+            ls -l pyfreerdp/_libs
+          } > pyfreerdp/_libs/BUILD-INFO.txt
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            (cd pyfreerdp && 7z a -tzip "../out/$name.zip" _libs >/dev/null)
+            echo "file=out/$name.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -C pyfreerdp -czf "out/$name.tar.gz" _libs
+            echo "file=out/$name.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          ls -lh out/
+
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: ${{ steps.pkg.outputs.file }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0   # already compressed
+
+      - name: Publish artifact link to job summary
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.label }} — FreeRDP $FREERDP_REF (${{ steps.profile.outputs.profile }})"
+            echo
+            echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+            echo
+            echo "Artifact id: \`${{ steps.upload.outputs.artifact-id }}\`  ·  file: \`$(basename ${{ steps.pkg.outputs.file }})\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Android. Cross-compiles with the NDK preinstalled on the Ubuntu runner.
+  # OpenSSL isn't in the NDK, so we cross-build it first and hand its prefix
+  # to the script via PYFREERDP_EXTRA_CMAKE.
+  # ---------------------------------------------------------------------------
+  android:
+    name: android-${{ matrix.abi }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            openssl_target: android-arm64
+          - abi: x86_64
+            openssl_target: android-x86_64
+    env:
+      API_LEVEL: "24"
+      OPENSSL_VERSION: "3.3.2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build git perl
+
+      - name: Locate NDK
+        id: ndk
+        run: |
+          ndk="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          test -f "$ndk/build/cmake/android.toolchain.cmake"
+          echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
+          rev=$(grep -oP 'Pkg.Revision\s*=\s*\K.*' "$ndk/source.properties")
+          echo "revision=$rev" >> "$GITHUB_OUTPUT"
+          echo "Using NDK $rev at $ndk"
+
+      - name: Cache cross-built OpenSSL
+        id: ssl-cache
+        uses: actions/cache@v4
+        with:
+          path: openssl-android-${{ matrix.abi }}
+          key: openssl-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
+
+      - name: Cross-build OpenSSL for ${{ matrix.abi }}
+        if: steps.ssl-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          curl -fsSL -o openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          tar xzf openssl.tar.gz
+          export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          cd "openssl-${OPENSSL_VERSION}"
+          ./Configure ${{ matrix.openssl_target }} -D__ANDROID_API__=${API_LEVEL} \
+            shared no-tests no-docs \
+            --prefix="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}" \
+            --openssldir="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/ssl"
+          make -j"$(nproc)" build_libs
+          make install_sw
+
+      - name: Build FreeRDP ${{ env.FREERDP_REF }} for ${{ matrix.abi }}
+        env:
+          # CMAKE_FIND_ROOT_PATH is needed because the NDK toolchain
+          # restricts find_package to the sysroot.
+          PYFREERDP_EXTRA_CMAKE: >-
+            -DOPENSSL_ROOT_DIR=${{ github.workspace }}/openssl-android-${{ matrix.abi }}
+            -DCMAKE_FIND_ROOT_PATH=${{ github.workspace }}/openssl-android-${{ matrix.abi }}
+        run: |
+          python scripts/build_freerdp.py \
+            --target android --abi ${{ matrix.abi }} --api-level ${API_LEVEL} \
+            --ref "$FREERDP_REF" --profile minimal --jobs "$(nproc)"
+          # Ship OpenSSL alongside so the artifact is self-contained.
+          cp openssl-android-${{ matrix.abi }}/lib/libssl.so \
+             openssl-android-${{ matrix.abi }}/lib/libcrypto.so \
+             pyfreerdp/_libs/android/${{ matrix.abi }}/
+          ls -la pyfreerdp/_libs/android/${{ matrix.abi }}/
+
+      - name: Verify ELF targets and channel symbols
+        run: |
+          set -e
+          d=pyfreerdp/_libs/android/${{ matrix.abi }}
+          for f in $d/*.so; do
+            file "$f" | grep -q "ELF" || { echo "::error::$f is not an ELF"; exit 1; }
+          done
+          nm="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          $nm -D --defined-only $d/libfreerdp-server3.so | grep -q cliprdr_server_context_new
+          $nm -D --defined-only $d/libfreerdp-server3.so | grep -q rdpgfx_server_context_new
+          echo "server channels present"
+
+      - name: Package
+        id: pkg
+        run: |
+          name="freerdp-${FREERDP_REF}-android-${{ matrix.abi }}-minimal"
+          mkdir -p out
+          {
+            echo "FreeRDP ref:  $FREERDP_REF"
+            echo "Platform:     android ${{ matrix.abi }} (API ${API_LEVEL}, OpenSSL ${OPENSSL_VERSION})"
+            echo "Repo commit:  $GITHUB_SHA"
+            echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > pyfreerdp/_libs/android/${{ matrix.abi }}/BUILD-INFO.txt
+          tar -C pyfreerdp/_libs/android -czf "out/$name.tar.gz" ${{ matrix.abi }}
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "file=out/$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: ${{ steps.pkg.outputs.file }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Publish artifact link to job summary
+        run: |
+          {
+            echo "### android-${{ matrix.abi }} — FreeRDP $FREERDP_REF (minimal)"
+            echo
+            echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Collect every artifact link into one table, and optionally attach the
+  # files to a GitHub release so the URLs outlive the 30-day artifact TTL.
+  # ---------------------------------------------------------------------------
+  links:
+    name: artifact links
+    needs: [desktop, android]
+    if: always() && (needs.desktop.result != 'cancelled')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # only used when publishing a release
+      actions: read     # list artifacts of this run
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: List artifacts of this run
+        id: list
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+            --jq '.artifacts[] | select(.expired == false) | [.name, .id, .size_in_bytes] | @tsv' \
+            | sort > artifacts.tsv
+          cat artifacts.tsv
+          echo "count=$(wc -l < artifacts.tsv)" >> "$GITHUB_OUTPUT"
+
+      - name: Write summary table
+        run: |
+          base="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "## FreeRDP ${FREERDP_REF} — prebuilt libraries"
+            echo
+            echo "Built from \`${GITHUB_SHA:0:7}\` · [workflow run]($base)"
+            echo
+            echo "| Platform | Size | Download |"
+            echo "|---|---|---|"
+            while IFS=$'\t' read -r name id size; do
+              plat="${name#freerdp-${FREERDP_REF}-}"
+              mb=$(awk -v b="$size" 'BEGIN{printf "%.1f MB", b/1048576}')
+              echo "| \`$plat\` | $mb | [$name.zip]($base/artifacts/$id) |"
+            done < artifacts.tsv
+            echo
+            echo "Artifacts expire after 30 days. GitHub wraps each file in a .zip; inside is the .tar.gz / .zip of \`pyfreerdp/_libs\`."
+            if [ "${{ needs.desktop.result }}" != "success" ] || [ "${{ needs.android.result }}" != "success" ]; then
+              echo
+              echo "> ⚠️ Some build legs failed (desktop: ${{ needs.desktop.result }}, android: ${{ needs.android.result }}). Missing platforms are absent from the table."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download all artifacts
+        if: |
+          (github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
+          github.event_name == 'release'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: freerdp-*
+          merge-multiple: true
+          path: release/
+
+      - name: Attach to GitHub release
+        if: |
+          (github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
+          github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="freerdp-libs-${FREERDP_REF}"
+          ls -lh release/
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber
+          else
+            gh release create "$tag" release/* \
+              --title "FreeRDP $FREERDP_REF prebuilt libraries" \
+              --prerelease \
+              --target "$GITHUB_SHA" \
+              --notes "Prebuilt libfreerdp / libfreerdp-client / libfreerdp-server / libwinpr with all client and server virtual channels, built by scripts/build_freerdp.py from FreeRDP ${FREERDP_REF}.
+
+          Built from commit ${GITHUB_SHA} — workflow run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Unpack the archive for your platform and drop the contents into \`pyfreerdp/_libs/\` (Android: \`pyfreerdp/_libs/android/<abi>/\`). See BUILD-INFO.txt inside each archive."
+          fi
+          {
+            echo
+            echo "### Release"
+            echo
+            echo "Permanent download URLs: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${tag}"
+            for f in release/*; do
+              echo "- ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${tag}/$(basename "$f")"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
