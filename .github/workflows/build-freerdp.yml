@@ -232,16 +232,6 @@ jobs:
             --profile "${{ steps.profile.outputs.profile }}" \
             --jobs "$jobs" $args
 
-      - name: Bundle vcpkg runtime DLLs next to the FreeRDP DLLs
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          # freerdp3.dll / winpr3.dll import libssl / libcrypto / zlib from
-          # vcpkg. Ship them alongside so the artifact is loadable as-is.
-          $src = Join-Path $env:VCPKG_INSTALLATION_ROOT "installed\${{ matrix.vcpkg_triplet }}\bin"
-          Get-ChildItem "$src\*.dll" | Copy-Item -Destination "pyfreerdp\_libs" -Force
-          Get-ChildItem "pyfreerdp\_libs"
-
       # ---- verify ---------------------------------------------------------
 
       - name: Verify PE machine type (Windows)
@@ -316,6 +306,11 @@ jobs:
             echo "Profile:      ${{ steps.profile.outputs.profile }}"
             echo "Platform:     ${{ matrix.label }} ($RUNNER_OS, $(uname -m 2>/dev/null || echo x64))"
             echo "Extra chans:  ${ENABLE_CHANNELS:-none}"
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              echo "Runtime:      third-party DLLs (OpenSSL, zlib) are bundled;"
+              echo "              the VC++ 2015-2022 redistributable must be present"
+              echo "              (it ships with Python on Windows)."
+            fi
             echo "Repo commit:  $GITHUB_SHA"
             echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo
