@@ -91,16 +91,42 @@ jobs:
           "
 
   # ---------------------------------------------------------------------------
+  # Detect whether the FreeRDP build script (or this workflow) changed. A
+  # real path diff against the push/PR base - `github.event.head_commit.
+  # modified` only looks at the single head commit and is not populated
+  # for every push type, so gating on it skipped the build silently.
+  # ---------------------------------------------------------------------------
+  changes:
+    name: detect changed paths
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      build_script: ${{ steps.filter.outputs.build_script }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            build_script:
+              - 'scripts/build_freerdp.py'
+              - '.github/workflows/ci.yml'
+
+  # ---------------------------------------------------------------------------
   # Build FreeRDP from source with --profile=full and verify all libraries
-  # land in pyfreerdp/_libs/. This is the slow path - only on workflow_dispatch
-  # or PRs touching the build script.
+  # (client, server, winpr) plus the client/server channels land in
+  # pyfreerdp/_libs/. Slow path: runs on workflow_dispatch, or when the
+  # build script / this workflow changed in the push or PR.
   # ---------------------------------------------------------------------------
   build-from-source:
     name: build FreeRDP from source (--profile=full)
     runs-on: ubuntu-latest
+    needs: changes
     if: |
       github.event_name == 'workflow_dispatch' ||
-      contains(github.event.head_commit.modified, 'scripts/build_freerdp.py')
+      needs.changes.outputs.build_script == 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -109,23 +135,43 @@ jobs:
       - name: Install FreeRDP build deps (apt)
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build git pkg-config \
-            libssl-dev zlib1g-dev \
+            libssl-dev zlib1g-dev libkrb5-dev libcjson-dev libicu-dev \
             libx11-dev libxext-dev libxrandr-dev libxinerama-dev \
             libxfixes-dev libxcursor-dev libxi-dev libxv-dev \
             libxkbfile-dev libxkbcommon-dev \
             libwayland-dev wayland-protocols \
             libasound2-dev libpng-dev libjpeg-dev libcairo2-dev
+      - name: Show channel plan
+        run: |
+          python scripts/build_freerdp.py --list-channels --profile full
       - name: Build FreeRDP (full profile)
         run: |
-          python scripts/build_freerdp.py --target host --profile full --jobs 4
+          python scripts/build_freerdp.py --target host --profile full --jobs "$(nproc)"
       - name: Assert all halves staged
         run: |
           ls -1 pyfreerdp/_libs/ | tee /tmp/libs.txt
           grep -q 'freerdp-client' /tmp/libs.txt
           grep -q 'freerdp-server' /tmp/libs.txt
           grep -q 'winpr' /tmp/libs.txt
+      - name: Assert client + server channels compiled in
+        run: |
+          set -e
+          # Server channels are exported; client channels live in a static
+          # entry table with hidden visibility, so look at all symbols.
+          for sym in cliprdr_server_context_new rdpsnd_server_context_new \
+                     rdpgfx_server_context_new rail_server_context_new \
+                     drdynvc_server_context_new disp_server_context_new; do
+            nm -D --defined-only pyfreerdp/_libs/libfreerdp-server3.so | grep -q " $sym$" \
+              || { echo "::error::server channel symbol missing: $sym"; exit 1; }
+          done
+          for sym in cliprdr_VirtualChannelEntryEx drdynvc_VirtualChannelEntryEx \
+                     rdpgfx_DVCPluginEntry disp_DVCPluginEntry drive_DeviceServiceEntry; do
+            nm --defined-only pyfreerdp/_libs/libfreerdp-client3.so | grep -q " $sym$" \
+              || { echo "::error::client channel symbol missing: $sym"; exit 1; }
+          done
+          echo "client + server channels present"
       - name: Run full test matrix against bundled libs
         run: |
           pip install -e .[dev]
