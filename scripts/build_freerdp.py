@@ -521,7 +521,31 @@ def cmake_options_for(profile, host_os, enable_channels=None,
 # Host build (Linux / macOS / Windows native)
 # ---------------------------------------------------------------------------
 
-def host_dependency_probe(host_os):
+# Windows target architectures: CLI name -> (Visual Studio -A value,
+# vcpkg triplet, PE machine type as reported by dumpbin / pefile).
+WINDOWS_ARCHS = {
+    "x64":   ("x64",   "x64-windows",   "x64"),
+    "x86":   ("Win32", "x86-windows",   "x86"),
+    "arm64": ("ARM64", "arm64-windows", "arm64"),
+}
+
+
+def host_windows_arch(arch="host"):
+    """Normalise --arch for Windows builds; 'host' picks the runner's CPU."""
+    if arch in (None, "", "host"):
+        m = platform.machine().upper()
+        if m == "ARM64":
+            return "arm64"
+        if m in ("X86", "I386", "I686"):
+            return "x86"
+        return "x64"
+    if arch not in WINDOWS_ARCHS:
+        raise SystemExit("Unknown --arch {0}; pick one of {1}".format(
+            arch, sorted(WINDOWS_ARCHS)))
+    return arch
+
+
+def host_dependency_probe(host_os, arch="host"):
     """
     Look for optional-but-default-ON FreeRDP dependencies on the host and
     turn the matching feature off with a loud warning when they're absent,
@@ -563,8 +587,9 @@ def host_dependency_probe(host_os):
         if vcpkg and "CMAKE_TOOLCHAIN_FILE" not in extra:
             tc = os.path.join(vcpkg, "scripts", "buildsystems", "vcpkg.cmake")
             if os.path.isfile(tc):
-                triplet = os.environ.get("VCPKG_DEFAULT_TRIPLET",
-                                         "x64-windows")
+                triplet = os.environ.get(
+                    "VCPKG_DEFAULT_TRIPLET",
+                    WINDOWS_ARCHS[host_windows_arch(arch)][1])
                 opts += ["-DCMAKE_TOOLCHAIN_FILE={0}".format(tc),
                          "-DVCPKG_TARGET_TRIPLET={0}".format(triplet)]
                 print("[probe] using vcpkg toolchain {0} ({1})".format(
@@ -591,9 +616,12 @@ def _pkg_config_has(module):
 
 
 def build_host(src, prefix, jobs, profile, enable_channels=None,
-               disable_channels=None, channels_enabled=True):
+               disable_channels=None, channels_enabled=True, arch="host"):
     require_tools(["cmake", "git"])
     host_os = platform.system()
+    if host_os != "Windows" and arch not in (None, "", "host"):
+        raise SystemExit("--arch is only supported for Windows host builds "
+                         "(use --target android/ios for mobile).")
     build_dir = os.path.join(src, "build")
     if os.path.exists(build_dir):
         shutil.rmtree(build_dir)
@@ -603,7 +631,7 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
                              enable_channels=enable_channels,
                              disable_channels=disable_channels,
                              channels_enabled=channels_enabled)
-    opts += host_dependency_probe(host_os)
+    opts += host_dependency_probe(host_os, arch)
     extra = os.environ.get("PYFREERDP_EXTRA_CMAKE", "").split()
 
     cfg = ["cmake", "-S", src, "-B", build_dir,
@@ -612,9 +640,11 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
         pass  # caller picked a generator via PYFREERDP_EXTRA_CMAKE
     elif host_os == "Windows":
         # Visual Studio generator: works without a vcvars shell, unlike
-        # Ninja+cl. Pick the platform from the host architecture.
-        arch = "ARM64" if platform.machine().upper() == "ARM64" else "x64"
-        cfg += ["-A", arch]
+        # Ninja+cl, and cross-compiles x86 / ARM64 from an x64 host.
+        vs_arch = WINDOWS_ARCHS[host_windows_arch(arch)][0]
+        print("[build] Windows target: {0} (-A {1})".format(
+            host_windows_arch(arch), vs_arch))
+        cfg += ["-A", vs_arch]
     elif have("ninja"):
         cfg += ["-G", "Ninja"]
 
@@ -915,20 +945,36 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
 # iOS cross-build (host must be macOS)
 # ---------------------------------------------------------------------------
 
+IOS_PLATFORMS = ("OS64", "SIMULATOR64", "SIMULATORARM64")
+
+
 def build_ios(src, jobs, profile, enable_channels=None,
-              disable_channels=None, channels_enabled=True):
+              disable_channels=None, channels_enabled=True,
+              ios_platform="OS64"):
     if platform.system() != "Darwin":
         raise SystemExit("iOS builds require macOS + Xcode.")
+    if ios_platform not in IOS_PLATFORMS:
+        raise SystemExit("Unknown --ios-platform {0}; pick one of {1}".format(
+            ios_platform, IOS_PLATFORMS))
     require_tools(["cmake", "xcodebuild"])
-    toolchain = os.path.join(repo_root(), "cmake", "toolchains", "ios.cmake")
+    # Prefer the toolchain FreeRDP ships (a maintained copy of
+    # leetal/ios-cmake): it disables code signing for the tool binaries,
+    # honours CMAKE_FIND_ROOT_PATH for cross-built deps such as OpenSSL,
+    # and understands the same PLATFORM values as our thin fallback.
+    toolchain = os.path.join(src, "cmake", "ios.toolchain.cmake")
+    if not os.path.isfile(toolchain):
+        toolchain = os.path.join(repo_root(), "cmake", "toolchains",
+                                 "ios.cmake")
     if not os.path.isfile(toolchain):
         raise SystemExit("Missing iOS toolchain at {0}".format(toolchain))
+    print("[ios] toolchain: {0}  platform: {1}".format(toolchain,
+                                                        ios_platform))
 
-    build_dir = os.path.join(src, "build-ios")
+    build_dir = os.path.join(src, "build-ios-{0}".format(ios_platform))
     if os.path.exists(build_dir):
         shutil.rmtree(build_dir)
     os.makedirs(build_dir)
-    install_dir = os.path.join(repo_root(), "build", "ios")
+    install_dir = os.path.join(repo_root(), "build", "ios", ios_platform)
     if not os.path.isdir(install_dir):
         os.makedirs(install_dir)
 
@@ -938,15 +984,32 @@ def build_ios(src, jobs, profile, enable_channels=None,
                              enable_channels=enable_channels,
                              disable_channels=disable_channels,
                              channels_enabled=channels_enabled)
-    opts = [o for o in opts if not o.startswith("-DBUILD_SHARED_LIBS=")]
-    opts.append("-DBUILD_SHARED_LIBS=OFF")  # static archive
+    opts += [
+        "-DBUILD_SHARED_LIBS=OFF",          # static archives for iOS
+        "-DWITH_CAIRO=OFF",                 # no cairo on iOS
+        "-DWITH_CLIENT_IOS=OFF",            # native iOS client is an Xcode app
+        "-DWITH_CLIENT_SDL=OFF",
+        "-DWITH_PLATFORM_SERVER=OFF",
+        "-DWITH_KRB5=OFF",
+        "-DENABLE_BITCODE=OFF",
+        # Tool executables (winpr-makecert etc.) would otherwise demand a
+        # signing identity the CI runner doesn't have.
+        "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO",
+        "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO",
+        "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY=",
+    ]
+    opts = dedupe_defines(opts)
+    # OpenSSL for iOS is not on the runner; callers hand us a cross-built
+    # prefix via PYFREERDP_EXTRA_CMAKE, e.g.
+    #   -DOPENSSL_ROOT_DIR=/p -DCMAKE_FIND_ROOT_PATH=/p -DCMAKE_PREFIX_PATH=/p
+    extra = os.environ.get("PYFREERDP_EXTRA_CMAKE", "").split()
 
     cfg = [
         "cmake", "-S", src, "-B", build_dir,
         "-DCMAKE_TOOLCHAIN_FILE={0}".format(toolchain),
-        "-DPLATFORM=OS64",
+        "-DPLATFORM={0}".format(ios_platform),
         "-DCMAKE_INSTALL_PREFIX={0}".format(install_dir),
-    ] + opts + ["-G", "Xcode"]
+    ] + opts + extra + ["-G", "Xcode"]
     run(cfg)
     if channels_enabled:
         verify_channel_cache(build_dir, expected_channel_cache(
@@ -954,13 +1017,21 @@ def build_ios(src, jobs, profile, enable_channels=None,
     run(["cmake", "--build", build_dir, "--config", "Release",
          "--parallel", str(jobs)])
     run(["cmake", "--install", build_dir, "--config", "Release"])
-    target = os.path.join(package_root(), "pyfreerdp", "_libs", "ios")
+    target = os.path.join(package_root(), "pyfreerdp", "_libs", "ios",
+                          ios_platform)
     if not os.path.isdir(target):
         os.makedirs(target)
+    staged = []
     for a in glob.glob(os.path.join(install_dir, "lib", "*.a")):
         dst = os.path.join(target, os.path.basename(a))
         shutil.copy2(a, dst)
+        staged.append(os.path.basename(a).lower())
         print("[ios] {0}".format(dst))
+    missing = [s for s in EXPECTED_LIBS[profile]
+               if not any(s in n for n in staged)]
+    if missing:
+        raise SystemExit("[ios] expected static libraries missing: {0}\n"
+                         "staged: {1}".format(missing, staged))
     return target
 
 
@@ -996,6 +1067,16 @@ def main():
     p.add_argument("--list-channels", action="store_true",
                    help="Print the channel table for the chosen profile/"
                         "target and exit without building.")
+    p.add_argument("--arch", default="host",
+                   choices=("host", "x64", "x86", "arm64"),
+                   help="Windows only: target architecture (default: the "
+                        "runner's own). x86/arm64 cross-compile with the "
+                        "Visual Studio generator and the matching vcpkg "
+                        "triplet.")
+    p.add_argument("--ios-platform", default="OS64", choices=IOS_PLATFORMS,
+                   help="iOS only: OS64 = arm64 device (default), "
+                        "SIMULATORARM64 = arm64 simulator, "
+                        "SIMULATOR64 = x86_64 simulator.")
     p.add_argument("--abi", default="arm64-v8a")
     p.add_argument("--api-level", type=int, default=24)
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
@@ -1044,7 +1125,7 @@ def main():
         build_host(src, prefix, args.jobs, args.profile,
                    enable_channels=args.enable_channel,
                    disable_channels=args.disable_channel,
-                   channels_enabled=channels_enabled)
+                   channels_enabled=channels_enabled, arch=args.arch)
         artifacts = collect_host_artifacts(prefix)
         if not artifacts:
             sys.stderr.write(
@@ -1068,7 +1149,8 @@ def main():
         build_ios(src, args.jobs, args.profile,
                   enable_channels=args.enable_channel,
                   disable_channels=args.disable_channel,
-                  channels_enabled=channels_enabled)
+                  channels_enabled=channels_enabled,
+                  ios_platform=args.ios_platform)
         return 0
 
     return 1
