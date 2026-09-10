@@ -527,7 +527,7 @@ def build_ffmpeg(tc, work):
 # Windows: vcpkg manifest
 # ---------------------------------------------------------------------------
 
-def build_windows_vcpkg(prefix, arch, jobs):
+def build_windows_vcpkg(prefix, arch, jobs, profile="full"):
     vcpkg_root = (os.environ.get("VCPKG_ROOT")
                   or os.environ.get("VCPKG_INSTALLATION_ROOT"))
     if not vcpkg_root:
@@ -541,10 +541,13 @@ def build_windows_vcpkg(prefix, arch, jobs):
     installed = os.path.join(prefix, "vcpkg_installed")
     env = dict(os.environ)
     env.setdefault("VCPKG_MAX_CONCURRENCY", str(jobs))
-    run([exe, "install", "--triplet", triplet,
-         "--x-manifest-root={0}".format(manifest_dir),
-         "--x-install-root={0}".format(installed),
-         "--clean-after-build"], env=env)
+    cmd = [exe, "install", "--triplet", triplet,
+           "--x-manifest-root={0}".format(manifest_dir),
+           "--x-install-root={0}".format(installed),
+           "--clean-after-build"]
+    if profile == "full":
+        cmd += ["--x-feature=media", "--x-feature=sdl"]
+    run(cmd, env=env)
     # Flatten to the same <prefix>/{bin,lib,include} shape as source builds
     # so build_freerdp.py can treat all targets alike.
     tri = os.path.join(installed, triplet)
@@ -683,6 +686,11 @@ def main():
     p.add_argument("--work", help="download/extract dir (default: temp)")
     p.add_argument("--jobs", type=int, default=ncpu())
     p.add_argument("--only", help="comma list of components: libusb,openh264,ffmpeg")
+    p.add_argument("--profile", choices=("minimal", "full"), default="full",
+                   help="full (default): everything. minimal: only what the "
+                        "size-optimised library build needs - on Windows that "
+                        "is OpenSSL/zlib/cJSON from vcpkg; on other platforms "
+                        "nothing (FreeRDP's minimal build uses system OpenSSL).")
     p.add_argument("--print-hashes", action="store_true",
                    help="download the pinned tarballs and print their sha256")
     args = p.parse_args()
@@ -704,8 +712,13 @@ def main():
         args.target, label, prefix, args.jobs))
 
     if args.target == "host" and platform.system() == "Windows":
-        build_windows_vcpkg(prefix, args.arch, args.jobs)
+        build_windows_vcpkg(prefix, args.arch, args.jobs, args.profile)
         write_manifest(prefix, label, [])
+        return 0
+    if args.profile == "minimal":
+        log("profile minimal: no source dependencies to build on this "
+            "platform (system OpenSSL is used); nothing to do")
+        write_manifest(prefix, label + "-minimal", [])
         return 0
 
     require_tools(["make", "pkg-config"])

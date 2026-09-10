@@ -184,61 +184,159 @@ SERVER_CHANNEL_SYMS = ["cliprdr_server_context_new", "rdpsnd_server_context_new"
                        "rdpdr_server_context_new", "echo_server_context_new",
                        "encomsp_server_context_new", "remdesk_server_context_new",
                        "ainput_server_context_new", "location_server_context_new"]
-CLIENT_CHANNEL_SYMS = ["cliprdr_VirtualChannelEntryEx", "rdpsnd_VirtualChannelEntryEx",
-                       "drdynvc_VirtualChannelEntryEx", "rail_VirtualChannelEntryEx",
-                       "rdpdr_VirtualChannelEntryEx", "rdpgfx_DVCPluginEntry",
-                       "disp_DVCPluginEntry", "audin_DVCPluginEntry",
-                       "rdpei_DVCPluginEntry", "echo_DVCPluginEntry",
-                       "drive_DeviceServiceEntry"]
+
+# name -> FREERDP_ADDIN_CHANNEL_* flags used to resolve it from the client's
+# static addin table (include/freerdp/addin.h).
+ADDIN_STATIC, ADDIN_DYNAMIC, ADDIN_DEVICE, ADDIN_ENTRYEX = (
+    0x1000, 0x2000, 0x4000, 0x8000)
+CLIENT_CHANNELS = {
+    "cliprdr": ADDIN_STATIC | ADDIN_ENTRYEX, "rdpsnd": ADDIN_STATIC | ADDIN_ENTRYEX,
+    "drdynvc": ADDIN_STATIC | ADDIN_ENTRYEX, "rail": ADDIN_STATIC | ADDIN_ENTRYEX,
+    "rdpdr": ADDIN_STATIC | ADDIN_ENTRYEX, "encomsp": ADDIN_STATIC | ADDIN_ENTRYEX,
+    "remdesk": ADDIN_STATIC | ADDIN_ENTRYEX,
+    "rdpgfx": ADDIN_DYNAMIC, "disp": ADDIN_DYNAMIC, "audin": ADDIN_DYNAMIC,
+    "rdpei": ADDIN_DYNAMIC, "echo": ADDIN_DYNAMIC, "ainput": ADDIN_DYNAMIC,
+    "location": ADDIN_DYNAMIC, "video": ADDIN_DYNAMIC, "geometry": ADDIN_DYNAMIC,
+    "drive": ADDIN_DEVICE, "smartcard": ADDIN_DEVICE,
+}
+CLIENT_CHANNELS_FULL_ONLY = {"urbdrc": ADDIN_DYNAMIC}
 
 
-def symbols_in(path, want_syms):
-    """Return the subset of want_syms present in the binary (any visibility)."""
+def load_all(paths):
+    """ctypes-load winpr -> freerdp -> client/server, RTLD_GLOBAL, in order."""
     if SYS == "Windows":
-        lib = ctypes.CDLL(path)
-        return [s for s in want_syms if hasattr(lib, s)]
-    tool = "nm"
-    if SYS == "Darwin":
-        out = subprocess.check_output([tool, path]).decode(errors="replace")
-        names = set(l.split()[-1].lstrip("_") for l in out.splitlines()
-                    if l.strip())
-    else:
-        out = subprocess.check_output([tool, "--defined-only", path]).decode(
-            errors="replace")
-        names = set(l.split()[-1] for l in out.splitlines() if l.strip())
-    return [s for s in want_syms if s in names]
+        os.add_dll_directory(os.path.dirname(list(paths.values())[0]))
+    libs = {}
+    for stem in ("winpr3", "freerdp3", "freerdp-client3", "freerdp-server3"):
+        if stem in paths:
+            libs[stem] = ctypes.CDLL(paths[stem], mode=getattr(
+                ctypes, "RTLD_GLOBAL", 0))
+    return libs
 
 
-def check_channels(paths):
-    srv = paths.get("freerdp-server3")
-    cli = paths.get("freerdp-client3")
+def check_channels(paths, media=False):
+    libs = load_all(paths)
+    srv = libs.get("freerdp-server3")
+    cli = libs.get("freerdp-client3")
     if srv:
-        got = symbols_in(srv, SERVER_CHANNEL_SYMS)
-        missing = sorted(set(SERVER_CHANNEL_SYMS) - set(got))
+        # Server channel contexts are exported (FREERDP_API) - survive strip.
+        missing = [s for s in SERVER_CHANNEL_SYMS if not hasattr(srv, s)]
         if missing:
             fail("channels.server", "missing {0}".format(missing))
         else:
-            ok("channels.server", "{0} server channels exported".format(len(got)))
+            ok("channels.server", "{0} server channels exported".format(
+                len(SERVER_CHANNEL_SYMS)))
     if cli:
-        if SYS == "Windows":
-            # Static entry points are hidden in the DLL; the public loader
-            # is the observable surface.
-            lib = ctypes.CDLL(cli)
-            have = [s for s in ("freerdp_client_load_addins",
-                                "freerdp_channels_load_static_addin_entry")
-                    if hasattr(lib, s)]
-            if have:
-                ok("channels.client", "static addin loader present")
-            else:
-                fail("channels.client", "no channel loader exported")
+        # Client channels live in a hidden static table; ask FreeRDP's own
+        # resolver for each one (works on stripped binaries, all platforms).
+        try:
+            fn = cli.freerdp_channels_load_static_addin_entry
+        except AttributeError:
+            fail("channels.client", "freerdp_channels_load_static_addin_entry "
+                                    "not exported")
+            return libs
+        fn.restype = ctypes.c_void_p
+        fn.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+                       ctypes.c_uint32]
+        want = dict(CLIENT_CHANNELS)
+        if media:
+            want.update(CLIENT_CHANNELS_FULL_ONLY)
+        if SYS != "Linux":
+            pass  # serial/parallel are Linux-only and not in the list anyway
+        missing = [n for n, flags in sorted(want.items())
+                   if not fn(n.encode(), None, None, flags)]
+        if missing:
+            fail("channels.client", "not in static addin table: {0}".format(missing))
         else:
-            got = symbols_in(cli, CLIENT_CHANNEL_SYMS)
-            missing = sorted(set(CLIENT_CHANNEL_SYMS) - set(got))
-            if missing:
-                fail("channels.client", "missing {0}".format(missing))
-            else:
-                ok("channels.client", "{0} client channel entries present".format(
-                    len(got)))
+            ok("channels.client", "{0} client channels resolve from the static "
+                                  "addin table".format(len(want)))
+    return libs
+
+
+# ---------------------------------------------------------------------------
+# Kerberos (SSPI security packages)
+# ---------------------------------------------------------------------------
+
+SEC_E_UNSUPPORTED_FUNCTION = 0x80090302
+
+
+def check_kerberos(paths, expect):
+    """
+    Exercise winpr's SSPI at runtime: enumerate the security packages and
+    try to acquire a Kerberos credential handle with no identity. A build
+    with krb5 goes into libkrb5 (ccache lookup) and comes back with e.g.
+    SEC_E_NO_CREDENTIALS - instantly, no network. A build without returns
+    SEC_E_UNSUPPORTED_FUNCTION. On Windows winpr forwards to the native
+    SSPI, so Kerberos is provided by the OS.
+
+    expect: True (must be live), False (must be compiled out), None (report).
+    """
+    winpr = paths.get("winpr3")
+    if not winpr:
+        return
+    if SYS == "Windows":
+        os.add_dll_directory(os.path.dirname(winpr))
+    lib = ctypes.CDLL(winpr)
+
+    class SecHandle(ctypes.Structure):
+        _fields_ = [("dwLower", ctypes.c_void_p), ("dwUpper", ctypes.c_void_p)]
+
+    class TimeStamp(ctypes.Structure):
+        _fields_ = [("LowPart", ctypes.c_uint32), ("HighPart", ctypes.c_int32)]
+
+    class SecPkgInfoA(ctypes.Structure):
+        _fields_ = [("fCapabilities", ctypes.c_uint32), ("wVersion", ctypes.c_uint16),
+                    ("wRPCID", ctypes.c_uint16), ("cbMaxToken", ctypes.c_uint32),
+                    ("Name", ctypes.c_char_p), ("Comment", ctypes.c_char_p)]
+    ENUM = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(ctypes.c_uint32),
+                            ctypes.POINTER(ctypes.POINTER(SecPkgInfoA)))
+    ACQ = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_char_p, ctypes.c_char_p,
+                           ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p,
+                           ctypes.c_void_p, ctypes.c_void_p,
+                           ctypes.POINTER(SecHandle), ctypes.POINTER(TimeStamp))
+    FREE = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(SecHandle))
+
+    class Table(ctypes.Structure):
+        _fields_ = [("dwVersion", ctypes.c_uint32),
+                    ("EnumerateSecurityPackagesA", ENUM),
+                    ("QueryCredentialsAttributesA", ctypes.c_void_p),
+                    ("AcquireCredentialsHandleA", ACQ),
+                    ("FreeCredentialsHandle", FREE)]
+    try:
+        init = lib.InitSecurityInterfaceExA
+    except AttributeError:
+        fail("kerberos", "InitSecurityInterfaceExA not exported by winpr")
+        return
+    init.restype = ctypes.POINTER(Table)
+    init.argtypes = [ctypes.c_uint32]
+    table = init(0).contents
+    n = ctypes.c_uint32()
+    arr = ctypes.POINTER(SecPkgInfoA)()
+    if table.EnumerateSecurityPackagesA(ctypes.byref(n), ctypes.byref(arr)) != 0:
+        fail("kerberos", "EnumerateSecurityPackagesA failed")
+        return
+    names = [arr[i].Name.decode(errors="replace") for i in range(n.value)]
+    if "Kerberos" not in names:
+        fail("kerberos", "Kerberos not among SSPI packages: {0}".format(names))
+        return
+    cred = SecHandle()
+    ts = TimeStamp()
+    status = table.AcquireCredentialsHandleA(None, b"Kerberos", 2, None, None,
+                                             None, None, ctypes.byref(cred),
+                                             ctypes.byref(ts)) & 0xFFFFFFFF
+    if status == 0:
+        table.FreeCredentialsHandle(ctypes.byref(cred))
+    live = status != SEC_E_UNSUPPORTED_FUNCTION
+    detail = "packages {0}; Kerberos AcquireCredentialsHandle -> 0x{1:08X} ({2})".format(
+        names, status, "krb5 backend live" if live else "compiled out")
+    if SYS == "Windows":
+        detail = "native SSPI; " + detail
+    if expect is True and not live:
+        fail("kerberos", detail)
+    elif expect is False and live:
+        fail("kerberos", "expected no Kerberos but " + detail)
+    else:
+        ok("kerberos", detail)
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +755,11 @@ def main():
     p.add_argument("--loopback", action="store_true")
     p.add_argument("--no-usb", action="store_true",
                    help="skip libusb runtime probing (containers without USB)")
+    p.add_argument("--kerberos", choices=("on", "off", "auto"), default="auto",
+                   help="on: require a live krb5 backend (Linux default, "
+                        "Windows native SSPI); off: require it compiled out; "
+                        "auto: Linux/Windows -> on, macOS -> off (unless "
+                        "PYFREERDP_KRB5=1).")
     args = p.parse_args()
 
     libs = os.path.abspath(args.libs)
@@ -672,7 +775,13 @@ def main():
         want.append("freerdp-server3")
     paths = check_libs(libs, want)
     if paths:
-        check_channels(paths)
+        check_channels(paths, media=args.media)
+        if args.kerberos == "auto":
+            expect = (True if SYS in ("Linux", "Windows")
+                      else os.environ.get("PYFREERDP_KRB5") == "1")
+        else:
+            expect = args.kerberos == "on"
+        check_kerberos(paths, expect)
         if args.media:
             check_media(libs, paths)
     h264 = None

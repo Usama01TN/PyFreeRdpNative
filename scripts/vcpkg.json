@@ -2,26 +2,41 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "pyfreerdp-deps",
   "version-string": "1",
-  "description": "Windows build dependencies for pyfreerdp's FreeRDP build (consumed by scripts/build_deps.py --target host on Windows, for the x64-windows, x86-windows and arm64-windows triplets).",
+  "description": "Windows build dependencies for pyfreerdp's FreeRDP build (x64-windows, x86-windows, arm64-windows). Core = what every profile needs; 'media' and 'sdl' are pulled in by --profile full.",
   "builtin-baseline": "3d33b7f7a8121da6e4fa80b35618fc8e960be686",
   "dependencies": [
     "openssl",
     "zlib",
-    "openh264",
-    "libusb",
-    {
-      "name": "ffmpeg",
-      "default-features": false,
-      "features": [
-        "avcodec",
-        "avformat",
-        "avfilter",
-        "swresample",
-        "swscale",
+    "cjson"
+  ],
+  "features": {
+    "media": {
+      "description": "FFmpeg (LGPL subset with libopenh264), OpenH264, libusb",
+      "dependencies": [
         "openh264",
-        "ffmpeg",
-        "ffprobe"
+        "libusb",
+        {
+          "name": "ffmpeg",
+          "default-features": false,
+          "features": [
+            "avcodec",
+            "avformat",
+            "avfilter",
+            "swresample",
+            "swscale",
+            "openh264",
+            "ffmpeg",
+            "ffprobe"
+          ]
+        }
+      ]
+    },
+    "sdl": {
+      "description": "SDL3 + SDL3_ttf for the cross-platform sdl-freerdp client",
+      "dependencies": [
+        "sdl3",
+        "sdl3-ttf"
       ]
     }
-  ]
+  }
 }

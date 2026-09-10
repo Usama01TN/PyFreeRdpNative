@@ -234,6 +234,190 @@ CHANNELS = {
                      note="ssh-agent forwarding, upstream default OFF"),
 }
 
+# ---------------------------------------------------------------------------
+# Build profiles
+# ---------------------------------------------------------------------------
+#
+#   minimal      size-optimised library package: libwinpr3, libfreerdp3,
+#                libfreerdp-client3, libfreerdp-server3 with every channel
+#                that needs no external library. MinSizeRel, stripped, no
+#                executables, no FFmpeg/OpenH264/libusb, no shadow/proxy.
+#                This is what the Python wheel ships.
+#
+#   full         feature-complete: everything minimal has, plus FFmpeg +
+#                OpenH264 (H.264 encode/decode, AAC/Opus DSP, swscale),
+#                libusb (urbdrc USB redirection; rdpecam camera on Linux),
+#                the proxy and sample servers, winpr tools, the platform
+#                client(s), and - where upstream supports it - the shadow
+#                server. Release build. Executables are staged in _bin/.
+#
+#   client-only / server-only   library-only variants of minimal.
+#
+# What "full" can include differs per platform; the table below is the
+# single source of truth (facts from FreeRDP's own CMake):
+#
+#   shadow     server/CMakeLists.txt: "Mac shadow server implementation no
+#              longer compiles" -> never on macOS; upstream's Windows CI
+#              builds with WITH_SHADOW=OFF -> off on Windows; Linux only.
+#   proxy      portable (needs cJSON for config) -> desktop hosts.
+#   sample     portable -> desktop hosts (it is the loopback test server).
+#   client     xfreerdp/wlfreerdp (Linux, X11/Wayland), wfreerdp (Windows),
+#              sdl-freerdp (any desktop with SDL3 + SDL3_ttf; probed).
+#   mobile     Android/iOS get libraries only: no executables can run there,
+#              proxy/shadow make no sense; media + channels are included.
+
+FULL_PLATFORM = {
+    #            shadow proxy  sample tools
+    "Linux":    (True,  True,  True,  True),
+    "Darwin":   (False, True,  True,  True),
+    "Windows":  (False, True,  True,  True),
+    "Android":  (False, False, False, False),
+    "iOS":      (False, False, False, False),
+}
+
+
+def profile_options(profile, host_os, sdl=False):
+    """-D switches that distinguish minimal from full (beyond channels)."""
+    shadow, proxy, sample, tools = FULL_PLATFORM.get(
+        host_os, (False, False, False, False))
+    want_client, want_server = PROFILE_SIDES[profile]
+    if profile == "full":
+        opts = [
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DWITH_SHADOW={0}".format("ON" if shadow and want_server else "OFF"),
+            "-DWITH_PROXY={0}".format("ON" if proxy and want_server else "OFF"),
+            "-DWITH_PROXY_MODULES={0}".format(
+                "ON" if proxy and want_server else "OFF"),
+            "-DWITH_SAMPLE={0}".format("ON" if sample and want_server else "OFF"),
+            "-DWITH_WINPR_TOOLS={0}".format("ON" if tools else "OFF"),
+            "-DWITH_VERBOSE_WINPR_ASSERT=OFF",
+        ]
+        if want_client and host_os == "Windows":
+            opts.append("-DWITH_CLIENT_WINDOWS=ON")
+        if want_client and host_os in ("Linux", "Darwin", "Windows"):
+            opts.append("-DWITH_CLIENT_SDL={0}".format("ON" if sdl else "OFF"))
+        return opts
+    # minimal / client-only / server-only: small.
+    return [
+        "-DCMAKE_BUILD_TYPE=MinSizeRel",
+        "-DWITH_CLIENT_WINDOWS=OFF",
+        "-DWITH_SHADOW=OFF", "-DWITH_PROXY=OFF", "-DWITH_PROXY_MODULES=OFF",
+        "-DWITH_SAMPLE=OFF", "-DWITH_WINPR_TOOLS=OFF", "-DWITH_MANPAGES=OFF",
+        "-DWITH_VERBOSE_WINPR_ASSERT=OFF", "-DWITH_CLIENT_SDL=OFF",
+        "-DBUILD_TESTING=OFF",
+    ]
+
+
+def expected_libs(profile, host_os):
+    """Library families that must exist after the build, per platform."""
+    libs = list(EXPECTED_LIBS[profile])
+    shadow = FULL_PLATFORM.get(host_os, (False,))[0]
+    if profile == "full" and not shadow:
+        libs = [l for l in libs if l != "freerdp-shadow"]
+    return libs
+
+
+def sdl_available(host_os, deps_prefix=None):
+    """SDL3 + SDL3_ttf present? (pkg-config on Unix, vcpkg tree on Windows)"""
+    if host_os == "Windows":
+        if not deps_prefix:
+            return False
+        return bool(glob.glob(os.path.join(deps_prefix, "lib", "SDL3*.lib"))
+                    and glob.glob(os.path.join(deps_prefix, "lib", "SDL3_ttf*.lib")))
+    return _pkg_config_has("sdl3") and _pkg_config_has("sdl3-ttf")
+
+
+# ---------------------------------------------------------------------------
+# Kerberos policy
+# ---------------------------------------------------------------------------
+#
+# FreeRDP implements Kerberos through winpr's SSPI. Where it comes from:
+#
+#   Linux     MIT krb5 (or Heimdal) via -DWITH_KRB5=ON. FreeRDP's own default
+#             and what upstream CI builds. Enabled in BOTH profiles: the
+#             library size cost is nil (winpr links the system libkrb5). The
+#             full profile bundles libkrb5/libk5crypto/libcom_err/
+#             libkrb5support into _libs; minimal relies on the distro's
+#             krb5-libs (installed by default on all mainstream distros).
+#   Windows   the OS: winpr uses native SSPI (WITH_NATIVE_SSPI is forced ON
+#             for WIN32), so Kerberos/Negotiate come from secur32.dll.
+#             Nothing to build or ship.
+#   macOS     OFF by default. FreeRDP's FindKRB5 rejects the system Kerberos
+#             ("Apple MITKerberosShim is deprecated and not supported") and
+#             upstream's macOS CI builds with WITH_KRB5=OFF. Homebrew's MIT
+#             krb5 is usable but not upstream-verified: opt in with
+#             --with-krb5 (needs `brew install krb5`; the dylibs are bundled).
+#   Android   OFF - upstream CI sets WITH_KRB5=OFF; no supported krb5 build.
+#   iOS       OFF - same.
+
+KRB5_RUNTIME_LIBS = ("libkrb5.", "libk5crypto.", "libcom_err.",
+                     "libkrb5support.", "libgssapi_krb5.")
+
+
+def krb5_options(profile, host_os, target="host", with_krb5=None):
+    """
+    Return (-D switches, list of dirs holding the krb5 runtime libs to bundle
+    or None). with_krb5 True/False overrides the policy; None applies it.
+    """
+    if target in ("android", "ios") or host_os in ("Android", "iOS"):
+        if with_krb5:
+            raise SystemExit("Kerberos (WITH_KRB5) is not supported on "
+                             "Android/iOS builds of FreeRDP")
+        return ["-DWITH_KRB5=OFF"], None
+    if host_os == "Windows":
+        # Native SSPI: Kerberos is provided by Windows itself.
+        return [], None
+    if host_os == "Darwin":
+        if not with_krb5:
+            return ["-DWITH_KRB5=OFF"], None
+        cfg = None
+        if have("brew"):
+            try:
+                pfx = subprocess.check_output(["brew", "--prefix", "krb5"],
+                                              stderr=subprocess.DEVNULL
+                                              ).decode().strip()
+                if os.path.isfile(os.path.join(pfx, "bin", "krb5-config")):
+                    cfg = os.path.join(pfx, "bin", "krb5-config")
+            except (OSError, subprocess.CalledProcessError):
+                pass
+        if not cfg:
+            raise SystemExit("--with-krb5 on macOS needs Homebrew MIT "
+                             "Kerberos: brew install krb5")
+        libdir = os.path.join(os.path.dirname(os.path.dirname(cfg)), "lib")
+        return ["-DWITH_KRB5=ON", "-DKRB5_ROOT_CONFIG={0}".format(cfg)], [libdir]
+    # Linux
+    if with_krb5 is False:
+        return ["-DWITH_KRB5=OFF"], None
+    if not have("krb5-config"):
+        if profile == "full" or with_krb5:
+            raise SystemExit(
+                "Kerberos is part of the full profile on Linux but "
+                "krb5-config was not found. Install libkrb5-dev / krb5-devel, "
+                "or pass --without-krb5.")
+        print("\n[warn] krb5-config not found - minimal build without "
+              "Kerberos (WITH_KRB5=OFF). NLA still works via NTLM.")
+        return ["-DWITH_KRB5=OFF"], None
+    libdirs = None
+    if profile == "full":
+        # Where the distro keeps the krb5 runtime libs (for bundling into
+        # _libs): krb5-config's -L dir, its parent (Debian puts dev links in
+        # mit-krb5/ but the .so.N runtime files one level up), and the usual
+        # multiarch/lib64 dirs.
+        libdirs = []
+        try:
+            out = subprocess.check_output(["krb5-config", "--libs"]).decode()
+            for t in out.split():
+                if t.startswith("-L"):
+                    libdirs += [t[2:], os.path.dirname(t[2:])]
+        except (OSError, subprocess.CalledProcessError):
+            pass
+        libdirs += ["/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu",
+                    "/usr/lib64", "/lib64", "/usr/lib"]
+        libdirs = [d for i, d in enumerate(libdirs)
+                   if os.path.isdir(d) and d not in libdirs[:i]]
+    return ["-DWITH_KRB5=ON"], libdirs
+
+
 # Which flags a profile wants at all.
 PROFILE_SIDES = {
     "full":        (True, True),
@@ -448,15 +632,27 @@ def dedupe_defines(opts):
     return out
 
 
+def deps_media_available(deps_prefix):
+    """Does the prefix carry FFmpeg + OpenH264 (i.e. was it built --profile
+    full)? A minimal Windows prefix only has OpenSSL/zlib/cJSON."""
+    if not deps_prefix:
+        return False
+    return deps_has(deps_prefix, "libavcodec") and deps_has(deps_prefix,
+                                                            "openh264")
+
+
 def media_options(deps_prefix, host_os):
     """
     -D switches that turn on everything a build/deps/<label> prefix (from
-    scripts/build_deps.py) provides: FFmpeg (H.264/MJPEG decode, RDP audio
-    codecs, swscale), OpenH264 (H.264 encode/decode) and libusb (USB
-    redirection, camera V4L backend).
+    scripts/build_deps.py --profile full) provides: FFmpeg (H.264/MJPEG
+    decode, RDP audio codecs, swscale), OpenH264 (H.264 encode/decode) and
+    libusb (USB redirection, camera V4L backend). A prefix without media
+    (minimal) only contributes CMAKE_PREFIX_PATH so OpenSSL/zlib are found.
     """
     if not deps_prefix:
         return []
+    if not deps_media_available(deps_prefix):
+        return ["-DCMAKE_PREFIX_PATH={0}".format(deps_prefix)]
     opts = [
         "-DCMAKE_PREFIX_PATH={0}".format(deps_prefix),
         "-DWITH_FFMPEG=ON",
@@ -492,16 +688,17 @@ def media_channels(deps_prefix, host_os, target="host"):
     chans = []
     if deps_has(deps_prefix, "libusb-1.0") and target != "ios":
         chans.append("urbdrc")
-    # rdpecam client: needs swscale (always in deps) and a capture backend;
-    # only Linux has one (V4L) in FreeRDP 3.16. Server side is always on.
-    if host_os == "Linux" and target == "host":
+    # rdpecam client: needs swscale and a capture backend; only Linux has
+    # one (V4L) in FreeRDP 3.16. Server side is always on.
+    if host_os == "Linux" and target == "host" and deps_media_available(
+            deps_prefix):
         chans.append("rdpecam")
     return chans
 
 
 def cmake_options_for(profile, host_os, enable_channels=None,
                       disable_channels=None, channels_enabled=True,
-                      deps_prefix=None, executables=False):
+                      deps_prefix=None, executables=False, sdl=False):
     """
     Return the list of -D CMake options for the given build profile.
 
@@ -537,33 +734,21 @@ def cmake_options_for(profile, host_os, enable_channels=None,
         "-DWITH_FUSE=OFF",
     ]
 
-    if profile == "full":
-        opts = [
-            "-DWITH_CLIENT=ON", "-DWITH_CLIENT_COMMON=ON",
-            "-DWITH_SERVER=ON", "-DWITH_SHADOW=ON", "-DWITH_PROXY=ON",
-        ]
-    elif profile == "client-only":
-        opts = [
-            "-DWITH_CLIENT=ON", "-DWITH_CLIENT_COMMON=ON",
-            "-DWITH_SERVER=OFF", "-DWITH_SHADOW=OFF", "-DWITH_PROXY=OFF",
-        ]
-    elif profile == "server-only":
-        opts = [
-            "-DWITH_CLIENT=OFF", "-DWITH_CLIENT_COMMON=OFF",
-            "-DWITH_SERVER=ON", "-DWITH_SHADOW=ON", "-DWITH_PROXY=ON",
-        ]
-    elif profile == "minimal":
-        opts = [
-            "-DWITH_CLIENT=ON", "-DWITH_CLIENT_COMMON=ON",
-            "-DWITH_SERVER=ON", "-DWITH_SHADOW=OFF", "-DWITH_PROXY=OFF",
-        ]
-    else:
-        raise SystemExit("Unknown profile: {0}".format(profile))
+    want_client, want_server = PROFILE_SIDES[profile]
+    opts = [
+        "-DWITH_CLIENT={0}".format("ON" if want_client else "OFF"),
+        "-DWITH_CLIENT_COMMON={0}".format("ON" if want_client else "OFF"),
+        "-DWITH_SERVER={0}".format("ON" if want_server else "OFF"),
+    ]
+    opts += profile_options(profile, host_os, sdl=sdl)
 
     if host_os == "Linux":
+        # X11/Wayland only matter for the xfreerdp/wlfreerdp executables;
+        # the minimal library package skips them (and their -dev packages).
+        gui = "ON" if profile == "full" else "OFF"
         opts += [
-            "-DWITH_X11=ON",
-            "-DWITH_WAYLAND=ON",
+            "-DWITH_X11={0}".format(gui),
+            "-DWITH_WAYLAND={0}".format(gui),
             "-DWITH_ALSA=ON",
             "-DWITH_CUPS=OFF",
             "-DWITH_PCSC=OFF",
@@ -574,7 +759,7 @@ def cmake_options_for(profile, host_os, enable_channels=None,
             # Upstream: "Mac platform server implementation no longer
             # compiles". The GUI clients aren't needed for a binding.
             "-DWITH_PLATFORM_SERVER=OFF",
-            "-DWITH_CLIENT_MAC=OFF", "-DWITH_CLIENT_SDL=OFF",
+            "-DWITH_CLIENT_MAC=OFF",   # Xcode/Cocoa app; sdl-freerdp instead
             # Relocatable dylibs: install names use @rpath so the files
             # can be moved into pyfreerdp/_libs and bundled by delocate.
             "-DCMAKE_INSTALL_NAME_DIR=@rpath",
@@ -588,8 +773,8 @@ def cmake_options_for(profile, host_os, enable_channels=None,
             # PYFREERDP_EXTRA_CMAKE.
             "-DWITH_CAIRO=OFF",
             "-DWITH_PLATFORM_SERVER=OFF",
-            "-DWITH_CLIENT_WINDOWS=OFF", "-DWITH_CLIENT_SDL=OFF",
         ]
+    # (WITH_CLIENT_WINDOWS / WITH_CLIENT_SDL are decided by profile_options.)
 
     if deps_prefix:
         enable_channels = list(enable_channels or []) + media_channels(
@@ -616,7 +801,7 @@ def executable_options(profile, host_os):
     """
     want_client, want_server = PROFILE_SIDES[profile]
     opts = ["-DWITH_WINPR_TOOLS=ON"]
-    if want_server:
+    if want_server and host_os in ("Linux", "Darwin", "Windows"):
         opts.append("-DWITH_SAMPLE=ON")
     if want_client and host_os == "Windows":
         opts.append("-DWITH_CLIENT_WINDOWS=ON")
@@ -669,11 +854,7 @@ def host_dependency_probe(host_os, arch="host", deps_prefix=None):
     toolchain or degrades gracefully with a CMake warning.
     """
     opts = []
-    if host_os in ("Linux", "Darwin") and not have("krb5-config"):
-        print("\n[warn] krb5-config not found - building with WITH_KRB5=OFF. "
-              "NLA still works (NTLM), but Kerberos/SSO logins won't. "
-              "Install libkrb5-dev / krb5-devel for full support.")
-        opts.append("-DWITH_KRB5=OFF")
+    # (Kerberos is decided by krb5_options(), not probed here.)
     if host_os == "Darwin":
         if not os.environ.get("OPENSSL_ROOT_DIR") and have("brew"):
             # Homebrew's openssl@3 is keg-only, so CMake won't find it
@@ -746,7 +927,7 @@ def deps_env(deps_prefix, cross=False):
 
 def build_host(src, prefix, jobs, profile, enable_channels=None,
                disable_channels=None, channels_enabled=True, arch="host",
-               deps_prefix=None, executables=False):
+               deps_prefix=None, executables=False, with_krb5=None):
     require_tools(["cmake", "git"])
     host_os = platform.system()
     if host_os != "Windows" and arch not in (None, "", "host"):
@@ -760,13 +941,24 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
         shutil.rmtree(build_dir)
     os.makedirs(build_dir)
 
+    sdl = profile == "full" and sdl_available(host_os, deps_prefix)
+    if profile == "full":
+        print("[build] SDL3 client: {0}".format(
+            "yes" if sdl else "no (SDL3 + SDL3_ttf not found)"))
     opts = cmake_options_for(profile, host_os=host_os,
                              enable_channels=enable_channels,
                              disable_channels=disable_channels,
                              channels_enabled=channels_enabled,
-                             deps_prefix=deps_prefix, executables=executables)
+                             deps_prefix=deps_prefix, executables=executables,
+                             sdl=sdl)
     opts += host_dependency_probe(host_os, arch, deps_prefix)
-    if deps_prefix:
+    krb_opts, krb_libdir = krb5_options(profile, host_os, "host", with_krb5)
+    opts += krb_opts
+    print("[build] Kerberos: {0}".format(
+        "native SSPI (Windows)" if host_os == "Windows" else
+        ("ON" if "-DWITH_KRB5=ON" in krb_opts else "OFF")))
+    build_host.krb5_libdir = krb_libdir
+    if deps_media_available(deps_prefix):
         # cairo probe is irrelevant when swscale is used
         opts = [o for o in opts if not o.startswith("-DWITH_CAIRO=")]
         opts.append("-DWITH_CAIRO=OFF")
@@ -794,12 +986,40 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
             profile, host_os,
             list(enable_channels or []) + media_channels(deps_prefix, host_os),
             disable_channels))
-    if deps_prefix:
+    if deps_media_available(deps_prefix):
         verify_media_cache(build_dir)
-    run(["cmake", "--build", build_dir, "--config", "Release",
+    if host_os != "Windows":
+        verify_krb5_cache(build_dir, "-DWITH_KRB5=ON" in krb_opts)
+    config = "Release" if profile == "full" else "MinSizeRel"
+    run(["cmake", "--build", build_dir, "--config", config,
          "--parallel", str(jobs)], env=env)
-    run(["cmake", "--install", build_dir, "--config", "Release"], env=env)
+    install = ["cmake", "--install", build_dir, "--config", config]
+    if profile != "full" and host_os != "Windows":
+        install.append("--strip")   # size: drop symbol tables
+    run(install, env=env)
     return prefix
+
+
+def verify_krb5_cache(build_dir, expect_on):
+    """After configure: WITH_KRB5 resolved as intended (and a flavour found)."""
+    vals = {}
+    with open(os.path.join(build_dir, "CMakeCache.txt")) as fh:
+        for line in fh:
+            if ":" in line and "=" in line and not line.startswith(("#", "//")):
+                k, _, rest = line.strip().partition(":")
+                vals[k] = rest.partition("=")[2]
+    on = vals.get("WITH_KRB5", "").upper() in ("ON", "TRUE", "1")
+    if on != expect_on:
+        raise SystemExit("[verify] WITH_KRB5 resolved {0}, expected {1}".format(
+            vals.get("WITH_KRB5"), "ON" if expect_on else "OFF"))
+    if on:
+        flavour = vals.get("KRB5_FLAVOUR") or (
+            "MIT" if vals.get("KRB5_MIT_FOUND", "").upper() in ("1", "TRUE")
+            else "?")
+        print("[verify] Kerberos: WITH_KRB5=ON ({0} {1})".format(
+            flavour, vals.get("KRB5_VERSION", "")))
+    else:
+        print("[verify] Kerberos: WITH_KRB5=OFF")
 
 
 def verify_media_cache(build_dir):
@@ -917,7 +1137,7 @@ def collect_host_artifacts(prefix):
     return candidates
 
 
-def verify_artifacts(artifacts, profile):
+def verify_artifacts(artifacts, profile, host_os=None):
     """
     Assert that every library family the profile promised actually exists.
     Prevents shipping a wheel where CMake silently dropped server support
@@ -926,8 +1146,9 @@ def verify_artifacts(artifacts, profile):
     """
     core_names = [os.path.basename(p).lower()
                   for p, sub in artifacts if not sub]
+    want = expected_libs(profile, host_os or platform.system())
     missing = []
-    for stem in EXPECTED_LIBS[profile]:
+    for stem in want:
         if not any(stem in n for n in core_names):
             missing.append(stem)
     if missing:
@@ -940,8 +1161,7 @@ def verify_artifacts(artifacts, profile):
             "above for 'Could NOT find ...' messages and install the "
             "corresponding -dev packages.".format(
                 profile, missing, sorted(set(core_names))))
-    print("[verify] core libraries present: {0}".format(
-        EXPECTED_LIBS[profile]))
+    print("[verify] core libraries present: {0}".format(want))
 
     if platform.system() == "Windows":
         machines = {}
@@ -1234,7 +1454,8 @@ def _macho_deps(path):
     return deps
 
 
-def bundle_unix_runtime_deps(out_dir, deps_prefix, roots=None):
+def bundle_unix_runtime_deps(out_dir, deps_prefix, roots=None,
+                             extra_libdirs=None, extra_allow=None):
     """
     Linux/macOS counterpart of bundle_windows_runtime_deps(): walk the
     dynamic dependencies of everything staged in out_dir and copy the ones
@@ -1243,16 +1464,25 @@ def bundle_unix_runtime_deps(out_dir, deps_prefix, roots=None):
     install names of the copied dylibs, and every reference to them, are
     rewritten to @rpath/<name> so @loader_path resolution works.
     """
-    if not deps_prefix:
+    if not deps_prefix and not extra_libdirs:
         return
     sysname = platform.system()
-    libdirs = [d for d in (os.path.join(deps_prefix, "lib"),
-                           os.path.join(deps_prefix, "lib64"))
+    libdirs = [d for d in ((os.path.join(deps_prefix, "lib"),
+                            os.path.join(deps_prefix, "lib64"))
+                           if deps_prefix else ())
                if os.path.isdir(d)]
     available = {}
     for d in libdirs:
         for fn in os.listdir(d):
             available[fn] = os.path.join(d, fn)
+    # Extra directories (system krb5) are searched only for an allowlist so
+    # we never accidentally vendor glibc or other base libraries.
+    for d in (extra_libdirs or []):
+        if not os.path.isdir(d):
+            continue
+        for fn in os.listdir(d):
+            if any(fn.startswith(p) for p in (extra_allow or ())):
+                available.setdefault(fn, os.path.join(d, fn))
 
     def staged_files():
         return [os.path.join(r, f) for r, _d, fs in os.walk(out_dir)
@@ -1302,7 +1532,9 @@ def bundle_unix_runtime_deps(out_dir, deps_prefix, roots=None):
             for ref in refs:
                 base = os.path.basename(ref)
                 if base in seen and ref != "@rpath/" + base and (
-                        ref.startswith(deps_prefix) or not ref.startswith("/")):
+                        (deps_prefix and ref.startswith(deps_prefix))
+                        or any(ref.startswith(d) for d in (extra_libdirs or []))
+                        or not ref.startswith("/")):
                     subprocess.check_call(["install_name_tool", "-change", ref,
                                            "@rpath/" + base, f])
             if f.endswith(".dylib") and os.path.basename(f) in copied:
@@ -1390,7 +1622,47 @@ def stage_executables(prefixes, libs_dir, deps_prefix=None, arch="host"):
     return staged
 
 
-def install_into_package(artifacts, arch="host", deps_prefix=None):
+def soname_only(artifacts):
+    """
+    Keep one file per library: the SONAME (libX.so.3 / libX.3.dylib). The
+    unversioned dev link and the fully versioned file are the same bytes;
+    the dynamic loader resolves dependencies by SONAME and pyfreerdp's
+    loader probes the SONAME first, so nothing else is needed. Cuts the
+    minimal package to a third of its size.
+    """
+    sysname = platform.system()
+    if sysname == "Windows":
+        return artifacts
+    real = {}
+    for p, sub in artifacts:
+        rp = os.path.realpath(p)
+        real.setdefault((rp, sub), []).append(os.path.basename(p))
+    keep = []
+    for (rp, sub), names in real.items():
+        soname = None
+        if sysname == "Linux":
+            for n in names:            # libfoo.so.N  (exactly one version part)
+                base, _, ver = n.partition(".so.")
+                if ver and ver.isdigit():
+                    soname = n
+        else:
+            for n in names:            # libfoo.N.dylib
+                stem = n[:-len(".dylib")] if n.endswith(".dylib") else ""
+                parts = stem.rsplit(".", 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    soname = n
+        if soname is None:             # modules without version: keep as is
+            soname = sorted(names, key=len)[0]
+        keep.append((os.path.join(os.path.dirname(rp), soname)
+                     if os.path.exists(os.path.join(os.path.dirname(rp), soname))
+                     else rp, sub))
+    return keep
+
+
+def install_into_package(artifacts, arch="host", deps_prefix=None,
+                         compact=False, krb5_libdir=None):
+    if compact:
+        artifacts = soname_only(artifacts)
     out = os.path.join(package_root(), "pyfreerdp", "_libs")
     if not os.path.isdir(out):
         os.makedirs(out)
@@ -1416,7 +1688,10 @@ def install_into_package(artifacts, arch="host", deps_prefix=None):
     if platform.system() == "Windows":
         bundle_windows_runtime_deps(out, arch, deps_prefix)
     else:
-        bundle_unix_runtime_deps(out, deps_prefix)
+        bundle_unix_runtime_deps(
+            out, deps_prefix,
+            extra_libdirs=krb5_libdir or None,
+            extra_allow=KRB5_RUNTIME_LIBS if krb5_libdir else None)
     _fix_rpath(out)
     return out
 
@@ -1571,7 +1846,7 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
     if channels_enabled:
         verify_channel_cache(build_dir, expected_channel_cache(
             profile, "Android", enable_channels, disable_channels))
-    if deps_prefix:
+    if deps_media_available(deps_prefix):
         verify_media_cache(build_dir)
     env = deps_env(deps_prefix, cross=True)
     run(["cmake", "--build", build_dir, "--parallel", str(jobs)], env=env)
@@ -1683,7 +1958,7 @@ def build_ios(src, jobs, profile, enable_channels=None,
     ] + opts + extra + generator
     env = deps_env(deps_prefix, cross=True)
     run(cfg, env=env)
-    if deps_prefix:
+    if deps_media_available(deps_prefix):
         verify_media_cache(build_dir)
     if channels_enabled:
         verify_channel_cache(build_dir, expected_channel_cache(
@@ -1811,7 +2086,12 @@ def main():
     p.add_argument("--profile",
                    choices=("full", "client-only", "server-only", "minimal"),
                    default="full",
-                   help="Which subset of FreeRDP to build (default: full)")
+                   help="minimal: size-optimised libraries only (MinSizeRel, "
+                        "stripped, no media deps, no executables). full: "
+                        "feature-complete (Release, FFmpeg/OpenH264/libusb, "
+                        "all channels, executables, proxy/sample; shadow "
+                        "on Linux). client-only/server-only: library-only "
+                        "variants of minimal. Default: full.")
     p.add_argument("--enable-channel", action="append", default=[],
                    metavar="NAME",
                    help="Turn on a default-off channel (both client and "
@@ -1846,6 +2126,17 @@ def main():
                         "Linux) channels, and bundles those libraries into "
                         "pyfreerdp/_libs. 'auto' = build/deps/<label> if "
                         "it exists.")
+    p.add_argument("--with-krb5", dest="with_krb5", action="store_true",
+                   default=None,
+                   help="Force Kerberos on (Linux: default anyway; macOS: uses "
+                        "Homebrew MIT krb5, not upstream-verified).")
+    p.add_argument("--without-krb5", dest="with_krb5", action="store_false",
+                   help="Build without Kerberos even where it is supported.")
+    p.add_argument("--no-deps", action="store_true",
+                   help="full profile only: build without FFmpeg/OpenH264/"
+                        "libusb even if build/deps/<label> exists.")
+    p.add_argument("--no-executables", action="store_true",
+                   help="full profile only: do not build/stage executables.")
     p.add_argument("--with-executables", action="store_true",
                    help="Also build and stage the executables (xfreerdp/"
                         "wfreerdp, sfreerdp-server, freerdp-shadow-cli, "
@@ -1866,7 +2157,22 @@ def main():
     host_os = {"host": platform.system(), "android": "Android",
                "ios": "iOS"}[args.target]
     channels_enabled = not args.no_channels
+    # Profile defaults: full pulls in the media deps and the executables
+    # unless told otherwise; minimal never does.
+    if args.deps_prefix is None and args.profile == "full" and not args.no_deps:
+        args.deps_prefix = "auto"
+    if args.no_deps:
+        args.deps_prefix = None
+    if args.profile == "full" and args.target == "host" and not args.no_executables:
+        args.with_executables = True
     deps_prefix = resolve_deps_prefix(args)
+    if args.profile == "full" and args.deps_prefix and not deps_prefix \
+            and not args.no_deps and not (
+                platform.system() == "Windows" and args.target == "host"):
+        raise SystemExit(
+            "--profile full needs the media dependencies. Run "
+            "scripts/build_deps.py first (or pass --no-deps for a full "
+            "build without FFmpeg/OpenH264/libusb).")
     if deps_prefix:
         print("[pyfreerdp-build] deps prefix: {0}".format(deps_prefix))
         args.enable_channel = list(args.enable_channel) + media_channels(
@@ -1906,22 +2212,25 @@ def main():
                    enable_channels=args.enable_channel,
                    disable_channels=args.disable_channel,
                    channels_enabled=channels_enabled, arch=args.arch,
-                   deps_prefix=deps_prefix, executables=args.with_executables)
+                   deps_prefix=deps_prefix, executables=args.with_executables,
+                   with_krb5=args.with_krb5)
         artifacts = collect_host_artifacts(prefix)
         if not artifacts:
             sys.stderr.write(
                 "No artifacts found after build - something went wrong.\n")
             return 3
         if not args.skip_verify:
-            verify_artifacts(artifacts, args.profile)
-        out = install_into_package(artifacts, arch=args.arch,
-                                   deps_prefix=deps_prefix)
+            verify_artifacts(artifacts, args.profile, host_os)
+        out = install_into_package(
+            artifacts, arch=args.arch, deps_prefix=deps_prefix,
+            compact=(args.profile != "full"),
+            krb5_libdir=getattr(build_host, "krb5_libdir", None))
         if args.with_executables:
             stage_executables([prefix] + ([deps_prefix] if deps_prefix else []),
                               out, deps_prefix=deps_prefix, arch=args.arch)
         if not args.skip_verify:
             verify_loadable(out, args.profile, arch=args.arch)
-            if deps_prefix:
+            if deps_media_available(deps_prefix):
                 verify_media_linked(out)
         print("\nDone. Library installed under {0}.".format(out))
         return 0

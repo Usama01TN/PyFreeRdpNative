@@ -13,6 +13,43 @@ from pinned sources:
 Everything is driven by `.github/workflows/build-freerdp.yml` (all platforms,
 artifacts + optional release) and `ci.yml` (Linux, every push/PR).
 
+## Two profiles, built independently
+
+| | `minimal` | `full` |
+|---|---|---|
+| Purpose | what the Python wheel ships | everything FreeRDP can do on the platform |
+| Libraries | libwinpr3, libfreerdp3, libfreerdp-client3, libfreerdp-server3 (+ librdtk0) | those plus FFmpeg, OpenH264, libusb, shadow (Linux), proxy |
+| Channels | every channel with no external dependency (20 client / 17 server) | all of them, incl. `urbdrc` (USB) and `rdpecam` client (Linux camera) |
+| Media | none | H.264 encode/decode (OpenH264 + FFmpeg), AAC/Opus DSP, swscale |
+| Executables | none | platform client(s), `sdl-freerdp` where SDL3 is available, `sfreerdp-server`, `freerdp-proxy`, `freerdp-shadow-cli` (Linux), `winpr-makecert`, `winpr-hash`, `ffmpeg`, `ffprobe`, `h264enc`, `h264dec`, `listdevs` |
+| Build type | `MinSizeRel`, stripped, one SONAME file per library | `Release`, dev links kept |
+| Linux x86_64 size | **3.5 MB** | 28 MB `_libs` + 3.7 MB `_bin` |
+| Command | `build_freerdp.py --profile minimal` | `build_deps.py` then `build_freerdp.py --profile full` |
+
+The profiles share nothing at build time except the FreeRDP source checkout;
+each one wipes and repopulates `pyfreerdp/_libs` (and `_bin` for full), so
+build the one you want to ship last. In CI every platform produces both as
+separate artifacts (`freerdp-<ref>-<platform>-minimal` / `-full`).
+
+`--profile full` implies `--deps-prefix auto` and `--with-executables`; use
+`--no-deps` / `--no-executables` to override. `--profile minimal` never builds
+media dependencies or executables; on Windows it still consumes the vcpkg
+prefix for OpenSSL/zlib (`build_deps.py --profile minimal`), which does not
+turn media on - activation is driven by what the prefix contains.
+
+### What "full" means per platform
+
+Facts from FreeRDP's own CMake (`server/CMakeLists.txt`, upstream CI presets),
+encoded once in `FULL_PLATFORM` in `build_freerdp.py`:
+
+| Platform | shadow server | proxy | sample server | winpr tools | client executables |
+|---|---|---|---|---|---|
+| Linux | yes (X11 subsystem) | yes | yes | yes | xfreerdp, wlfreerdp, sdl-freerdp (if SDL3) |
+| macOS | **no** - upstream: "Mac shadow server implementation no longer compiles" | yes | yes | yes | sdl-freerdp (brew sdl3 + sdl3_ttf) |
+| Windows | **no** - upstream builds Windows with `WITH_SHADOW=OFF` | yes | yes | yes | wfreerdp, sdl-freerdp (vcpkg sdl3 + sdl3-ttf) |
+| Android | no | no | no | no | none (libraries only; media + channels included) |
+| iOS | no | no | no | no | none (static libraries only; no libusb - no USB host API) |
+
 ## Quick start (Linux / macOS)
 
 ```bash
@@ -23,18 +60,15 @@ sudo apt-get install -y build-essential cmake ninja-build git pkg-config nasm pa
     libxi-dev libxv-dev libxkbfile-dev libxkbcommon-dev libwayland-dev wayland-protocols \
     libasound2-dev libpng-dev libjpeg-dev libcairo2-dev xvfb
 
-# 2. dependencies (~10 min on 4 cores; cached by CI)
+# minimal: libraries only, ~10 min
+python scripts/build_freerdp.py --target host --profile minimal
+python scripts/validate_build.py --profile minimal          # expect 4 passed
+
+# full: dependencies (~10 min, cached by CI) + FreeRDP with everything (~15 min)
 python scripts/build_deps.py --target host
-
-# 3. FreeRDP + executables (~15 min)
-python scripts/build_freerdp.py --target host --profile full \
-    --deps-prefix auto --with-executables
-
-# 4. prove it
-python scripts/validate_build.py --media --executables --loopback
+python scripts/build_freerdp.py --target host --profile full
+python scripts/validate_build.py --media --executables --loopback   # expect 16 passed
 ```
-
-Expected tail of step 4: `[validate] 15 passed, 0 failed`.
 
 ## What ends up in the package
 
@@ -57,7 +91,7 @@ redistributable that Python already installs.
 
 ### Channels
 
-All 30 FreeRDP channels are compiled into the libraries (FreeRDP 3 has no
+All FreeRDP channels are compiled into the libraries (FreeRDP 3 has no
 plugin files). Client side: drdynvc, rdpdr, cliprdr, rdpsnd, audin, rdpgfx,
 disp, rail, rdpei, ainput, location, echo, encomsp, remdesk, drive, smartcard,
 video, geometry, serial/parallel (Linux), **urbdrc** (USB, via libusb) and
@@ -79,17 +113,43 @@ including telemetry, rdpemsc and rdpecam. `--list-channels` prints the table;
 
 ## Per-platform notes
 
-| Target | How deps are built | FreeRDP | Executables |
-|---|---|---|---|
-| Linux x86_64 / aarch64 | source (autotools/make) | shared, `full` | all |
-| macOS arm64 / x86_64 | source; `@rpath` install names | shared, `minimal` | sfreerdp-server, winpr tools, ffmpeg, ffprobe, h264enc/dec, listdevs |
-| Windows x64 / x86 / arm64 | vcpkg manifest (`scripts/vcpkg.json`, pinned baseline); x86 + arm64 cross-compiled with `-A Win32` / `-A ARM64` | shared, `minimal` | wfreerdp, sfreerdp-server, winpr tools, ffmpeg, ffprobe |
-| Android arm64-v8a / x86_64 | NDK cross; OpenSSL cross-built in the workflow | shared, `minimal` | none (libraries only) |
-| iOS OS64 / SIMULATORARM64 | static; libusb skipped (no USB host API) | static, `minimal` | none |
+| Target | How deps are built | Library type |
+|---|---|---|
+| Linux x86_64 / aarch64 | source (autotools/make) | shared |
+| macOS arm64 / x86_64 | source; `@rpath` install names; SDL3 via Homebrew | shared |
+| Windows x64 / x86 / arm64 | vcpkg manifest (`scripts/vcpkg.json`: core + `media` + `sdl` features, pinned baseline); x86 + arm64 cross-compiled with `-A Win32` / `-A ARM64` | shared |
+| Android arm64-v8a / x86_64 | NDK cross; OpenSSL cross-built in the workflow | shared |
+| iOS OS64 / SIMULATORARM64 | static; libusb skipped (no USB host API) | static |
 
 `build_freerdp.py --arch {x64,x86,arm64}` selects the Windows target;
 `--ios-platform` and `--abi` select mobile targets. `--deps-prefix auto`
 resolves to `build/deps/<label>` for the current target.
+
+## Kerberos
+
+Kerberos authentication (NLA with a domain account, SSO) goes through winpr's
+SSPI layer. Whether and how it is available is decided per platform, from
+FreeRDP's own support matrix, in `krb5_options()` in `build_freerdp.py`:
+
+| Platform | Kerberos | Source | Ships in package |
+|---|---|---|---|
+| Linux (both profiles) | **on** | MIT krb5 via `WITH_KRB5=ON` (FreeRDP's default; upstream CI builds it) | full: `libkrb5`, `libk5crypto`, `libcom_err`, `libkrb5support` bundled into `_libs`. minimal: uses the distro's krb5 runtime (part of every mainstream base install) — zero size cost |
+| Windows (both) | **on** | the OS: winpr forwards to native SSPI (`WITH_NATIVE_SSPI` is forced on for WIN32), Kerberos/Negotiate come from `secur32.dll` | nothing needed |
+| macOS | **off** by default | FreeRDP's `FindKRB5` rejects Apple's system Kerberos ("MITKerberosShim is deprecated and not supported") and upstream's macOS CI builds with `WITH_KRB5=OFF`. Homebrew MIT krb5 works but is not upstream-verified: `brew install krb5 && build_freerdp.py --with-krb5` (dylibs are then bundled) | — |
+| Android, iOS | **off** | upstream CI sets `WITH_KRB5=OFF`; no supported krb5 build | — |
+
+Full on Linux **requires** krb5 (`libkrb5-dev` / `krb5-devel`) and fails with a
+clear message otherwise; minimal falls back to `WITH_KRB5=OFF` with a loud
+warning. `--without-krb5` disables it anywhere. After configure the script
+re-reads `CMakeCache.txt` and fails if `WITH_KRB5` didn't resolve as intended.
+
+`validate_build.py --kerberos on|off|auto` proves it at runtime without a KDC:
+it enumerates winpr's SSPI packages (must list `Kerberos`) and calls
+`AcquireCredentialsHandle("Kerberos")` with no identity. A live krb5 backend
+goes into libkrb5 and returns e.g. `SEC_E_NO_CREDENTIALS` instantly; a build
+without krb5 returns `SEC_E_UNSUPPORTED_FUNCTION`. Configuration at runtime is
+the standard `/etc/krb5.conf` / `KRB5_CONFIG`; a ticket cache from `kinit` (or
+`/u:user@REALM /p:...`) is used by the client as usual.
 
 ## Validation
 
@@ -97,7 +157,8 @@ resolves to `build/deps/<label>` for the current target.
 
 * `libs` — each core library loads by absolute path in a fresh interpreter with
   library paths scrubbed.
-* `channels.*` — server contexts exported; client static entry table present.
+* `channels.*` — server contexts exported; every client channel resolves through FreeRDP's own `freerdp_channels_load_static_addin_entry()` (strip-proof).
+* `kerberos` — SSPI package list + live-backend probe (see the Kerberos section).
 * `media.linked / media.h264 / media.dsp` — libfreerdp3 imports FFmpeg and
   OpenH264 and they are staged; `h264_context_new()` returns a context for both
   decoder and encoder; `freerdp_dsp_supports_format()` accepts AAC and Opus.
