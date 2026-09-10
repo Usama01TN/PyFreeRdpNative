@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 8
+BUILD_SCRIPT_VERSION = 9
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -330,7 +330,12 @@ def profile_options(profile, host_os, sdl=False):
             "-DWITH_VERBOSE_WINPR_ASSERT=OFF",
         ]
         if want_client and host_os == "Windows":
-            opts.append("-DWITH_CLIENT_WINDOWS=ON")
+            # wfreerdp.exe links wfreerdp-client3.dll (add_library follows
+            # BUILD_SHARED_LIBS), but client/Windows/CMakeLists.txt only
+            # installs that DLL when WITH_CLIENT_INTERFACE is ON. Without it
+            # the executable ships without its own library
+            # (STATUS_DLL_NOT_FOUND: wfreerdp-client3.dll).
+            opts += ["-DWITH_CLIENT_WINDOWS=ON", "-DWITH_CLIENT_INTERFACE=ON"]
         if want_client and host_os in ("Linux", "Darwin", "Windows"):
             opts.append("-DWITH_CLIENT_SDL={0}".format("ON" if sdl else "OFF"))
         return opts
