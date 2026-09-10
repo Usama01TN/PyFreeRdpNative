@@ -118,8 +118,8 @@ including telemetry, rdpemsc and rdpecam. `--list-channels` prints the table;
 | Linux x86_64 / aarch64 | source (autotools/make) | shared |
 | macOS arm64 / x86_64 | source; `@rpath` install names; SDL3 via Homebrew | shared |
 | Windows x64 / x86 / arm64 | vcpkg manifest (`scripts/vcpkg.json`: core + `media` + `sdl` features, pinned baseline); x86 + arm64 cross-compiled with `-A Win32` / `-A ARM64` | shared |
-| Android arm64-v8a / x86_64 | NDK cross; OpenSSL cross-built in the workflow | shared |
-| iOS OS64 / SIMULATORARM64 | static; libusb skipped (no USB host API) | static |
+| Android arm64-v8a / armeabi-v7a / x86_64 / x86 | NDK cross; OpenSSL cross-built in the workflow | shared |
+| iOS OS64 (device, both profiles) / SIMULATORARM64 (minimal only) | static; libusb skipped (no USB host API); OpenH264/FFmpeg build for the device SDK only | static |
 
 `build_freerdp.py --arch {x64,x86,arm64}` selects the Windows target;
 `--ios-platform` and `--abi` select mobile targets. `--deps-prefix auto`
@@ -171,10 +171,33 @@ the standard `/etc/krb5.conf` / `KRB5_CONFIG`; a ticket cache from `kinit` (or
 * `loopback` (Linux) — `sfreerdp-server` + `xfreerdp` under Xvfb: TLS session
   activates, RDPSND is negotiated, dynamic channels open.
 
+## When a CI leg fails
+
+Every build job uploads a `diagnostics-<platform>-<profile>` artifact on
+failure containing `CMakeCache.txt`, `CMakeConfigureLog.yaml` /
+`CMakeError.log` and the resolved `vcpkg.json` (Windows). The real cause of a
+CMake configure failure is almost always in those files rather than in the
+console log; attach them when reporting a problem.
+
+Every job also starts with a version handshake (`--require-version N`) so a
+stale `scripts/` directory fails immediately with an explanation.
+
+## Releases
+
+Artifacts (30-day retention) are listed with direct links in each run's
+Summary. Additionally the `links` job attaches every artifact to the rolling
+pre-release `freerdp-libs-<freerdp_ref>` on each push to `main`, on
+`workflow_dispatch` with `publish_release`, and on `release: published`, so
+there are permanent download URLs of the form
+`https://github.com/<owner>/<repo>/releases/download/freerdp-libs-3.16.0/freerdp-3.16.0-<platform>-<profile>.tar.gz`
+(`.zip` on Windows).
+
 ## Reproducibility
 
 Sources are pinned by version and SHA-256 (`KNOWN_HASHES`); `vcpkg.json` pins
-a registry baseline; FreeRDP is pinned by tag (`--ref`, default 3.16.0). CI
+a registry baseline (resolved at build time against the runner's vcpkg clone,
+falling back to its HEAD if the pinned commit is absent - the chosen commit is
+printed and stored in the diagnostics); FreeRDP is pinned by tag (`--ref`, default 3.16.0). CI
 caches `build/deps/<label>` keyed on the hash of `build_deps.py` +
 `vcpkg.json`, so a dependency change rebuilds everything and nothing else does.
 To bump a dependency: change the version in `SOURCES`, run

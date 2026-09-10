@@ -134,7 +134,7 @@ FFMPEG_COMPONENTS = {
 # ---------------------------------------------------------------------------
 
 # Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
-BUILD_SCRIPT_VERSION = 5
+BUILD_SCRIPT_VERSION = 6
 
 
 def log(msg):
@@ -262,6 +262,18 @@ def label_for(target, arch=None, abi=None, ios_platform=None):
 # Toolchain descriptions
 # ---------------------------------------------------------------------------
 
+ANDROID_TRIPLES = {
+    "arm64-v8a": "aarch64-linux-android",
+    "armeabi-v7a": "arm-linux-androideabi",
+    "x86_64": "x86_64-linux-android",
+    "x86": "i686-linux-android",
+}
+ANDROID_OPENH264_ARCH = {"arm64-v8a": "arm64", "armeabi-v7a": "arm",
+                         "x86_64": "x86_64", "x86": "x86"}
+ANDROID_FFMPEG_ARCH = {"arm64-v8a": "aarch64", "armeabi-v7a": "arm",
+                       "x86_64": "x86_64", "x86": "x86"}
+
+
 class Toolchain(object):
     """
     Everything the three build systems (autotools for libusb/FFmpeg,
@@ -305,12 +317,13 @@ class Toolchain(object):
             self.tc = os.path.join(ndk, "toolchains", "llvm", "prebuilt",
                                    host_tag)
             self.sysroot = os.path.join(self.tc, "sysroot")
-            triple = {"arm64-v8a": "aarch64-linux-android",
-                      "x86_64": "x86_64-linux-android"}[self.abi]
+            triple = ANDROID_TRIPLES[self.abi]
             self.triple = triple
             b = os.path.join(self.tc, "bin")
+            # armv7 clang wrappers are named armv7a-linux-androideabi<N>-clang
+            cc_triple = "armv7a-linux-androideabi" if self.abi == "armeabi-v7a" else triple
             self.cc = os.path.join(b, "{0}{1}-clang".format(
-                triple, self.api_level))
+                cc_triple, self.api_level))
             self.cxx = self.cc + "++"
             self.ar = os.path.join(b, "llvm-ar")
             self.ranlib = os.path.join(b, "llvm-ranlib")
@@ -353,15 +366,17 @@ class Toolchain(object):
     def openh264_make_vars(self):
         v = ["PREFIX={0}".format(self.prefix)]
         if self.target == "android":
-            arch = {"arm64-v8a": "arm64", "x86_64": "x86_64"}[self.abi]
             v += ["OS=android", "NDKROOT={0}".format(self.ndk),
                   "TARGET=android-{0}".format(self.api_level),
-                  "ARCH={0}".format(arch),
+                  "ARCH={0}".format(ANDROID_OPENH264_ARCH[self.abi]),
                   "NDKLEVEL={0}".format(self.api_level)]
+            if self.abi in ("x86", "x86_64") and not have("nasm"):
+                v += ["USE_ASM=No"]
         elif self.target == "ios":
-            v += ["OS=ios", "ARCH={0}".format(self.arch)]
-            if self.ios_platform.startswith("SIMULATOR"):
-                v += ["SDK_MIN=13.0", "SDKROOT={0}".format(self.sysroot)]
+            # build/platform-ios.mk defaults to -miphoneos-version-min=5.1
+            # (rejected for arm64) - override; bitcode is patched out in
+            # build_openh264(). Only the device SDK is supported for arm64.
+            v += ["OS=ios", "ARCH={0}".format(self.arch), "SDK_MIN=13.0"]
         else:
             m = platform.machine().lower()
             arch = {"x86_64": "x86_64", "amd64": "x86_64",
@@ -393,7 +408,7 @@ class Toolchain(object):
         else:
             f += ["--enable-static", "--disable-shared", "--disable-programs"]
         if self.target == "android":
-            arch = {"arm64-v8a": "aarch64", "x86_64": "x86_64"}[self.abi]
+            arch = ANDROID_FFMPEG_ARCH[self.abi]
             f += ["--enable-cross-compile", "--target-os=android",
                   "--arch={0}".format(arch),
                   "--cc={0}".format(self.cc), "--cxx={0}".format(self.cxx),
@@ -406,8 +421,10 @@ class Toolchain(object):
                   "--extra-ldflags=-Wl,-z,max-page-size=16384"]
             if arch == "aarch64":
                 f += ["--cpu=armv8-a"]
+            elif arch == "arm":
+                f += ["--cpu=armv7-a", "--enable-neon", "--enable-thumb"]
             else:
-                f += ["--disable-asm"]  # x86_64 asm needs nasm cross setup
+                f += ["--disable-asm"]  # x86/x86_64 asm needs nasm cross setup
         elif self.target == "ios":
             f += ["--enable-cross-compile", "--target-os=darwin",
                   "--arch={0}".format(self.arch),
@@ -481,6 +498,17 @@ def build_libusb(tc, work):
 def build_openh264(tc, work):
     src = fetch_source("openh264", work)
     env = dict(tc.env)
+    if tc.target == "ios":
+        if tc.ios_platform.startswith("SIMULATOR"):
+            raise SystemExit("OpenH264's iOS makefile only targets the device "
+                             "SDK for arm64; build the full profile for OS64 "
+                             "and the minimal profile for the simulator.")
+        # Xcode 14+ has no bitcode; the makefile still passes -fembed-bitcode.
+        mk = os.path.join(src, "build", "platform-ios.mk")
+        with open(mk) as fh:
+            text = fh.read()
+        with open(mk, "w") as fh:
+            fh.write(text.replace(" -fembed-bitcode", ""))
     if tc.target == "android":
         # OpenH264's android platform makefile drives the NDK itself.
         for k in ("CC", "CXX", "AR", "RANLIB", "STRIP"):
@@ -519,6 +547,9 @@ def build_openh264(tc, work):
 
 
 def build_ffmpeg(tc, work):
+    if tc.target == "ios" and tc.ios_platform.startswith("SIMULATOR"):
+        raise SystemExit("FFmpeg/OpenH264 are built for the iOS device SDK only; "
+                         "use --profile minimal for simulator targets.")
     src = fetch_source("ffmpeg", work)
     env = dict(tc.env)
     flags = tc.ffmpeg_configure_flags()
@@ -531,6 +562,47 @@ def build_ffmpeg(tc, work):
 # Windows: vcpkg manifest
 # ---------------------------------------------------------------------------
 
+def prepare_vcpkg_manifest(src_manifest, vcpkg_root, prefix):
+    """
+    Copy vcpkg.json into <prefix>/manifest and make sure its
+    "builtin-baseline" is a commit that exists in the runner's vcpkg clone.
+    vcpkg refuses to run otherwise ("baseline ... does not exist"), and the
+    runner image's clone is often older than any hash we could pin. If the
+    pinned baseline is present it is kept (reproducible); if not, the
+    clone's HEAD is used and printed so it can be recorded.
+    """
+    import json
+    with open(src_manifest) as fh:
+        manifest = json.load(fh)
+    pinned = manifest.get("builtin-baseline")
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", vcpkg_root] + list(args),
+                                       stderr=subprocess.DEVNULL).decode().strip()
+    try:
+        head = git("rev-parse", "HEAD")
+    except (OSError, subprocess.CalledProcessError):
+        head = None
+    ok = False
+    if pinned and head:
+        try:
+            git("cat-file", "-e", pinned + "^{commit}")
+            ok = True
+        except subprocess.CalledProcessError:
+            ok = False
+    if not ok and head:
+        log("vcpkg baseline {0} not in {1}; using its HEAD {2}".format(
+            pinned, vcpkg_root, head))
+        manifest["builtin-baseline"] = head
+    dst_dir = os.path.join(prefix, "manifest")
+    if not os.path.isdir(dst_dir):
+        os.makedirs(dst_dir)
+    with open(os.path.join(dst_dir, "vcpkg.json"), "w") as fh:
+        json.dump(manifest, fh, indent=2)
+    log("vcpkg manifest baseline: {0}".format(manifest.get("builtin-baseline")))
+    return dst_dir
+
+
 def build_windows_vcpkg(prefix, arch, jobs, profile="full"):
     vcpkg_root = (os.environ.get("VCPKG_ROOT")
                   or os.environ.get("VCPKG_INSTALLATION_ROOT"))
@@ -539,9 +611,11 @@ def build_windows_vcpkg(prefix, arch, jobs, profile="full"):
     exe = os.path.join(vcpkg_root, "vcpkg.exe")
     triplet = {"x64": "x64-windows", "x86": "x86-windows",
                "arm64": "arm64-windows"}[arch]
-    manifest_dir = os.path.dirname(os.path.abspath(__file__))
-    if not os.path.isfile(os.path.join(manifest_dir, "vcpkg.json")):
+    src_manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "vcpkg.json")
+    if not os.path.isfile(src_manifest):
         raise SystemExit("vcpkg.json missing next to build_deps.py")
+    manifest_dir = prepare_vcpkg_manifest(src_manifest, vcpkg_root, prefix)
     installed = os.path.join(prefix, "vcpkg_installed")
     env = dict(os.environ)
     env.setdefault("VCPKG_MAX_CONCURRENCY", str(jobs))
@@ -682,7 +756,8 @@ def main():
                    default="host")
     p.add_argument("--arch", default="x64", choices=("x64", "x86", "arm64"),
                    help="Windows only")
-    p.add_argument("--abi", default="arm64-v8a", choices=("arm64-v8a", "x86_64"))
+    p.add_argument("--abi", default="arm64-v8a",
+                   choices=("arm64-v8a", "armeabi-v7a", "x86_64", "x86"))
     p.add_argument("--api-level", type=int, default=24)
     p.add_argument("--ios-platform", default="OS64",
                    choices=("OS64", "SIMULATOR64", "SIMULATORARM64"))

@@ -92,9 +92,40 @@ def run(cmd, cwd=None, env=None, check=True):
     sys.stdout.flush()
     proc = subprocess.run(cmd, cwd=cwd, env=env)
     if check and proc.returncode != 0:
+        save_diagnostics(cmd)
         raise SystemExit("Command failed (exit {0}): {1}".format(
             proc.returncode, printable))
     return proc.returncode
+
+
+def save_diagnostics(cmd=None):
+    """
+    Copy CMake's configure/build logs into <repo>/build/diagnostics so CI can
+    upload them when a step fails (the interesting error is often in
+    CMakeConfigureLog.yaml, not in the console output).
+    """
+    build_dir = None
+    if cmd:
+        for i, c in enumerate(cmd):
+            if c == "-B" and i + 1 < len(cmd):
+                build_dir = cmd[i + 1]
+            elif c == "--build" and i + 1 < len(cmd):
+                build_dir = cmd[i + 1]
+            elif c == "--install" and i + 1 < len(cmd):
+                build_dir = cmd[i + 1]
+    build_dir = build_dir or os.environ.get("PYFREERDP_BUILD_DIR")
+    if not build_dir or not os.path.isdir(build_dir):
+        return
+    out = os.path.join(repo_root(), "build", "diagnostics")
+    if not os.path.isdir(out):
+        os.makedirs(out)
+    for rel in ("CMakeCache.txt", os.path.join("CMakeFiles", "CMakeConfigureLog.yaml"),
+                os.path.join("CMakeFiles", "CMakeOutput.log"),
+                os.path.join("CMakeFiles", "CMakeError.log"), ".ninja_log"):
+        p = os.path.join(build_dir, rel)
+        if os.path.isfile(p):
+            shutil.copy2(p, os.path.join(out, os.path.basename(p)))
+    print("[diagnostics] CMake logs copied to {0}".format(out))
 
 
 def have(tool):
@@ -238,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 5
+BUILD_SCRIPT_VERSION = 6
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -1833,11 +1864,14 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
         "-DWITH_UNICODE_BUILTIN=ON",
         "-DWITH_CLIENT_SDL=OFF",
     ]
-    opts = dedupe_defines(opts)
     # OpenSSL for Android is not in the NDK. Callers point us at a
     # cross-built copy with PYFREERDP_EXTRA_CMAKE, e.g.
     #   -DOPENSSL_ROOT_DIR=/path -DCMAKE_FIND_ROOT_PATH=/path
+    # dedupe AFTER appending it so CMAKE_FIND_ROOT_PATH/CMAKE_PREFIX_PATH
+    # from the deps prefix and from OpenSSL are merged, not last-wins.
     extra = os.environ.get("PYFREERDP_EXTRA_CMAKE", "").split()
+    opts = dedupe_defines(opts + extra)
+    extra = []
 
     cfg = [
         "cmake", "-S", src, "-B", build_dir,
@@ -1950,11 +1984,13 @@ def build_ios(src, jobs, profile, enable_channels=None,
             "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO",
             "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY=",
         ]
-    opts = dedupe_defines(opts)
     # OpenSSL for iOS is not on the runner; callers hand us a cross-built
     # prefix via PYFREERDP_EXTRA_CMAKE, e.g.
     #   -DOPENSSL_ROOT_DIR=/p -DCMAKE_FIND_ROOT_PATH=/p -DCMAKE_PREFIX_PATH=/p
+    # (merged with the deps prefix by dedupe_defines, see _LIST_DEFINES).
     extra = os.environ.get("PYFREERDP_EXTRA_CMAKE", "").split()
+    opts = dedupe_defines(opts + extra)
+    extra = []
 
     cfg = [
         "cmake", "-S", src, "-B", build_dir,
@@ -2196,7 +2232,7 @@ def main():
         args.with_executables = True
     deps_prefix = resolve_deps_prefix(args)
     if args.profile == "full" and args.deps_prefix and not deps_prefix \
-            and not args.no_deps and not (
+            and not args.no_deps and not args.list_channels and not (
                 platform.system() == "Windows" and args.target == "host"):
         raise SystemExit(
             "--profile full needs the media dependencies. Run "
