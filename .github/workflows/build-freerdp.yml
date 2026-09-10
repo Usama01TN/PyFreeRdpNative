@@ -152,7 +152,14 @@ jobs:
     # Skip cells the dispatch input did not ask for.
     strategy:
       fail-fast: false
+      # `label` is a real matrix axis so the product label x profile x edition
+      # is generated; the include entries are keyed by label and only attach
+      # runner/arch data. (Include entries with keys outside the base matrix
+      # are merged into every combination - and only the first can be - so
+      # the old form silently produced 2 real cells and 6 broken ones.)
       matrix:
+        label: [linux-x86_64, linux-aarch64, macos-arm64, macos-x86_64,
+                windows-x64, windows-x86, windows-arm64]
         profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
         edition: ${{ fromJSON(needs.plan.outputs.editions) }}
         include:
@@ -520,6 +527,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86_64, x86]
         profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
         edition: ${{ fromJSON(needs.plan.outputs.editions) }}
         include:
@@ -792,14 +800,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        platform: [OS64, SIMULATORARM64]
         profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
         edition: ${{ fromJSON(needs.plan.outputs.editions) }}
         include:
-          - label: arm64
-            platform: OS64
+          - platform: OS64
+            label: arm64
             openssl_target: ios64-xcrun
-          - label: simulator-arm64
-            platform: SIMULATORARM64
+          - platform: SIMULATORARM64
+            label: simulator-arm64
             openssl_target: iossimulator-arm64-xcrun
         # OpenH264/FFmpeg only build for the device SDK on arm64: the
         # simulator gets the minimal profile of the standard edition only.
