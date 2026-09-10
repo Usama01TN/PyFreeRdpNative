@@ -67,7 +67,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 6
+            python scripts/$s.py --require-version 7
           done
       - name: Install FreeRDP from apt (client + server + winpr)
         run: |
@@ -127,7 +127,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 6
+            python scripts/$s.py --require-version 7
           done
       - name: Install FreeRDP build deps (apt, core only)
         run: |
@@ -138,7 +138,7 @@ jobs:
             libasound2-dev libpng-dev libjpeg-dev libcairo2-dev
       - name: Build FreeRDP (minimal profile)
         run: |
-          python scripts/build_freerdp.py --target host --profile minimal --jobs "$(nproc)"
+          python scripts/build_freerdp.py --target host --profile minimal --edition standard --jobs "$(nproc)"
       - name: Report package size and contents
         run: |
           du -sh pyfreerdp/_libs
@@ -151,7 +151,7 @@ jobs:
           echo "minimal package OK"
       - name: Validate
         run: |
-          python scripts/validate_build.py --profile minimal --kerberos on
+          python scripts/validate_build.py --profile minimal --edition standard --kerberos on
       - name: Run test suite against bundled libs
         run: |
           pip install -e .[dev]
@@ -172,7 +172,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 6
+            python scripts/$s.py --require-version 7
           done
       - name: Install FreeRDP build deps (apt)
         run: |
@@ -190,20 +190,20 @@ jobs:
         id: deps-cache
         uses: actions/cache@v4
         with:
-          path: build/deps/linux-x86_64
-          key: deps-v1-linux-x86_64-${{ hashFiles('scripts/build_deps.py', 'scripts/vcpkg.json') }}
-      - name: Build dependencies
+          path: build/deps/linux-x86_64-media
+          key: deps-v3-media-linux-x86_64-${{ hashFiles('scripts/build_deps.py', 'scripts/vcpkg.json') }}
+      - name: Build dependencies (media edition)
         if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
-          python scripts/build_deps.py --target host --jobs "$(nproc)"
+          python scripts/build_deps.py --target host --edition media --jobs "$(nproc)"
       - name: Show channel plan
         run: |
           python scripts/build_freerdp.py --list-channels --profile full \
             --enable-channel urbdrc --enable-channel rdpecam
       - name: Build FreeRDP (full profile, with FFmpeg/OpenH264/libusb + executables)
         run: |
-          python scripts/build_freerdp.py --target host --profile full \
-            --deps-prefix build/deps/linux-x86_64 --with-executables --jobs "$(nproc)"
+          python scripts/build_freerdp.py --target host --profile full --edition media \
+            --deps-prefix build/deps/linux-x86_64-media --jobs "$(nproc)"
       - name: Assert all halves staged
         run: |
           ls -1 pyfreerdp/_libs/ | tee /tmp/libs.txt
@@ -229,7 +229,7 @@ jobs:
           echo "client + server channels present"
       - name: Validate (media, executables, loopback session)
         run: |
-          python scripts/validate_build.py --profile full --media --executables --loopback --kerberos on
+          python scripts/validate_build.py --profile full --edition media --media --executables --loopback --kerberos on
       - name: Run full test matrix against bundled libs
         run: |
           pip install -e .[dev]
