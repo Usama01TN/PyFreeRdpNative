@@ -117,13 +117,26 @@ jobs:
             libxfixes-dev libxcursor-dev libxi-dev libxv-dev \
             libxkbfile-dev libxkbcommon-dev \
             libwayland-dev wayland-protocols \
-            libasound2-dev libpng-dev libjpeg-dev libcairo2-dev
+            libasound2-dev libpng-dev libjpeg-dev libcairo2-dev \
+            nasm libudev-dev libv4l-dev xvfb patchelf
+      - name: Cache dependency prefix (libusb, OpenH264, FFmpeg)
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: build/deps/linux-x86_64
+          key: deps-v1-linux-x86_64-${{ hashFiles('scripts/build_deps.py', 'scripts/vcpkg.json') }}
+      - name: Build dependencies
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          python scripts/build_deps.py --target host --jobs "$(nproc)"
       - name: Show channel plan
         run: |
-          python scripts/build_freerdp.py --list-channels --profile full
-      - name: Build FreeRDP (full profile)
+          python scripts/build_freerdp.py --list-channels --profile full \
+            --enable-channel urbdrc --enable-channel rdpecam
+      - name: Build FreeRDP (full profile, with FFmpeg/OpenH264/libusb + executables)
         run: |
-          python scripts/build_freerdp.py --target host --profile full --jobs "$(nproc)"
+          python scripts/build_freerdp.py --target host --profile full \
+            --deps-prefix build/deps/linux-x86_64 --with-executables --jobs "$(nproc)"
       - name: Assert all halves staged
         run: |
           ls -1 pyfreerdp/_libs/ | tee /tmp/libs.txt
@@ -147,6 +160,9 @@ jobs:
               || { echo "::error::client channel symbol missing: $sym"; exit 1; }
           done
           echo "client + server channels present"
+      - name: Validate (media, executables, loopback session)
+        run: |
+          python scripts/validate_build.py --profile full --media --executables --loopback
       - name: Run full test matrix against bundled libs
         run: |
           pip install -e .[dev]

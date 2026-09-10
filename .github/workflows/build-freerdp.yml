@@ -1,9 +1,20 @@
 name: build-freerdp
 
-# Build libfreerdp (client + server + winpr, with all client/server virtual
-# channels) from source on every platform we ship, using
-# scripts/build_freerdp.py, and publish the resulting libraries as
-# downloadable artifacts.
+# Build the complete native stack on every platform we ship:
+#
+#   1. scripts/build_deps.py    libusb, OpenH264, FFmpeg (pinned, hashed;
+#                               vcpkg manifest on Windows) -> build/deps/<label>
+#   2. scripts/build_freerdp.py libfreerdp / -client / -server / winpr with all
+#                               client+server channels, H.264 (OpenH264 +
+#                               FFmpeg), DSP audio codecs, USB + camera
+#                               redirection, and the executables
+#   3. scripts/validate_build.py cold-loads every library, checks channel
+#                               symbols, round-trips H.264/AAC through the
+#                               staged ffmpeg+openh264, probes libusb, smoke-
+#                               tests every executable, and (Linux) runs a real
+#                               sfreerdp-server <-> xfreerdp loopback session
+#
+# and publishes pyfreerdp/_libs (+ _bin) as downloadable artifacts.
 #
 # This is NOT the wheel pipeline (see wheels.yml). It produces raw native
 # libraries - the contents of pyfreerdp/_libs/ - so they can be:
@@ -162,7 +173,8 @@ jobs:
             libxfixes-dev libxcursor-dev libxi-dev libxv-dev \
             libxkbfile-dev libxkbcommon-dev \
             libwayland-dev wayland-protocols \
-            libasound2-dev libpng-dev libjpeg-dev libcairo2-dev
+            libasound2-dev libpng-dev libjpeg-dev libcairo2-dev \
+            nasm libudev-dev libv4l-dev xvfb patchelf
           # Optional channel deps, only if the user asked for them.
           extra=""
           for ch in $ENABLE_CHANNELS; do
@@ -181,7 +193,7 @@ jobs:
         run: |
           brew update >/dev/null
           # cairo = image scaler (WITH_CAIRO), openssl@3 = TLS.
-          brew install cmake ninja pkg-config openssl@3 cairo libpng jpeg-turbo
+          brew install cmake ninja pkg-config openssl@3 cairo libpng jpeg-turbo nasm
           echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
 
       - name: Export GitHub Actions cache vars for vcpkg
@@ -193,19 +205,45 @@ jobs:
             core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
 
-      - name: Install build deps (vcpkg)
+      - name: Set vcpkg triplet
         if: runner.os == 'Windows'
-        shell: pwsh
+        shell: bash
+        run: echo "VCPKG_DEFAULT_TRIPLET=${{ matrix.vcpkg_triplet }}" >> "$GITHUB_ENV"
+
+      # ---- dependencies: libusb, OpenH264, FFmpeg (+ OpenSSL/zlib on Windows)
+
+      - name: Compute deps label
+        id: deps
+        shell: bash
+        run: |
+          case "${{ matrix.label }}" in
+            linux-x86_64)  echo "label=linux-x86_64"  >> "$GITHUB_OUTPUT" ;;
+            linux-aarch64) echo "label=linux-aarch64" >> "$GITHUB_OUTPUT" ;;
+            macos-arm64)   echo "label=darwin-arm64"  >> "$GITHUB_OUTPUT" ;;
+            macos-x86_64)  echo "label=darwin-x86_64" >> "$GITHUB_OUTPUT" ;;
+            windows-*)     echo "label=windows-${{ matrix.win_arch }}" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Cache dependency prefix
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: build/deps/${{ steps.deps.outputs.label }}
+          key: deps-v1-${{ steps.deps.outputs.label }}-${{ hashFiles('scripts/build_deps.py', 'scripts/vcpkg.json') }}
+
+      - name: Build dependencies (libusb, OpenH264, FFmpeg)
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        shell: bash
         env:
           VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
         run: |
-          $vcpkg = Join-Path $env:VCPKG_INSTALLATION_ROOT "vcpkg.exe"
-          $triplet = "${{ matrix.vcpkg_triplet }}"
-          & $vcpkg install --triplet $triplet openssl zlib
-          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed" }
-          # build_freerdp.py picks up VCPKG_INSTALLATION_ROOT automatically
-          # and passes the vcpkg toolchain file + this triplet to CMake.
-          "VCPKG_DEFAULT_TRIPLET=$triplet" | Out-File -Append -FilePath $env:GITHUB_ENV
+          if [ "$RUNNER_OS" = "macOS" ]; then jobs=$(sysctl -n hw.ncpu);
+          elif [ "$RUNNER_OS" = "Windows" ]; then jobs=$NUMBER_OF_PROCESSORS;
+          else jobs=$(nproc); fi
+          args=""
+          if [ -n "${{ matrix.win_arch }}" ]; then args="--arch ${{ matrix.win_arch }}"; fi
+          python scripts/build_deps.py --target host --jobs "$jobs" $args
+          cat build/deps/${{ steps.deps.outputs.label }}/DEPS-MANIFEST.txt
 
       # ---- build ----------------------------------------------------------
 
@@ -230,6 +268,8 @@ jobs:
             --target host \
             --ref "$FREERDP_REF" \
             --profile "${{ steps.profile.outputs.profile }}" \
+            --deps-prefix "build/deps/${{ steps.deps.outputs.label }}" \
+            --with-executables \
             --jobs "$jobs" $args
 
       # ---- verify ---------------------------------------------------------
@@ -293,6 +333,20 @@ jobs:
           print("OK")
           PY
 
+      - name: Validate (media, executables, loopback)
+        # Cross-compiled Windows arm64 can't run here; verify-windows-arm64
+        # loads it natively instead.
+        if: matrix.win_arch != 'arm64'
+        shell: bash
+        run: |
+          extra=""
+          if [ "$RUNNER_OS" = "Linux" ]; then extra="--loopback"; fi
+          # GitHub runners expose no USB bus; the libusb library test still
+          # runs, only the device enumeration is allowed to report none.
+          python scripts/validate_build.py \
+            --profile "${{ steps.profile.outputs.profile }}" \
+            --media --executables $extra
+
       # ---- package + upload -----------------------------------------------
 
       - name: Package libraries
@@ -314,14 +368,18 @@ jobs:
             echo "Repo commit:  $GITHUB_SHA"
             echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo
+            echo "Media:        FFmpeg + OpenH264 (H.264 encode/decode, RDP audio codecs), libusb (urbdrc, camera)"
+            echo
             echo "Files:"
             ls -l pyfreerdp/_libs
+            if [ -d pyfreerdp/_bin ]; then echo; echo "Executables:"; ls -l pyfreerdp/_bin; fi
           } > pyfreerdp/_libs/BUILD-INFO.txt
+          cp build/deps/${{ steps.deps.outputs.label }}/DEPS-MANIFEST.txt pyfreerdp/_libs/ || true
           if [ "$RUNNER_OS" = "Windows" ]; then
             (cd pyfreerdp && 7z a -tzip "../out/$name.zip" _libs >/dev/null)
             echo "file=out/$name.zip" >> "$GITHUB_OUTPUT"
           else
-            tar -C pyfreerdp -czf "out/$name.tar.gz" _libs
+            tar -C pyfreerdp -czf "out/$name.tar.gz" _libs _bin
             echo "file=out/$name.tar.gz" >> "$GITHUB_OUTPUT"
           fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
@@ -411,6 +469,20 @@ jobs:
           make -j"$(nproc)" build_libs
           make install_sw
 
+      - name: Cache dependency prefix
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: build/deps/android-${{ matrix.abi }}
+          key: deps-v1-android-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}-${{ hashFiles('scripts/build_deps.py') }}
+
+      - name: Build dependencies (libusb, OpenH264, FFmpeg)
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y --no-install-recommends nasm
+          python scripts/build_deps.py --target android --abi ${{ matrix.abi }} \
+            --api-level ${API_LEVEL} --jobs "$(nproc)"
+
       - name: Build FreeRDP ${{ env.FREERDP_REF }} for ${{ matrix.abi }}
         env:
           # CMAKE_FIND_ROOT_PATH is needed because the NDK toolchain
@@ -421,6 +493,7 @@ jobs:
         run: |
           python scripts/build_freerdp.py \
             --target android --abi ${{ matrix.abi }} --api-level ${API_LEVEL} \
+            --deps-prefix "build/deps/android-${{ matrix.abi }}" \
             --ref "$FREERDP_REF" --profile minimal --jobs "$(nproc)"
           # Ship OpenSSL alongside so the artifact is self-contained.
           cp openssl-android-${{ matrix.abi }}/lib/libssl.so \
@@ -439,6 +512,13 @@ jobs:
           $nm -D --defined-only $d/libfreerdp-server3.so | grep -q cliprdr_server_context_new
           $nm -D --defined-only $d/libfreerdp-server3.so | grep -q rdpgfx_server_context_new
           echo "server channels present"
+          readelf="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          $readelf -d $d/libfreerdp3.so | grep -q "libavcodec" || { echo "::error::libfreerdp3 not linked to FFmpeg"; exit 1; }
+          $readelf -d $d/libfreerdp3.so | grep -q "libopenh264" || { echo "::error::libfreerdp3 not linked to OpenH264"; exit 1; }
+          for f in libavcodec libavutil libswscale libswresample libopenh264 libusb-1.0 libssl libcrypto; do
+            ls $d/$f*.so >/dev/null 2>&1 || { echo "::error::$f missing from $d"; exit 1; }
+          done
+          echo "media libraries linked and shipped"
 
       - name: Package
         id: pkg
@@ -509,8 +589,19 @@ jobs:
           srv = ctypes.CDLL(os.path.join(libs, 'freerdp-server3.dll'))
           for sym in ('cliprdr_server_context_new', 'rdpgfx_server_context_new', 'rail_server_context_new'):
               getattr(srv, sym); print('server channel ok:', sym)
+          core = ctypes.CDLL(os.path.join(libs, 'freerdp3.dll'))
+          core.h264_context_new.restype = ctypes.c_void_p
+          ctx = core.h264_context_new(0); assert ctx, 'h264_context_new failed'; core.h264_context_free(ctypes.c_void_p(ctx))
+          print('H.264 backend OK')
           print('windows-arm64 OK')
           "@
+          $env:PATH = "$libs;$env:PATH"
+          & "$libs\ffmpeg.exe" -hide_banner -version | Select-Object -First 1
+          & "$libs\ffmpeg.exe" -hide_banner -y -f lavfi -i "testsrc2=size=320x240:rate=25" -frames:v 25 -pix_fmt yuv420p -c:v libopenh264 -f h264 test.h264
+          if ($LASTEXITCODE -ne 0) { throw "ffmpeg libopenh264 encode failed" }
+          & "$libs\wfreerdp.exe" /version
+          & "$libs\winpr-makecert.exe" -rdp -silent -path . -n test
+          if (-not (Test-Path test.crt)) { throw "winpr-makecert produced no certificate" }
       - name: Note in summary
         shell: bash
         run: echo "### windows-arm64 — loaded natively on windows-11-arm ✅" >> "$GITHUB_STEP_SUMMARY"
@@ -572,6 +663,20 @@ jobs:
           make install_dev
           lipo -info "$GITHUB_WORKSPACE/openssl-ios-${{ matrix.platform }}/lib/libssl.a"
 
+      - name: Cache dependency prefix
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: build/deps/ios-${{ matrix.platform }}
+          key: deps-v1-ios-${{ matrix.platform }}-xcode${{ hashFiles('/Applications/Xcode.app/Contents/version.plist') }}-${{ hashFiles('scripts/build_deps.py') }}
+
+      - name: Build dependencies (OpenH264, FFmpeg - static)
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          brew install nasm
+          python scripts/build_deps.py --target ios --ios-platform ${{ matrix.platform }} \
+            --jobs "$(sysctl -n hw.ncpu)"
+
       - name: Build FreeRDP ${{ env.FREERDP_REF }} for iOS ${{ matrix.platform }}
         env:
           PYFREERDP_EXTRA_CMAKE: >-
@@ -582,6 +687,7 @@ jobs:
         run: |
           python scripts/build_freerdp.py \
             --target ios --ios-platform ${{ matrix.platform }} \
+            --deps-prefix "build/deps/ios-${{ matrix.platform }}" \
             --ref "$FREERDP_REF" --profile minimal --jobs "$(sysctl -n hw.ncpu)"
           # Ship OpenSSL's static libs too - consumers must link them.
           cp openssl-ios-${{ matrix.platform }}/lib/libssl.a \
@@ -599,7 +705,11 @@ jobs:
           nm "$d/libfreerdp-server3.a" | grep -q " T _cliprdr_server_context_new"
           nm "$d/libfreerdp-server3.a" | grep -q " T _rdpgfx_server_context_new"
           nm "$d/libfreerdp-client3.a" | grep -q "_cliprdr_VirtualChannelEntryEx"
-          echo "arm64 archives with client + server channels present"
+          for f in libavcodec libavutil libswscale libswresample libopenh264; do
+            ls $d/$f*.a >/dev/null 2>&1 || { echo "::error::$f.a missing from $d"; exit 1; }
+          done
+          nm "$d/libfreerdp3.a" | grep -q "_WelsCreateDecoder\|U _WelsCreateDecoder" || { echo "::error::libfreerdp3 has no OpenH264 references"; exit 1; }
+          echo "arm64 archives with client + server channels and media codecs present"
 
       - name: Package
         id: pkg
@@ -612,7 +722,7 @@ jobs:
             echo "Repo commit:  $GITHUB_SHA"
             echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo
-            echo "Link order: freerdp-client3 / freerdp-server3, freerdp3, winpr3, ssl, crypto"
+            echo "Link order: freerdp-client3 / freerdp-server3, freerdp3, winpr3, openh264, avcodec, avformat, swscale, swresample, avutil, ssl, crypto, (libc++)"
             echo "Frameworks: Foundation, Security, CoreFoundation, SystemConfiguration"
           } > pyfreerdp/_libs/ios/${{ matrix.platform }}/BUILD-INFO.txt
           tar -C pyfreerdp/_libs/ios -czf "out/$name.tar.gz" ${{ matrix.platform }}
