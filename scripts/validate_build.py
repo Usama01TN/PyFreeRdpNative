@@ -278,9 +278,17 @@ def check_kerberos(paths, expect):
     winpr = paths.get("winpr3")
     if not winpr:
         return
+    # SEC_ENTRY is __stdcall on Windows (the SDK's sspi.h). On x64 that is
+    # indistinguishable from cdecl, but on 32-bit x86 the export is name-
+    # decorated (_InitSecurityInterfaceExA@4) and every function-table
+    # pointer must be called with the stdcall convention.
     if SYS == "Windows":
         os.add_dll_directory(os.path.dirname(winpr))
-    lib = ctypes.CDLL(winpr)
+        lib = ctypes.WinDLL(winpr)
+        FN = ctypes.WINFUNCTYPE
+    else:
+        lib = ctypes.CDLL(winpr)
+        FN = ctypes.CFUNCTYPE
 
     class SecHandle(ctypes.Structure):
         _fields_ = [("dwLower", ctypes.c_void_p), ("dwUpper", ctypes.c_void_p)]
@@ -292,13 +300,13 @@ def check_kerberos(paths, expect):
         _fields_ = [("fCapabilities", ctypes.c_uint32), ("wVersion", ctypes.c_uint16),
                     ("wRPCID", ctypes.c_uint16), ("cbMaxToken", ctypes.c_uint32),
                     ("Name", ctypes.c_char_p), ("Comment", ctypes.c_char_p)]
-    ENUM = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(ctypes.c_uint32),
-                            ctypes.POINTER(ctypes.POINTER(SecPkgInfoA)))
-    ACQ = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_char_p, ctypes.c_char_p,
-                           ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p,
-                           ctypes.c_void_p, ctypes.c_void_p,
-                           ctypes.POINTER(SecHandle), ctypes.POINTER(TimeStamp))
-    FREE = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(SecHandle))
+    ENUM = FN(ctypes.c_int32, ctypes.POINTER(ctypes.c_uint32),
+              ctypes.POINTER(ctypes.POINTER(SecPkgInfoA)))
+    ACQ = FN(ctypes.c_int32, ctypes.c_char_p, ctypes.c_char_p,
+             ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p,
+             ctypes.c_void_p, ctypes.c_void_p,
+             ctypes.POINTER(SecHandle), ctypes.POINTER(TimeStamp))
+    FREE = FN(ctypes.c_int32, ctypes.POINTER(SecHandle))
 
     class Table(ctypes.Structure):
         _fields_ = [("dwVersion", ctypes.c_uint32),
@@ -306,10 +314,16 @@ def check_kerberos(paths, expect):
                     ("QueryCredentialsAttributesA", ctypes.c_void_p),
                     ("AcquireCredentialsHandleA", ACQ),
                     ("FreeCredentialsHandle", FREE)]
-    try:
-        init = lib.InitSecurityInterfaceExA
-    except AttributeError:
-        fail("kerberos", "InitSecurityInterfaceExA not exported by winpr")
+    init = None
+    for name in ("InitSecurityInterfaceExA", "_InitSecurityInterfaceExA@4"):
+        try:
+            init = getattr(lib, name)
+            break
+        except AttributeError:
+            continue
+    if init is None:
+        fail("kerberos", "InitSecurityInterfaceExA not exported by winpr "
+                         "(tried undecorated and stdcall-decorated names)")
         return
     init.restype = ctypes.POINTER(Table)
     init.argtypes = [ctypes.c_uint32]
