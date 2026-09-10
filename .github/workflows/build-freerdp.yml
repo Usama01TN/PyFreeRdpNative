@@ -153,6 +153,15 @@ jobs:
           # x86_64 Python onto the aarch64 runner (Exec format error).
           architecture: ${{ matrix.python_arch }}
 
+      - name: Check build scripts are the expected version
+        shell: bash
+        run: |
+          # Fails fast (with an explanation) if scripts/ is stale relative to
+          # this workflow, instead of dying deep inside a CMake configure.
+          for s in build_freerdp build_deps validate_build; do
+            python scripts/$s.py --require-version 5
+          done
+
       # ---- dependencies ---------------------------------------------------
 
       - name: Install build deps (apt)
@@ -466,6 +475,15 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Check build scripts are the expected version
+        shell: bash
+        run: |
+          # Fails fast (with an explanation) if scripts/ is stale relative to
+          # this workflow, instead of dying deep inside a CMake configure.
+          for s in build_freerdp build_deps validate_build; do
+            python scripts/$s.py --require-version 5
+          done
+
       - name: Install host tools
         run: |
           sudo apt-get update
@@ -702,6 +720,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Check build scripts are the expected version
+        shell: bash
+        run: |
+          # Fails fast (with an explanation) if scripts/ is stale relative to
+          # this workflow, instead of dying deep inside a CMake configure.
+          for s in build_freerdp build_deps validate_build; do
+            python scripts/$s.py --require-version 5
+          done
 
       - name: Install host tools
         run: |
