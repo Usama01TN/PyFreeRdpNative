@@ -55,6 +55,10 @@ import time
 SYS = platform.system()
 EXT = {"Windows": ".dll", "Darwin": ".dylib"}.get(SYS, ".so")
 
+# Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
+BUILD_SCRIPT_VERSION = 5
+
+
 RESULTS = []
 
 
@@ -755,12 +759,24 @@ def main():
     p.add_argument("--loopback", action="store_true")
     p.add_argument("--no-usb", action="store_true",
                    help="skip libusb runtime probing (containers without USB)")
+    p.add_argument("--require-version", type=int, metavar="N",
+                   help="exit 0 if this script is version N, else exit 2")
     p.add_argument("--kerberos", choices=("on", "off", "auto"), default="auto",
                    help="on: require a live krb5 backend (Linux default, "
                         "Windows native SSPI); off: require it compiled out; "
                         "auto: Linux/Windows -> on, macOS -> off (unless "
                         "PYFREERDP_KRB5=1).")
     args = p.parse_args()
+    if args.require_version is not None:
+        if args.require_version != BUILD_SCRIPT_VERSION:
+            sys.stderr.write("{0} is version {1}, workflow expects {2}: stale "
+                             "scripts/ directory\n".format(
+                                 os.path.basename(__file__),
+                                 BUILD_SCRIPT_VERSION, args.require_version))
+            return 2
+        print("[{0}] version {1} OK".format(os.path.basename(__file__),
+                                            BUILD_SCRIPT_VERSION))
+        return 0
 
     libs = os.path.abspath(args.libs)
     bins = [args.bin] if args.bin else [

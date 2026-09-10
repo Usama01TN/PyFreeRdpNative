@@ -234,6 +234,12 @@ CHANNELS = {
                      note="ssh-agent forwarding, upstream default OFF"),
 }
 
+# Bumped whenever the CLI/behaviour changes in a way the workflows depend on.
+# .github/workflows/*.yml run `--require-version N` first so a stale copy of
+# this script fails in one second with a clear message instead of ten minutes
+# into a CMake configure with baffling errors.
+BUILD_SCRIPT_VERSION = 5
+
 # ---------------------------------------------------------------------------
 # Build profiles
 # ---------------------------------------------------------------------------
@@ -2106,6 +2112,12 @@ def main():
     p.add_argument("--no-channels", action="store_true",
                    help="Build without any virtual channels "
                         "(WITH_CHANNELS=OFF).")
+    p.add_argument("--print-version", action="store_true",
+                   help="Print BUILD_SCRIPT_VERSION and exit.")
+    p.add_argument("--require-version", type=int, metavar="N",
+                   help="Exit 0 if this script is BUILD_SCRIPT_VERSION N, "
+                        "otherwise exit 2 with an explanation (used by the "
+                        "workflows to detect a stale scripts/ directory).")
     p.add_argument("--list-channels", action="store_true",
                    help="Print the channel table for the chosen profile/"
                         "target and exit without building.")
@@ -2151,6 +2163,23 @@ def main():
     p.add_argument("--skip-verify", action="store_true",
                    help="Skip post-install library verification")
     args = p.parse_args()
+
+    if args.print_version:
+        print(BUILD_SCRIPT_VERSION)
+        return 0
+    if args.require_version is not None:
+        if args.require_version != BUILD_SCRIPT_VERSION:
+            sys.stderr.write(
+                "scripts/build_freerdp.py is version {0} but the workflow "
+                "expects version {1}.\nThe repository has a stale copy of the "
+                "build scripts: update scripts/build_freerdp.py, "
+                "scripts/build_deps.py, scripts/validate_build.py and "
+                "scripts/vcpkg.json together with the workflow files.\n".format(
+                    BUILD_SCRIPT_VERSION, args.require_version))
+            return 2
+        print("[pyfreerdp-build] build script version {0} OK".format(
+            BUILD_SCRIPT_VERSION))
+        return 0
 
     print("[pyfreerdp-build] target={0} profile={1} ref={2} jobs={3}".format(
         args.target, args.profile, args.ref, args.jobs))

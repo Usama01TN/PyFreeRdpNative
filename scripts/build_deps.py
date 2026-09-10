@@ -133,6 +133,10 @@ FFMPEG_COMPONENTS = {
 # Helpers
 # ---------------------------------------------------------------------------
 
+# Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
+BUILD_SCRIPT_VERSION = 5
+
+
 def log(msg):
     print("[deps] {0}".format(msg))
     sys.stdout.flush()
@@ -691,9 +695,21 @@ def main():
                         "size-optimised library build needs - on Windows that "
                         "is OpenSSL/zlib/cJSON from vcpkg; on other platforms "
                         "nothing (FreeRDP's minimal build uses system OpenSSL).")
+    p.add_argument("--require-version", type=int, metavar="N",
+                   help="exit 0 if this script is version N, else exit 2")
     p.add_argument("--print-hashes", action="store_true",
                    help="download the pinned tarballs and print their sha256")
     args = p.parse_args()
+    if args.require_version is not None:
+        if args.require_version != BUILD_SCRIPT_VERSION:
+            sys.stderr.write("{0} is version {1}, workflow expects {2}: stale "
+                             "scripts/ directory\n".format(
+                                 os.path.basename(__file__),
+                                 BUILD_SCRIPT_VERSION, args.require_version))
+            return 2
+        print("[{0}] version {1} OK".format(os.path.basename(__file__),
+                                            BUILD_SCRIPT_VERSION))
+        return 0
 
     label = label_for(args.target, args.arch, args.abi, args.ios_platform)
     prefix = os.path.abspath(args.prefix or os.path.join(
