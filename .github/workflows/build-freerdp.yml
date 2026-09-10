@@ -16,6 +16,15 @@ name: build-freerdp
 #
 # and publishes pyfreerdp/_libs (+ _bin) as downloadable artifacts.
 #
+# Two independent build profiles are produced for every platform:
+#   minimal  size-optimised libraries only (MinSizeRel, stripped, SONAME-only
+#            files, no media deps, no executables) - what the wheel ships
+#   full     feature-complete: FFmpeg + OpenH264 + libusb, all channels incl.
+#            urbdrc/rdpecam, proxy + sample servers, winpr tools, platform
+#            client(s), sdl-freerdp where SDL3 is available, shadow on Linux
+# The per-platform meaning of "full" is defined once, in
+# scripts/build_freerdp.py (FULL_PLATFORM), and documented in docs/BUILD.md.
+#
 # This is NOT the wheel pipeline (see wheels.yml). It produces raw native
 # libraries - the contents of pyfreerdp/_libs/ - so they can be:
 #   * inspected / smoke-tested independently of Python packaging,
@@ -43,12 +52,12 @@ on:
         description: "FreeRDP git ref (tag/branch/sha) to build"
         required: false
         default: "3.16.0"
-      profile:
-        description: "Build profile for desktop targets"
+      profiles:
+        description: "Which build profiles to produce"
         required: false
-        default: "full"
+        default: "both"
         type: choice
-        options: [full, minimal, client-only, server-only]
+        options: [both, minimal, full]
       enable_channels:
         description: "Extra channels to enable, space separated (e.g. 'urbdrc printer')"
         required: false
@@ -78,7 +87,7 @@ env:
   PYTHONUNBUFFERED: "1"
   # Defaults for non-dispatch triggers. Dispatch inputs override below.
   FREERDP_REF: ${{ inputs.freerdp_ref || '3.16.0' }}
-  DESKTOP_PROFILE: ${{ inputs.profile || 'full' }}
+  PROFILES: ${{ inputs.profiles || 'both' }}
   ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
 
 jobs:
@@ -92,42 +101,40 @@ jobs:
   # don't build cleanly there; that's all the Python binding loads anyway.
   # ---------------------------------------------------------------------------
   desktop:
-    name: ${{ matrix.label }}
+    name: ${{ matrix.label }} (${{ matrix.profile }})
     runs-on: ${{ matrix.runner }}
+    # Skip cells the dispatch input did not ask for.
+    if: |
+      inputs.profiles == null || inputs.profiles == '' || inputs.profiles == 'both'
+      || inputs.profiles == matrix.profile
     strategy:
       fail-fast: false
       matrix:
+        profile: [minimal, full]
         include:
           - label: linux-x86_64
             runner: ubuntu-24.04
-            cap_profile: ""
           - label: linux-aarch64
             runner: ubuntu-24.04-arm
-            cap_profile: ""
           - label: macos-arm64
             runner: macos-15
-            cap_profile: minimal
           - label: macos-x86_64
             # macos-13 was retired Dec 2025; macos-15-intel is the last
             # Intel image GitHub provides (until Aug 2027).
             runner: macos-15-intel
-            cap_profile: minimal
           # Windows: x64 is native; x86 and arm64 are cross-compiled on the
           # same VS 2022 image (-A Win32 / -A ARM64 + matching vcpkg triplet).
           - label: windows-x64
             runner: windows-2022
-            cap_profile: minimal
             win_arch: x64
             vcpkg_triplet: x64-windows
           - label: windows-x86
             runner: windows-2022
-            cap_profile: minimal
             win_arch: x86
             vcpkg_triplet: x86-windows
             python_arch: x86      # 32-bit Python so the load test is real
           - label: windows-arm64
             runner: windows-2022
-            cap_profile: minimal
             win_arch: arm64
             vcpkg_triplet: arm64-windows
             # cross build on x64; loaded natively in verify-windows-arm64
@@ -146,19 +153,6 @@ jobs:
           # x86_64 Python onto the aarch64 runner (Exec format error).
           architecture: ${{ matrix.python_arch }}
 
-      - name: Resolve effective profile
-        id: profile
-        shell: bash
-        run: |
-          prof="${DESKTOP_PROFILE}"
-          cap="${{ matrix.cap_profile }}"
-          # full -> minimal on platforms that can't build shadow/proxy.
-          if [ -n "$cap" ] && [ "$prof" = "full" ]; then
-            echo "Capping profile full -> $cap on ${{ matrix.label }}"
-            prof="$cap"
-          fi
-          echo "profile=$prof" >> "$GITHUB_OUTPUT"
-
       # ---- dependencies ---------------------------------------------------
 
       - name: Install build deps (apt)
@@ -166,15 +160,20 @@ jobs:
         shell: bash
         run: |
           sudo apt-get update
+          # Core toolchain + what libwinpr/libfreerdp need in every profile.
           sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build git pkg-config \
+            build-essential cmake ninja-build git pkg-config patchelf \
             libssl-dev zlib1g-dev libkrb5-dev libcjson-dev libicu-dev \
-            libx11-dev libxext-dev libxrandr-dev libxinerama-dev \
-            libxfixes-dev libxcursor-dev libxi-dev libxv-dev \
-            libxkbfile-dev libxkbcommon-dev \
-            libwayland-dev wayland-protocols \
-            libasound2-dev libpng-dev libjpeg-dev libcairo2-dev \
-            nasm libudev-dev libv4l-dev xvfb patchelf
+            libasound2-dev libpng-dev libjpeg-dev libcairo2-dev
+          if [ "${{ matrix.profile }}" = "full" ]; then
+            # GUI clients, media dependency builds, camera/USB, loopback test.
+            sudo apt-get install -y --no-install-recommends \
+              libx11-dev libxext-dev libxrandr-dev libxinerama-dev \
+              libxfixes-dev libxcursor-dev libxi-dev libxv-dev \
+              libxkbfile-dev libxkbcommon-dev \
+              libwayland-dev wayland-protocols \
+              nasm libudev-dev libv4l-dev xvfb
+          fi
           # Optional channel deps, only if the user asked for them.
           extra=""
           for ch in $ENABLE_CHANNELS; do
@@ -193,7 +192,11 @@ jobs:
         run: |
           brew update >/dev/null
           # cairo = image scaler (WITH_CAIRO), openssl@3 = TLS.
-          brew install cmake ninja pkg-config openssl@3 cairo libpng jpeg-turbo nasm
+          brew install cmake ninja pkg-config openssl@3 cairo libpng jpeg-turbo
+          if [ "${{ matrix.profile }}" = "full" ]; then
+            # nasm: FFmpeg/OpenH264 asm; sdl3 + sdl3_ttf: sdl-freerdp client
+            brew install nasm sdl3 sdl3_ttf
+          fi
           echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
 
       - name: Export GitHub Actions cache vars for vcpkg
@@ -224,15 +227,19 @@ jobs:
             windows-*)     echo "label=windows-${{ matrix.win_arch }}" >> "$GITHUB_OUTPUT" ;;
           esac
 
+      # minimal on Linux/macOS needs no built dependencies (system OpenSSL);
+      # minimal on Windows needs OpenSSL/zlib/cJSON from vcpkg; full needs
+      # FFmpeg/OpenH264/libusb (+ SDL3 on Windows) everywhere.
       - name: Cache dependency prefix
         id: deps-cache
+        if: matrix.profile == 'full' || runner.os == 'Windows'
         uses: actions/cache@v4
         with:
           path: build/deps/${{ steps.deps.outputs.label }}
-          key: deps-v1-${{ steps.deps.outputs.label }}-${{ hashFiles('scripts/build_deps.py', 'scripts/vcpkg.json') }}
+          key: deps-v2-${{ matrix.profile }}-${{ steps.deps.outputs.label }}-${{ hashFiles('scripts/build_deps.py', 'scripts/vcpkg.json') }}
 
-      - name: Build dependencies (libusb, OpenH264, FFmpeg)
-        if: steps.deps-cache.outputs.cache-hit != 'true'
+      - name: Build dependencies (${{ matrix.profile }})
+        if: (matrix.profile == 'full' || runner.os == 'Windows') && steps.deps-cache.outputs.cache-hit != 'true'
         shell: bash
         env:
           VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
@@ -242,7 +249,7 @@ jobs:
           else jobs=$(nproc); fi
           args=""
           if [ -n "${{ matrix.win_arch }}" ]; then args="--arch ${{ matrix.win_arch }}"; fi
-          python scripts/build_deps.py --target host --jobs "$jobs" $args
+          python scripts/build_deps.py --target host --profile ${{ matrix.profile }} --jobs "$jobs" $args
           cat build/deps/${{ steps.deps.outputs.label }}/DEPS-MANIFEST.txt
 
       # ---- build ----------------------------------------------------------
@@ -253,7 +260,7 @@ jobs:
           args=""
           for ch in $ENABLE_CHANNELS; do args="$args --enable-channel $ch"; done
           python scripts/build_freerdp.py --list-channels \
-            --profile "${{ steps.profile.outputs.profile }}" $args
+            --profile "${{ matrix.profile }}" $args
 
       - name: Build FreeRDP ${{ env.FREERDP_REF }}
         shell: bash
@@ -264,12 +271,16 @@ jobs:
           elif [ "$RUNNER_OS" = "Windows" ]; then jobs=$NUMBER_OF_PROCESSORS;
           else jobs=$(nproc); fi
           if [ -n "${{ matrix.win_arch }}" ]; then args="$args --arch ${{ matrix.win_arch }}"; fi
+          # full: --deps-prefix + executables are implied by the profile.
+          # minimal: no deps, except Windows where OpenSSL/zlib come from the
+          # vcpkg prefix (a prefix without FFmpeg does not enable media).
+          if [ "${{ matrix.profile }}" = "full" ] || [ "$RUNNER_OS" = "Windows" ]; then
+            args="$args --deps-prefix build/deps/${{ steps.deps.outputs.label }}"
+          fi
           python scripts/build_freerdp.py \
             --target host \
             --ref "$FREERDP_REF" \
-            --profile "${{ steps.profile.outputs.profile }}" \
-            --deps-prefix "build/deps/${{ steps.deps.outputs.label }}" \
-            --with-executables \
+            --profile "${{ matrix.profile }}" \
             --jobs "$jobs" $args
 
       # ---- verify ---------------------------------------------------------
@@ -340,12 +351,21 @@ jobs:
         shell: bash
         run: |
           extra=""
-          if [ "$RUNNER_OS" = "Linux" ]; then extra="--loopback"; fi
+          if [ "${{ matrix.profile }}" = "full" ]; then
+            extra="--media --executables"
+            if [ "$RUNNER_OS" = "Linux" ]; then extra="$extra --loopback"; fi
+          fi
+          # Kerberos: Linux -> krb5 backend must be live; Windows -> native
+          # SSPI; macOS -> compiled out (FreeRDP rejects Apple's shim and
+          # upstream CI builds macOS with WITH_KRB5=OFF; Homebrew MIT krb5 is
+          # opt-in via build_freerdp.py --with-krb5).
+          case "$RUNNER_OS" in
+            Linux|Windows) extra="$extra --kerberos on" ;;
+            macOS)         extra="$extra --kerberos off" ;;
+          esac
           # GitHub runners expose no USB bus; the libusb library test still
           # runs, only the device enumeration is allowed to report none.
-          python scripts/validate_build.py \
-            --profile "${{ steps.profile.outputs.profile }}" \
-            --media --executables $extra
+          python scripts/validate_build.py --profile "${{ matrix.profile }}" $extra
 
       # ---- package + upload -----------------------------------------------
 
@@ -353,11 +373,11 @@ jobs:
         id: pkg
         shell: bash
         run: |
-          name="freerdp-${FREERDP_REF}-${{ matrix.label }}-${{ steps.profile.outputs.profile }}"
+          name="freerdp-${FREERDP_REF}-${{ matrix.label }}-${{ matrix.profile }}"
           mkdir -p out
           {
             echo "FreeRDP ref:  $FREERDP_REF"
-            echo "Profile:      ${{ steps.profile.outputs.profile }}"
+            echo "Profile:      ${{ matrix.profile }}"
             echo "Platform:     ${{ matrix.label }} ($RUNNER_OS, $(uname -m 2>/dev/null || echo x64))"
             echo "Extra chans:  ${ENABLE_CHANNELS:-none}"
             if [ "$RUNNER_OS" = "Windows" ]; then
@@ -368,18 +388,29 @@ jobs:
             echo "Repo commit:  $GITHUB_SHA"
             echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo
-            echo "Media:        FFmpeg + OpenH264 (H.264 encode/decode, RDP audio codecs), libusb (urbdrc, camera)"
+            if [ "${{ matrix.profile }}" = "full" ]; then
+              echo "Media:        FFmpeg + OpenH264 (H.264 encode/decode, AAC/Opus DSP), libusb (urbdrc, camera)"
+            else
+              echo "Media:        none (minimal profile: libraries only, size-optimised)"
+            fi
+            case "$RUNNER_OS" in
+              Linux)   if [ "${{ matrix.profile }}" = "full" ]; then echo "Kerberos:     MIT krb5, bundled (libkrb5, libk5crypto, libcom_err, libkrb5support)";
+                       else echo "Kerberos:     MIT krb5 via the system krb5 libraries (installed by default on mainstream distros)"; fi ;;
+              Windows) echo "Kerberos:     native Windows SSPI (secur32)" ;;
+              macOS)   echo "Kerberos:     not built (upstream: unsupported on macOS; opt-in with --with-krb5 + Homebrew krb5)" ;;
+            esac
             echo
             echo "Files:"
             ls -l pyfreerdp/_libs
             if [ -d pyfreerdp/_bin ]; then echo; echo "Executables:"; ls -l pyfreerdp/_bin; fi
           } > pyfreerdp/_libs/BUILD-INFO.txt
-          cp build/deps/${{ steps.deps.outputs.label }}/DEPS-MANIFEST.txt pyfreerdp/_libs/ || true
+          cp build/deps/${{ steps.deps.outputs.label }}/DEPS-MANIFEST.txt pyfreerdp/_libs/ 2>/dev/null || true
           if [ "$RUNNER_OS" = "Windows" ]; then
             (cd pyfreerdp && 7z a -tzip "../out/$name.zip" _libs >/dev/null)
             echo "file=out/$name.zip" >> "$GITHUB_OUTPUT"
           else
-            tar -C pyfreerdp -czf "out/$name.tar.gz" _libs _bin
+            dirs="_libs"; [ -d pyfreerdp/_bin ] && dirs="$dirs _bin"
+            tar -C pyfreerdp -czf "out/$name.tar.gz" $dirs
             echo "file=out/$name.tar.gz" >> "$GITHUB_OUTPUT"
           fi
           echo "name=$name" >> "$GITHUB_OUTPUT"
@@ -399,7 +430,7 @@ jobs:
         shell: bash
         run: |
           {
-            echo "### ${{ matrix.label }} — FreeRDP $FREERDP_REF (${{ steps.profile.outputs.profile }})"
+            echo "### ${{ matrix.label }} — FreeRDP $FREERDP_REF (${{ matrix.profile }})"
             echo
             echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
             echo
@@ -412,11 +443,15 @@ jobs:
   # to the script via PYFREERDP_EXTRA_CMAKE.
   # ---------------------------------------------------------------------------
   android:
-    name: android-${{ matrix.abi }}
+    name: android-${{ matrix.abi }} (${{ matrix.profile }})
     runs-on: ubuntu-24.04
+    if: |
+      inputs.profiles == null || inputs.profiles == '' || inputs.profiles == 'both'
+      || inputs.profiles == matrix.profile
     strategy:
       fail-fast: false
       matrix:
+        profile: [minimal, full]
         include:
           - abi: arm64-v8a
             openssl_target: android-arm64
@@ -471,13 +506,14 @@ jobs:
 
       - name: Cache dependency prefix
         id: deps-cache
+        if: matrix.profile == 'full'
         uses: actions/cache@v4
         with:
           path: build/deps/android-${{ matrix.abi }}
-          key: deps-v1-android-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}-${{ hashFiles('scripts/build_deps.py') }}
+          key: deps-v2-android-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}-${{ hashFiles('scripts/build_deps.py') }}
 
       - name: Build dependencies (libusb, OpenH264, FFmpeg)
-        if: steps.deps-cache.outputs.cache-hit != 'true'
+        if: matrix.profile == 'full' && steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get install -y --no-install-recommends nasm
           python scripts/build_deps.py --target android --abi ${{ matrix.abi }} \
@@ -491,10 +527,11 @@ jobs:
             -DOPENSSL_ROOT_DIR=${{ github.workspace }}/openssl-android-${{ matrix.abi }}
             -DCMAKE_FIND_ROOT_PATH=${{ github.workspace }}/openssl-android-${{ matrix.abi }}
         run: |
+          args=""
+          if [ "${{ matrix.profile }}" = "full" ]; then args="--deps-prefix build/deps/android-${{ matrix.abi }}"; fi
           python scripts/build_freerdp.py \
             --target android --abi ${{ matrix.abi }} --api-level ${API_LEVEL} \
-            --deps-prefix "build/deps/android-${{ matrix.abi }}" \
-            --ref "$FREERDP_REF" --profile minimal --jobs "$(nproc)"
+            --ref "$FREERDP_REF" --profile ${{ matrix.profile }} --jobs "$(nproc)" $args
           # Ship OpenSSL alongside so the artifact is self-contained.
           cp openssl-android-${{ matrix.abi }}/lib/libssl.so \
              openssl-android-${{ matrix.abi }}/lib/libcrypto.so \
@@ -513,17 +550,20 @@ jobs:
           $nm -D --defined-only $d/libfreerdp-server3.so | grep -q rdpgfx_server_context_new
           echo "server channels present"
           readelf="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
-          $readelf -d $d/libfreerdp3.so | grep -q "libavcodec" || { echo "::error::libfreerdp3 not linked to FFmpeg"; exit 1; }
-          $readelf -d $d/libfreerdp3.so | grep -q "libopenh264" || { echo "::error::libfreerdp3 not linked to OpenH264"; exit 1; }
-          for f in libavcodec libavutil libswscale libswresample libopenh264 libusb-1.0 libssl libcrypto; do
-            ls $d/$f*.so >/dev/null 2>&1 || { echo "::error::$f missing from $d"; exit 1; }
-          done
-          echo "media libraries linked and shipped"
+          $readelf -d $d/libwinpr3.so | grep -q "libkrb5" && { echo "::error::libwinpr3 links krb5 on Android (unsupported)"; exit 1; }
+          if [ "${{ matrix.profile }}" = "full" ]; then
+            $readelf -d $d/libfreerdp3.so | grep -q "libavcodec" || { echo "::error::libfreerdp3 not linked to FFmpeg"; exit 1; }
+            $readelf -d $d/libfreerdp3.so | grep -q "libopenh264" || { echo "::error::libfreerdp3 not linked to OpenH264"; exit 1; }
+            for f in libavcodec libavutil libswscale libswresample libopenh264 libusb-1.0 libssl libcrypto; do
+              ls $d/$f*.so >/dev/null 2>&1 || { echo "::error::$f missing from $d"; exit 1; }
+            done
+            echo "media libraries linked and shipped"
+          fi
 
       - name: Package
         id: pkg
         run: |
-          name="freerdp-${FREERDP_REF}-android-${{ matrix.abi }}-minimal"
+          name="freerdp-${FREERDP_REF}-android-${{ matrix.abi }}-${{ matrix.profile }}"
           mkdir -p out
           {
             echo "FreeRDP ref:  $FREERDP_REF"
@@ -548,7 +588,7 @@ jobs:
       - name: Publish artifact link to job summary
         run: |
           {
-            echo "### android-${{ matrix.abi }} — FreeRDP $FREERDP_REF (minimal)"
+            echo "### android-${{ matrix.abi }} — FreeRDP $FREERDP_REF (${{ matrix.profile }})"
             echo
             echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -572,39 +612,65 @@ jobs:
           pattern: freerdp-*-windows-arm64-*
           merge-multiple: true
           path: dl/
-      - name: Unpack and load
+      - name: Unpack and load (both profiles)
         shell: pwsh
         run: |
-          $zip = Get-ChildItem dl/*.zip | Select-Object -First 1
-          if (-not $zip) { throw "no windows-arm64 artifact found" }
-          Expand-Archive $zip.FullName -DestinationPath unpacked
-          $libs = Resolve-Path "unpacked/_libs"
-          Get-ChildItem $libs
-          python -c @"
-          import ctypes, os
-          libs = r'$libs'
+          $zips = Get-ChildItem dl/*.zip
+          if (-not $zips) { throw "no windows-arm64 artifacts found" }
+          foreach ($zip in $zips) {
+            $name = [IO.Path]::GetFileNameWithoutExtension($zip.Name)
+            Write-Host "=== $name"
+            $dest = "unpacked/$name"
+            Expand-Archive $zip.FullName -DestinationPath $dest
+            $libs = (Resolve-Path "$dest/_libs").Path
+            Get-ChildItem $libs | Select-Object -ExpandProperty Name
+            $env:PATH = "$libs;$env:PATH"
+            python -c @"
+          import ctypes, os, sys
+          libs = sys.argv[1]
           os.add_dll_directory(libs)
           for name in ('winpr3.dll', 'freerdp3.dll', 'freerdp-client3.dll', 'freerdp-server3.dll'):
               ctypes.CDLL(os.path.join(libs, name)); print('loaded', name)
           srv = ctypes.CDLL(os.path.join(libs, 'freerdp-server3.dll'))
           for sym in ('cliprdr_server_context_new', 'rdpgfx_server_context_new', 'rail_server_context_new'):
               getattr(srv, sym); print('server channel ok:', sym)
-          core = ctypes.CDLL(os.path.join(libs, 'freerdp3.dll'))
-          core.h264_context_new.restype = ctypes.c_void_p
-          ctx = core.h264_context_new(0); assert ctx, 'h264_context_new failed'; core.h264_context_free(ctypes.c_void_p(ctx))
-          print('H.264 backend OK')
-          print('windows-arm64 OK')
-          "@
-          $env:PATH = "$libs;$env:PATH"
-          & "$libs\ffmpeg.exe" -hide_banner -version | Select-Object -First 1
-          & "$libs\ffmpeg.exe" -hide_banner -y -f lavfi -i "testsrc2=size=320x240:rate=25" -frames:v 25 -pix_fmt yuv420p -c:v libopenh264 -f h264 test.h264
-          if ($LASTEXITCODE -ne 0) { throw "ffmpeg libopenh264 encode failed" }
-          & "$libs\wfreerdp.exe" /version
-          & "$libs\winpr-makecert.exe" -rdp -silent -path . -n test
-          if (-not (Test-Path test.crt)) { throw "winpr-makecert produced no certificate" }
+          cli = ctypes.CDLL(os.path.join(libs, 'freerdp-client3.dll'))
+          fn = cli.freerdp_channels_load_static_addin_entry
+          fn.restype = ctypes.c_void_p; fn.argtypes = [ctypes.c_char_p]*3 + [ctypes.c_uint32]
+          for ch, flags in (('cliprdr', 0x9000), ('rdpgfx', 0x2000), ('drive', 0x4000)):
+              assert fn(ch.encode(), None, None, flags), ch; print('client channel ok:', ch)
+          # Kerberos via native SSPI: winpr forwards to secur32
+          winpr = ctypes.CDLL(os.path.join(libs, 'winpr3.dll'))
+          class Pkg(ctypes.Structure):
+              _fields_ = [('fCapabilities', ctypes.c_uint32), ('wVersion', ctypes.c_uint16), ('wRPCID', ctypes.c_uint16), ('cbMaxToken', ctypes.c_uint32), ('Name', ctypes.c_char_p), ('Comment', ctypes.c_char_p)]
+          ENUM = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.POINTER(Pkg)))
+          class Table(ctypes.Structure):
+              _fields_ = [('dwVersion', ctypes.c_uint32), ('EnumerateSecurityPackagesA', ENUM)]
+          winpr.InitSecurityInterfaceExA.restype = ctypes.POINTER(Table)
+          n = ctypes.c_uint32(); arr = ctypes.POINTER(Pkg)()
+          assert winpr.InitSecurityInterfaceExA(0).contents.EnumerateSecurityPackagesA(ctypes.byref(n), ctypes.byref(arr)) == 0
+          names = [arr[i].Name.decode() for i in range(n.value)]
+          assert 'Kerberos' in names, names; print('Kerberos SSPI package present (native):', names)
+          if os.path.exists(os.path.join(libs, 'ffmpeg.exe')):
+              core = ctypes.CDLL(os.path.join(libs, 'freerdp3.dll'))
+              core.h264_context_new.restype = ctypes.c_void_p
+              ctx = core.h264_context_new(0); assert ctx, 'h264_context_new failed'
+              core.h264_context_free(ctypes.c_void_p(ctx)); print('H.264 backend OK')
+          print('OK')
+          "@ $libs
+            if ($LASTEXITCODE -ne 0) { throw "load test failed for $name" }
+            if (Test-Path "$libs\ffmpeg.exe") {
+              & "$libs\ffmpeg.exe" -hide_banner -version | Select-Object -First 1
+              & "$libs\ffmpeg.exe" -hide_banner -y -f lavfi -i "testsrc2=size=320x240:rate=25" -frames:v 25 -pix_fmt yuv420p -c:v libopenh264 -f h264 "$dest\test.h264"
+              if ($LASTEXITCODE -ne 0) { throw "ffmpeg libopenh264 encode failed" }
+              & "$libs\wfreerdp.exe" /version
+              & "$libs\winpr-makecert.exe" -rdp -silent -path $dest -n test
+              if (-not (Test-Path "$dest\test.crt")) { throw "winpr-makecert produced no certificate" }
+            }
+          }
       - name: Note in summary
         shell: bash
-        run: echo "### windows-arm64 — loaded natively on windows-11-arm ✅" >> "$GITHUB_STEP_SUMMARY"
+        run: echo "### windows-arm64 (minimal + full) — loaded natively on windows-11-arm ✅" >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
   # iOS. Static archives (libfreerdp3.a, libfreerdp-client3.a,
@@ -613,11 +679,15 @@ jobs:
   # iossimulator-arm64-xcrun targets and shipped alongside as .a files.
   # ---------------------------------------------------------------------------
   ios:
-    name: ios-${{ matrix.label }}
+    name: ios-${{ matrix.label }} (${{ matrix.profile }})
     runs-on: macos-15
+    if: |
+      inputs.profiles == null || inputs.profiles == '' || inputs.profiles == 'both'
+      || inputs.profiles == matrix.profile
     strategy:
       fail-fast: false
       matrix:
+        profile: [minimal, full]
         include:
           - label: arm64
             platform: OS64
@@ -665,13 +735,14 @@ jobs:
 
       - name: Cache dependency prefix
         id: deps-cache
+        if: matrix.profile == 'full'
         uses: actions/cache@v4
         with:
           path: build/deps/ios-${{ matrix.platform }}
-          key: deps-v1-ios-${{ matrix.platform }}-xcode${{ hashFiles('/Applications/Xcode.app/Contents/version.plist') }}-${{ hashFiles('scripts/build_deps.py') }}
+          key: deps-v2-ios-${{ matrix.platform }}-xcode${{ hashFiles('/Applications/Xcode.app/Contents/version.plist') }}-${{ hashFiles('scripts/build_deps.py') }}
 
       - name: Build dependencies (OpenH264, FFmpeg - static)
-        if: steps.deps-cache.outputs.cache-hit != 'true'
+        if: matrix.profile == 'full' && steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           brew install nasm
           python scripts/build_deps.py --target ios --ios-platform ${{ matrix.platform }} \
@@ -685,10 +756,11 @@ jobs:
             -DCMAKE_FIND_ROOT_PATH=${{ github.workspace }}/openssl-ios-${{ matrix.platform }}
             -DCMAKE_PREFIX_PATH=${{ github.workspace }}/openssl-ios-${{ matrix.platform }}
         run: |
+          args=""
+          if [ "${{ matrix.profile }}" = "full" ]; then args="--deps-prefix build/deps/ios-${{ matrix.platform }}"; fi
           python scripts/build_freerdp.py \
             --target ios --ios-platform ${{ matrix.platform }} \
-            --deps-prefix "build/deps/ios-${{ matrix.platform }}" \
-            --ref "$FREERDP_REF" --profile minimal --jobs "$(sysctl -n hw.ncpu)"
+            --ref "$FREERDP_REF" --profile ${{ matrix.profile }} --jobs "$(sysctl -n hw.ncpu)" $args
           # Ship OpenSSL's static libs too - consumers must link them.
           cp openssl-ios-${{ matrix.platform }}/lib/libssl.a \
              openssl-ios-${{ matrix.platform }}/lib/libcrypto.a \
@@ -705,16 +777,18 @@ jobs:
           nm "$d/libfreerdp-server3.a" | grep -q " T _cliprdr_server_context_new"
           nm "$d/libfreerdp-server3.a" | grep -q " T _rdpgfx_server_context_new"
           nm "$d/libfreerdp-client3.a" | grep -q "_cliprdr_VirtualChannelEntryEx"
-          for f in libavcodec libavutil libswscale libswresample libopenh264; do
-            ls $d/$f*.a >/dev/null 2>&1 || { echo "::error::$f.a missing from $d"; exit 1; }
-          done
-          nm "$d/libfreerdp3.a" | grep -q "_WelsCreateDecoder\|U _WelsCreateDecoder" || { echo "::error::libfreerdp3 has no OpenH264 references"; exit 1; }
-          echo "arm64 archives with client + server channels and media codecs present"
+          if [ "${{ matrix.profile }}" = "full" ]; then
+            for f in libavcodec libavutil libswscale libswresample libopenh264; do
+              ls $d/$f*.a >/dev/null 2>&1 || { echo "::error::$f.a missing from $d"; exit 1; }
+            done
+            nm "$d/libfreerdp3.a" | grep -q "_WelsCreateDecoder\|U _WelsCreateDecoder" || { echo "::error::libfreerdp3 has no OpenH264 references"; exit 1; }
+          fi
+          echo "arm64 archives with client + server channels present (${{ matrix.profile }})"
 
       - name: Package
         id: pkg
         run: |
-          name="freerdp-${FREERDP_REF}-ios-${{ matrix.label }}-minimal"
+          name="freerdp-${FREERDP_REF}-ios-${{ matrix.label }}-${{ matrix.profile }}"
           mkdir -p out
           {
             echo "FreeRDP ref:  $FREERDP_REF"
@@ -742,7 +816,7 @@ jobs:
       - name: Publish artifact link to job summary
         run: |
           {
-            echo "### ios-${{ matrix.label }} — FreeRDP $FREERDP_REF (minimal, static)"
+            echo "### ios-${{ matrix.label }} — FreeRDP $FREERDP_REF (${{ matrix.profile }}, static)"
             echo
             echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
           } >> "$GITHUB_STEP_SUMMARY"

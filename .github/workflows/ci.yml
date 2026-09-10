@@ -99,6 +99,46 @@ jobs:
   # should have run. ~10 min on a 4-core runner is cheaper than a silently
   # skipped build.
   # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Minimal profile: the size-optimised library-only package the wheel ships.
+  # No media deps, no executables, MinSizeRel + stripped + SONAME-only files.
+  # ---------------------------------------------------------------------------
+  build-minimal:
+    name: build FreeRDP from source (--profile=minimal)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install FreeRDP build deps (apt, core only)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git pkg-config patchelf \
+            libssl-dev zlib1g-dev libkrb5-dev libcjson-dev libicu-dev \
+            libasound2-dev libpng-dev libjpeg-dev libcairo2-dev
+      - name: Build FreeRDP (minimal profile)
+        run: |
+          python scripts/build_freerdp.py --target host --profile minimal --jobs "$(nproc)"
+      - name: Report package size and contents
+        run: |
+          du -sh pyfreerdp/_libs
+          ls -l pyfreerdp/_libs
+          test ! -d pyfreerdp/_bin || { echo "::error::minimal must not stage executables"; exit 1; }
+          for f in pyfreerdp/_libs/*.so*; do
+            readelf -d "$f" | grep -q "libavcodec\|libopenh264" && { echo "::error::$f links media libs in minimal"; exit 1; }
+            file "$f" | grep -q "not stripped" && { echo "::error::$f is not stripped"; exit 1; }
+          done
+          echo "minimal package OK"
+      - name: Validate
+        run: |
+          python scripts/validate_build.py --profile minimal --kerberos on
+      - name: Run test suite against bundled libs
+        run: |
+          pip install -e .[dev]
+          pytest -v
+
   build-from-source:
     name: build FreeRDP from source (--profile=full)
     runs-on: ubuntu-latest
@@ -162,7 +202,7 @@ jobs:
           echo "client + server channels present"
       - name: Validate (media, executables, loopback session)
         run: |
-          python scripts/validate_build.py --profile full --media --executables --loopback
+          python scripts/validate_build.py --profile full --media --executables --loopback --kerberos on
       - name: Run full test matrix against bundled libs
         run: |
           pip install -e .[dev]
