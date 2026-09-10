@@ -472,9 +472,45 @@ def check_media(libs, paths, edition="media"):
 # ffmpeg / openh264 / libusb
 # ---------------------------------------------------------------------------
 
-def check_ffmpeg(bins, libs, tmp, with_openh264=True):
+def check_ffmpeg_libs(libs, edition):
+    """Library-level FFmpeg check (all profiles): the staged libavcodec loads
+    and knows the decoders FreeRDP relies on."""
+    path = find_lib(libs, "avcodec")
+    if not path:
+        fail("ffmpeg.lib", "libavcodec not staged in {0}".format(libs))
+        return
+    if SYS == "Windows":
+        os.add_dll_directory(libs)
+    lib = ctypes.CDLL(path)
+    lib.avcodec_version.restype = ctypes.c_uint
+    v = lib.avcodec_version()
+    lib.avcodec_find_decoder_by_name.restype = ctypes.c_void_p
+    lib.avcodec_find_decoder_by_name.argtypes = [ctypes.c_char_p]
+    lib.avcodec_find_encoder_by_name.restype = ctypes.c_void_p
+    lib.avcodec_find_encoder_by_name.argtypes = [ctypes.c_char_p]
+    missing = [n for n in ("h264", "mjpeg", "aac", "opus")
+               if not lib.avcodec_find_decoder_by_name(n.encode())]
+    if missing:
+        fail("ffmpeg.lib", "libavcodec {0}.{1}.{2} lacks decoders {3}".format(
+            v >> 16, (v >> 8) & 0xFF, v & 0xFF, missing))
+        return
+    enc = bool(lib.avcodec_find_encoder_by_name(b"libopenh264"))
+    if enc != (edition == "media"):
+        fail("ffmpeg.lib", "libopenh264 encoder {0} but edition is {1}".format(
+            "present" if enc else "absent", edition))
+        return
+    ok("ffmpeg.lib", "libavcodec {0}.{1}.{2}: h264/mjpeg/aac/opus decoders, "
+                     "libopenh264 encoder {3}".format(
+                         v >> 16, (v >> 8) & 0xFF, v & 0xFF,
+                         "present" if enc else "absent (as expected)"))
+
+
+def check_ffmpeg(bins, libs, tmp, with_openh264=True, executables=True):
     ffmpeg = find_exe(bins, "ffmpeg")
     ffprobe = find_exe(bins, "ffprobe")
+    if not executables:
+        skip("ffmpeg.exe", "profile ships no executables; library checks only")
+        return None
     if not ffmpeg or not ffprobe:
         fail("ffmpeg", "ffmpeg/ffprobe executables not staged")
         return None
@@ -581,7 +617,7 @@ def encode_with_h264enc(bins, libs, tmp):
     return out_264
 
 
-def check_openh264(bins, libs, tmp, h264_stream):
+def check_openh264(bins, libs, tmp, h264_stream, executables=True):
     lib_path = find_lib(libs, "openh264")
     if not lib_path:
         fail("openh264.lib", "libopenh264 not staged in {0}".format(libs))
@@ -604,9 +640,12 @@ def check_openh264(bins, libs, tmp, h264_stream):
         else:
             fail("openh264.lib", "unexpected version {0}.{1}".format(v.uMajor, v.uMinor))
 
+    if not executables:
+        skip("openh264.h264dec", "profile ships no executables; library check only")
+        return
     dec = find_exe(bins, "h264dec")
     if not dec:
-        skip("openh264.h264dec", "executable not staged")
+        fail("openh264.h264dec", "executable not staged")
         return
     if not h264_stream:
         h264_stream = encode_with_h264enc(bins, libs, tmp)
@@ -896,10 +935,12 @@ def main():
     h264 = None
     if args.media and args.edition != "standard":
         if args.edition in ("ffmpeg", "media"):
+            check_ffmpeg_libs(libs, args.edition)
             h264 = check_ffmpeg(bins, libs, tmp,
-                                with_openh264=(args.edition == "media"))
+                                with_openh264=(args.edition == "media"),
+                                executables=args.executables)
         if args.edition in ("openh264", "media"):
-            check_openh264(bins, libs, tmp, h264)
+            check_openh264(bins, libs, tmp, h264, executables=args.executables)
         if not args.no_usb:
             check_libusb(bins, libs)
     if args.executables:
