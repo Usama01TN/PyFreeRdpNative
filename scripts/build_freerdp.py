@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 7
+BUILD_SCRIPT_VERSION = 8
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -803,6 +803,12 @@ def cmake_options_for(profile, host_os, enable_channels=None,
     elif host_os == "Darwin":
         opts += [
             "-DWITH_X11=OFF", "-DWITH_WAYLAND=OFF", "-DWITH_ALSA=OFF",
+            # NTLM needs MD4/RC4, which OpenSSL 3 only offers via its
+            # "legacy" provider module - found through a path compiled into
+            # the libcrypto we ship, i.e. not on the user's machine. winpr's
+            # own implementations remove that runtime dependency.
+            "-DWITH_INTERNAL_MD4=ON", "-DWITH_INTERNAL_MD5=ON",
+            "-DWITH_INTERNAL_RC4=ON",
             # Upstream: "Mac platform server implementation no longer
             # compiles". The GUI clients aren't needed for a binding.
             "-DWITH_PLATFORM_SERVER=OFF",
@@ -815,6 +821,8 @@ def cmake_options_for(profile, host_os, enable_channels=None,
     elif host_os == "Windows":
         opts += [
             "-DWITH_X11=OFF", "-DWITH_WAYLAND=OFF",
+            "-DWITH_INTERNAL_MD4=ON", "-DWITH_INTERNAL_MD5=ON",   # see Darwin
+            "-DWITH_INTERNAL_RC4=ON",
             # No cairo in the default vcpkg set (it is a very long build);
             # scaling is unavailable unless you add it via
             # PYFREERDP_EXTRA_CMAKE.
@@ -1272,6 +1280,43 @@ def _ensure_patchelf():
         "`apt-get install patchelf` and re-run.")
 
 
+def _macho_rpaths(path):
+    """LC_RPATH entries of a Mach-O file, exactly (not a substring search)."""
+    out = subprocess.check_output(["otool", "-l", path]).decode(errors="replace")
+    rpaths, in_rpath = [], False
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith("cmd "):
+            in_rpath = s == "cmd LC_RPATH"
+        elif in_rpath and s.startswith("path "):
+            rpaths.append(s.split("path ", 1)[1].rsplit(" (offset", 1)[0])
+    return rpaths
+
+
+def _macho_add_rpath(path, want, replace_prefix=None):
+    """
+    Add an LC_RPATH. If the header has no spare room ("can't be redone"),
+    fall back to rewriting an existing entry starting with replace_prefix
+    (e.g. FreeRDP's own @loader_path/../lib) to the wanted value.
+    """
+    have = _macho_rpaths(path)
+    if want in have:
+        return True
+    r = subprocess.run(["install_name_tool", "-add_rpath", want, path],
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if r.returncode == 0:
+        return True
+    for old in have:
+        if replace_prefix and old.startswith(replace_prefix):
+            r2 = subprocess.run(["install_name_tool", "-rpath", old, want, path],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            if r2.returncode == 0:
+                return True
+    print("[rpath] warning: could not set rpath {0} on {1}: {2}".format(
+        want, path, r.stderr.decode(errors="replace").strip()[-200:]))
+    return False
+
+
 def _fix_rpath(out_dir):
     """
     FreeRDP installs its libraries with RUNPATH '$ORIGIN/../lib:$ORIGIN/..'
@@ -1306,11 +1351,7 @@ def _fix_rpath(out_dir):
                     continue
                 want = ("@loader_path" if rel == "."
                         else "@loader_path/" + rel)
-                have_rpaths = subprocess.check_output(
-                    ["otool", "-l", path]).decode(errors="replace")
-                if want not in have_rpaths:
-                    subprocess.check_call(["install_name_tool", "-add_rpath",
-                                           want, path])
+                _macho_add_rpath(path, want, replace_prefix="@loader_path/")
                 fixed += 1
     print("[rpath] made {0} shared objects relocatable ({1})".format(
         fixed, "$ORIGIN" if sysname == "Linux" else "@loader_path"))
@@ -1656,14 +1697,8 @@ def stage_executables(prefixes, libs_dir, deps_prefix=None, arch="host"):
                 print("[bin] warning: could not set rpath on {0}".format(p))
     elif sysname == "Darwin" and staged:
         for p in staged:
-            try:
-                have_rpaths = subprocess.check_output(["otool", "-l", p]).decode(
-                    errors="replace")
-                if "@executable_path/../_libs" not in have_rpaths:
-                    subprocess.check_call(["install_name_tool", "-add_rpath",
-                                           "@executable_path/../_libs", p])
-            except subprocess.CalledProcessError:
-                print("[bin] warning: could not set rpath on {0}".format(p))
+            _macho_add_rpath(p, "@executable_path/../_libs",
+                             replace_prefix="@executable_path/")
     # The executables pull in libraries the core libs don't (ffmpeg ->
     # libavformat/avfilter/avdevice, xfreerdp -> libfreerdp-client ...).
     # Walk their imports too, then make the newly copied libs relocatable.
@@ -1686,6 +1721,25 @@ def stage_executables(prefixes, libs_dir, deps_prefix=None, arch="host"):
     return staged
 
 
+def binary_soname(path):
+    """SONAME (ELF) or install-name basename (Mach-O) of a shared library."""
+    try:
+        if platform.system() == "Linux":
+            out = subprocess.check_output(["readelf", "-d", path]).decode(
+                errors="replace")
+            for line in out.splitlines():
+                if "(SONAME)" in line and "[" in line:
+                    return line[line.index("[") + 1:line.rindex("]")]
+        elif platform.system() == "Darwin":
+            out = subprocess.check_output(["otool", "-D", path]).decode(
+                errors="replace").splitlines()
+            if len(out) >= 2 and out[1].strip():
+                return os.path.basename(out[1].strip())
+    except subprocess.CalledProcessError:
+        pass
+    return None
+
+
 def soname_only(artifacts):
     """
     Keep one file per library: the SONAME (libX.so.3 / libX.3.dylib). The
@@ -1703,19 +1757,8 @@ def soname_only(artifacts):
         real.setdefault((rp, sub), []).append(os.path.basename(p))
     keep = []
     for (rp, sub), names in real.items():
-        soname = None
-        if sysname == "Linux":
-            for n in names:            # libfoo.so.N  (exactly one version part)
-                base, _, ver = n.partition(".so.")
-                if ver and ver.isdigit():
-                    soname = n
-        else:
-            for n in names:            # libfoo.N.dylib
-                stem = n[:-len(".dylib")] if n.endswith(".dylib") else ""
-                parts = stem.rsplit(".", 1)
-                if len(parts) == 2 and parts[1].isdigit():
-                    soname = n
-        if soname is None:             # modules without version: keep as is
+        soname = binary_soname(rp)
+        if soname not in names:        # modules without version: keep as is
             soname = sorted(names, key=len)[0]
         keep.append((os.path.join(os.path.dirname(rp), soname)
                      if os.path.exists(os.path.join(os.path.dirname(rp), soname))
@@ -1752,10 +1795,26 @@ def install_into_package(artifacts, arch="host", deps_prefix=None,
     if platform.system() == "Windows":
         bundle_windows_runtime_deps(out, arch, deps_prefix)
     else:
-        bundle_unix_runtime_deps(
-            out, deps_prefix,
-            extra_libdirs=krb5_libdir or None,
-            extra_allow=KRB5_RUNTIME_LIBS if krb5_libdir else None)
+        extra_dirs = list(krb5_libdir or [])
+        extra_allow = list(KRB5_RUNTIME_LIBS) if krb5_libdir else []
+        if platform.system() == "Darwin":
+            # libfreerdp3/libwinpr3 link Homebrew's OpenSSL by absolute path;
+            # ship libssl/libcrypto (install names rewritten to @rpath) so
+            # the package does not depend on Homebrew being installed.
+            ssl_dir = os.environ.get("OPENSSL_ROOT_DIR")
+            if not ssl_dir and have("brew"):
+                try:
+                    ssl_dir = subprocess.check_output(
+                        ["brew", "--prefix", "openssl@3"],
+                        stderr=subprocess.DEVNULL).decode().strip()
+                except (OSError, subprocess.CalledProcessError):
+                    ssl_dir = None
+            if ssl_dir and os.path.isdir(os.path.join(ssl_dir, "lib")):
+                extra_dirs.append(os.path.join(ssl_dir, "lib"))
+                extra_allow += ["libssl.", "libcrypto."]
+        bundle_unix_runtime_deps(out, deps_prefix,
+                                 extra_libdirs=extra_dirs or None,
+                                 extra_allow=tuple(extra_allow) or None)
     _fix_rpath(out)
     return out
 

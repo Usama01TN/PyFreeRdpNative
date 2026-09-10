@@ -145,7 +145,7 @@ FFMPEG_COMPONENTS = {
 # ---------------------------------------------------------------------------
 
 # Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
-BUILD_SCRIPT_VERSION = 7
+BUILD_SCRIPT_VERSION = 8
 
 
 def log(msg):
@@ -374,6 +374,10 @@ class Toolchain(object):
             if self.host_os == "Darwin":
                 self.cflags += ["-mmacosx-version-min=11.0"]
                 self.env["MACOSX_DEPLOYMENT_TARGET"] = "11.0"
+                # Room in the Mach-O header for install_name_tool -add_rpath
+                # (ffmpeg's binaries otherwise fail with "can't be redone").
+                self.env["LDFLAGS"] = (self.env.get("LDFLAGS", "") +
+                                       " -Wl,-headerpad_max_install_names").strip()
 
     # -- OpenH264 make variables --------------------------------------------
 
@@ -464,7 +468,8 @@ class Toolchain(object):
         else:
             if self.host_os == "Darwin":
                 f += ["--extra-cflags=-mmacosx-version-min=11.0",
-                      "--extra-ldflags=-mmacosx-version-min=11.0",
+                      "--extra-ldflags=-mmacosx-version-min=11.0 "
+                      "-Wl,-headerpad_max_install_names",
                       "--install-name-dir=@rpath"]
             # (rpaths are set afterwards with patchelf / install_name_tool in
             # fix_prefix_rpaths(): "$ORIGIN" does not survive FFmpeg's
@@ -540,7 +545,13 @@ def build_openh264(tc, work):
         for k in ("CC", "CXX", "AR", "RANLIB", "STRIP"):
             env.pop(k, None)
     make_vars = tc.openh264_make_vars()
-    run(["make", "-j{0}".format(tc.jobs)] + make_vars, cwd=src, env=env)
+    # `make` (all) also builds demos/unit tests - on Android via gradle - so
+    # build exactly what we ship: the library, plus the console tools on
+    # desktop hosts.
+    targets = ["libraries"]
+    if tc.target == "host":
+        targets += ["h264enc", "h264dec"]
+    run(["make", "-j{0}".format(tc.jobs)] + targets + make_vars, cwd=src, env=env)
     if tc.shared:
         run(["make", "install-shared"] + make_vars, cwd=src, env=env)
     else:
@@ -747,8 +758,14 @@ def fix_prefix_rpaths(prefix, target):
         for fn in os.listdir(libdir):
             p = os.path.join(libdir, fn)
             if fn.endswith(".dylib") and os.path.isfile(p) and not os.path.islink(p):
+                # Keep the library's own (compatibility-version) install name,
+                # e.g. libswscale.8.dylib, just re-rooted at @rpath. Using the
+                # fully versioned filename here would make consumers record
+                # @rpath/libswscale.8.3.100.dylib.
+                cur = subprocess.check_output(["otool", "-D", p]).decode().splitlines()
+                base = os.path.basename(cur[1].strip()) if len(cur) > 1 and cur[1].strip() else fn
                 subprocess.check_call(["install_name_tool", "-id",
-                                       "@rpath/" + fn, p])
+                                       "@rpath/" + base, p])
                 out = subprocess.check_output(["otool", "-L", p]).decode()
                 for line in out.splitlines()[1:]:
                     ref = line.strip().split(" (")[0]

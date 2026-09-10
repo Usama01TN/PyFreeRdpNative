@@ -56,7 +56,7 @@ SYS = platform.system()
 EXT = {"Windows": ".dll", "Darwin": ".dylib"}.get(SYS, ".so")
 
 # Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
-BUILD_SCRIPT_VERSION = 7
+BUILD_SCRIPT_VERSION = 8
 
 
 RESULTS = []
@@ -434,10 +434,11 @@ def check_media(libs, paths, edition="media"):
         results.append(bool(ctx))
         if ctx:
             lib.h264_context_free(ctx)
-    # FFmpeg alone has no H.264 *encoder* (LGPL build), so the ffmpeg edition
-    # must decode but is expected to have no encoder context.
-    expect_enc = openh264
-    if results[0] and results[1] == expect_enc:
+    # FFmpeg alone has no H.264 *encoder* in an LGPL build - except on
+    # Windows, where FFmpeg wraps Media Foundation (h264_mf) - so the ffmpeg
+    # edition must decode and, off Windows, must have no encoder context.
+    expect_enc = openh264 or (SYS == "Windows" and ffmpeg)
+    if results[0] and (results[1] == expect_enc or (SYS == "Windows" and results[1])):
         ok("media.h264", "h264_context_new(): decoder yes, encoder {0} - as "
                          "expected for edition {1}".format(
                              "yes" if results[1] else "no", edition))
@@ -505,6 +506,28 @@ def check_ffmpeg_libs(libs, edition):
                          "present" if enc else "absent (as expected)"))
 
 
+def synth_video(tmp, w=320, h=240, n=25):
+    """Raw YUV420 test clip generated in Python (no lavfi/testsrc needed)."""
+    yuv = os.path.join(tmp, "src.yuv")
+    with open(yuv, "wb") as fh:
+        for i in range(n):
+            fh.write(bytes(((x + y + 3 * i) & 0xFF) for y in range(h) for x in range(w)))
+            fh.write(bytes([128 + (i % 16)]) * (w * h // 4))
+            fh.write(bytes([128 - (i % 16)]) * (w * h // 4))
+    return ["-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", "{0}x{1}".format(w, h),
+            "-r", "25", "-i", yuv]
+
+
+def synth_audio(tmp, rate=44100, seconds=1):
+    """Raw 16-bit mono sine generated in Python (no lavfi/sine needed)."""
+    import math, struct
+    pcm = os.path.join(tmp, "src.pcm")
+    with open(pcm, "wb") as fh:
+        for i in range(rate * seconds):
+            fh.write(struct.pack("<h", int(12000 * math.sin(2 * math.pi * 440 * i / rate))))
+    return ["-f", "s16le", "-ar", str(rate), "-ac", "1", "-i", pcm]
+
+
 def check_ffmpeg(bins, libs, tmp, with_openh264=True, executables=True):
     ffmpeg = find_exe(bins, "ffmpeg")
     ffprobe = find_exe(bins, "ffprobe")
@@ -524,10 +547,9 @@ def check_ffmpeg(bins, libs, tmp, with_openh264=True, executables=True):
     h264 = None
     if with_openh264:
         h264 = os.path.join(tmp, "test.h264")
-        rc, out = run([ffmpeg, "-hide_banner", "-y", "-f", "lavfi",
-                       "-i", "testsrc2=size=320x240:rate=25", "-frames:v", "25",
-                       "-pix_fmt", "yuv420p", "-c:v", "libopenh264",
-                       "-f", "h264", h264], env=env)
+        rc, out = run([ffmpeg, "-hide_banner", "-y"] + synth_video(tmp) +
+                      ["-frames:v", "25", "-c:v", "libopenh264", "-f", "h264", h264],
+                      env=env)
         if rc != 0 or not os.path.getsize(h264):
             fail("ffmpeg.encode_openh264", out.strip()[-1200:])
             return None
@@ -544,10 +566,9 @@ def check_ffmpeg(bins, libs, tmp, with_openh264=True, executables=True):
         # MJPEG (the camera channel's format) and confirm h264 decoding is
         # compiled in.
         mjpg = os.path.join(tmp, "test.mjpeg")
-        rc, out = run([ffmpeg, "-hide_banner", "-y", "-f", "lavfi",
-                       "-i", "testsrc2=size=320x240:rate=25", "-frames:v", "25",
-                       "-pix_fmt", "yuvj420p", "-c:v", "mjpeg", "-f", "mjpeg", mjpg],
-                      env=env)
+        rc, out = run([ffmpeg, "-hide_banner", "-y"] + synth_video(tmp) +
+                      ["-frames:v", "25", "-pix_fmt", "yuvj420p", "-c:v", "mjpeg",
+                       "-f", "mjpeg", mjpg], env=env)
         if rc != 0:
             fail("ffmpeg.encode_mjpeg", out.strip()[-800:])
             return None
@@ -564,9 +585,8 @@ def check_ffmpeg(bins, libs, tmp, with_openh264=True, executables=True):
         ok("ffmpeg.mjpeg_roundtrip", "25 MJPEG frames round-tripped; h264 decoder present")
 
     aac = os.path.join(tmp, "test.adts")
-    rc, out = run([ffmpeg, "-hide_banner", "-y", "-f", "lavfi",
-                   "-i", "sine=frequency=440:sample_rate=44100:duration=1",
-                   "-c:a", "aac", "-b:a", "96k", "-f", "adts", aac], env=env)
+    rc, out = run([ffmpeg, "-hide_banner", "-y"] + synth_audio(tmp) +
+                  ["-c:a", "aac", "-b:a", "96k", "-f", "adts", aac], env=env)
     if rc != 0:
         fail("ffmpeg.encode_aac", out.strip()[-800:])
         return h264
@@ -645,7 +665,10 @@ def check_openh264(bins, libs, tmp, h264_stream, executables=True):
         return
     dec = find_exe(bins, "h264dec")
     if not dec:
-        fail("openh264.h264dec", "executable not staged")
+        if SYS == "Windows":
+            skip("openh264.h264dec", "vcpkg's OpenH264 port builds no console tools")
+        else:
+            fail("openh264.h264dec", "executable not staged")
         return
     if not h264_stream:
         h264_stream = encode_with_h264enc(bins, libs, tmp)
@@ -724,6 +747,34 @@ EXE_SMOKE = {
 }
 
 
+def windows_missing_imports(path, libs):
+    """Transitively walk PE imports; report names not found next to the
+    executable, in the Windows system directories, or as API sets."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import build_freerdp
+    sysdirs = [os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), d)
+               for d in ("System32", "SysWOW64")]
+    seen, missing, queue = set(), [], [path]
+    while queue:
+        f = queue.pop()
+        try:
+            imports = build_freerdp.pe_imports(f)
+        except Exception as e:  # noqa
+            missing.append("{0}: unreadable ({1})".format(os.path.basename(f), e))
+            continue
+        for dll in imports:
+            low = dll.lower()
+            if low in seen or low.startswith(("api-ms-", "ext-ms-")):
+                continue
+            seen.add(low)
+            local = os.path.join(libs, dll)
+            if os.path.isfile(local):
+                queue.append(local)
+            elif not any(os.path.isfile(os.path.join(d, dll)) for d in sysdirs):
+                missing.append(dll)
+    return sorted(set(missing))
+
+
 def unresolved_deps(path, libs):
     """Return dynamic dependencies the loader will not find."""
     if SYS == "Linux":
@@ -735,6 +786,8 @@ def unresolved_deps(path, libs):
             if d.startswith("@rpath/"):
                 if not os.path.exists(os.path.join(libs, d[len("@rpath/"):])):
                     missing.append(d)
+            elif d.startswith(("/usr/lib/", "/System/Library/")):
+                continue  # OS libraries: in the dyld shared cache, not on disk
             elif d.startswith("/") and not os.path.exists(d):
                 missing.append(d)
         return missing
@@ -789,8 +842,12 @@ def check_executables(bins, libs, tmp):
         args, codes, needle = spec
         rc, out = run([p] + args, env=env, timeout=60)
         if rc not in codes or (needle and needle.lower() not in out.lower()):
+            detail = out.strip()[-300:]
+            if SYS == "Windows" and rc & 0xFFFFFFFF == 0xC0000135:
+                detail = "STATUS_DLL_NOT_FOUND; unresolved imports: {0}".format(
+                    windows_missing_imports(p, libs))
             problems.append("{0} {1}: rc={2} {3}".format(
-                name, " ".join(args), rc, out.strip()[-300:]))
+                name, " ".join(args), rc, detail))
         tested += 1
     if problems:
         fail("executables", "; ".join(problems))
