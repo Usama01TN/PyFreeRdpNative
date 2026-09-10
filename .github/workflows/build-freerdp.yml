@@ -34,8 +34,9 @@ name: build-freerdp
 # Triggers:
 #   * workflow_dispatch  - pick FreeRDP ref, profile, optional channel
 #                          overrides, and whether to publish a release
-#   * push to main       - only when the build script or this workflow
-#                          changes (it's a slow, expensive workflow)
+#   * push to main       - only when the build scripts or this workflow
+#                          change; also refreshes the rolling pre-release
+#                          freerdp-libs-<freerdp_ref> with the new artifacts
 #   * release published  - (release.yml cuts v* releases) builds + attaches
 #                          libs to a release named freerdp-libs-<freerdp_ref>
 #
@@ -71,6 +72,9 @@ on:
     branches: [main]
     paths:
       - "scripts/build_freerdp.py"
+      - "scripts/build_deps.py"
+      - "scripts/validate_build.py"
+      - "scripts/vcpkg.json"
       - ".github/workflows/build-freerdp.yml"
   release:
     types: [published]
@@ -178,7 +182,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 5
+            python scripts/$s.py --require-version 6
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -287,6 +291,7 @@ jobs:
         run: |
           args=""
           for ch in $ENABLE_CHANNELS; do args="$args --enable-channel $ch"; done
+          if [ -n "${{ matrix.win_arch }}" ]; then args="$args --arch ${{ matrix.win_arch }}"; fi
           python scripts/build_freerdp.py --list-channels \
             --profile "${{ matrix.profile }}" $args
 
@@ -454,6 +459,18 @@ jobs:
           retention-days: 30
           compression-level: 0   # already compressed
 
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ matrix.label }}-${{ matrix.profile }}
+          path: |
+            build/diagnostics/
+            build/deps/*/DEPS-MANIFEST.txt
+            build/deps/*/manifest/vcpkg.json
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Publish artifact link to job summary
         shell: bash
         run: |
@@ -481,8 +498,12 @@ jobs:
         include:
           - abi: arm64-v8a
             openssl_target: android-arm64
+          - abi: armeabi-v7a
+            openssl_target: android-arm
           - abi: x86_64
             openssl_target: android-x86_64
+          - abi: x86
+            openssl_target: android-x86
     env:
       API_LEVEL: "24"
       OPENSSL_VERSION: "3.3.2"
@@ -498,7 +519,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 5
+            python scripts/$s.py --require-version 6
           done
 
       - name: Install host tools
@@ -620,6 +641,17 @@ jobs:
           retention-days: 30
           compression-level: 0
 
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-android-${{ matrix.abi }}-${{ matrix.profile }}
+          path: |
+            build/diagnostics/
+            build/deps/*/DEPS-MANIFEST.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Publish artifact link to job summary
         run: |
           {
@@ -728,6 +760,11 @@ jobs:
           - label: simulator-arm64
             platform: SIMULATORARM64
             openssl_target: iossimulator-arm64-xcrun
+        # OpenH264/FFmpeg only build for the device SDK on arm64: the
+        # simulator gets the minimal (library-only) profile.
+        exclude:
+          - platform: SIMULATORARM64
+            profile: full
     env:
       OPENSSL_VERSION: "3.3.2"
     steps:
@@ -742,7 +779,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 5
+            python scripts/$s.py --require-version 6
           done
 
       - name: Install host tools
@@ -855,6 +892,17 @@ jobs:
           retention-days: 30
           compression-level: 0
 
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-ios-${{ matrix.label }}-${{ matrix.profile }}
+          path: |
+            build/diagnostics/
+            build/deps/*/DEPS-MANIFEST.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Publish artifact link to job summary
         run: |
           {
@@ -916,7 +964,8 @@ jobs:
       - name: Download all artifacts
         if: |
           (github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
-          github.event_name == 'release'
+          github.event_name == 'release' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
         uses: actions/download-artifact@v4
         with:
           pattern: freerdp-*
@@ -926,7 +975,8 @@ jobs:
       - name: Attach to GitHub release
         if: |
           (github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
-          github.event_name == 'release'
+          github.event_name == 'release' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
