@@ -748,10 +748,10 @@ jobs:
           for ch, flags in (('cliprdr', 0x9000), ('rdpgfx', 0x2000), ('drive', 0x4000)):
               assert fn(ch.encode(), None, None, flags), ch; print('client channel ok:', ch)
           # Kerberos via native SSPI: winpr forwards to secur32
-          winpr = ctypes.CDLL(os.path.join(libs, 'winpr3.dll'))
+          winpr = ctypes.WinDLL(os.path.join(libs, 'winpr3.dll'))   # SEC_ENTRY = __stdcall
           class Pkg(ctypes.Structure):
               _fields_ = [('fCapabilities', ctypes.c_uint32), ('wVersion', ctypes.c_uint16), ('wRPCID', ctypes.c_uint16), ('cbMaxToken', ctypes.c_uint32), ('Name', ctypes.c_char_p), ('Comment', ctypes.c_char_p)]
-          ENUM = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.POINTER(Pkg)))
+          ENUM = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.POINTER(Pkg)))
           class Table(ctypes.Structure):
               _fields_ = [('dwVersion', ctypes.c_uint32), ('EnumerateSecurityPackagesA', ENUM)]
           winpr.InitSecurityInterfaceExA.restype = ctypes.POINTER(Table)
