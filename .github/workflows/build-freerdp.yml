@@ -92,6 +92,27 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Decide which profiles to build. workflow_dispatch can pick one; every
+  # other trigger builds both. (A job-level `if:` cannot see `matrix`, so the
+  # selection is done here and fed to the matrices with fromJSON.)
+  # ---------------------------------------------------------------------------
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    outputs:
+      profiles: ${{ steps.sel.outputs.profiles }}
+    steps:
+      - id: sel
+        shell: bash
+        run: |
+          case "${PROFILES}" in
+            minimal) echo 'profiles=["minimal"]'        >> "$GITHUB_OUTPUT" ;;
+            full)    echo 'profiles=["full"]'           >> "$GITHUB_OUTPUT" ;;
+            *)       echo 'profiles=["minimal","full"]' >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "building profiles: ${PROFILES:-both}"
+
+  # ---------------------------------------------------------------------------
   # Desktop hosts. One job per (OS, arch); each runs the script with
   # --target host and uploads pyfreerdp/_libs/ as an artifact.
   #
@@ -102,15 +123,13 @@ jobs:
   # ---------------------------------------------------------------------------
   desktop:
     name: ${{ matrix.label }} (${{ matrix.profile }})
+    needs: plan
     runs-on: ${{ matrix.runner }}
     # Skip cells the dispatch input did not ask for.
-    if: |
-      inputs.profiles == null || inputs.profiles == '' || inputs.profiles == 'both'
-      || inputs.profiles == matrix.profile
     strategy:
       fail-fast: false
       matrix:
-        profile: [minimal, full]
+        profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
         include:
           - label: linux-x86_64
             runner: ubuntu-24.04
@@ -453,14 +472,12 @@ jobs:
   # ---------------------------------------------------------------------------
   android:
     name: android-${{ matrix.abi }} (${{ matrix.profile }})
+    needs: plan
     runs-on: ubuntu-24.04
-    if: |
-      inputs.profiles == null || inputs.profiles == '' || inputs.profiles == 'both'
-      || inputs.profiles == matrix.profile
     strategy:
       fail-fast: false
       matrix:
-        profile: [minimal, full]
+        profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
         include:
           - abi: arm64-v8a
             openssl_target: android-arm64
@@ -698,14 +715,12 @@ jobs:
   # ---------------------------------------------------------------------------
   ios:
     name: ios-${{ matrix.label }} (${{ matrix.profile }})
+    needs: plan
     runs-on: macos-15
-    if: |
-      inputs.profiles == null || inputs.profiles == '' || inputs.profiles == 'both'
-      || inputs.profiles == matrix.profile
     strategy:
       fail-fast: false
       matrix:
-        profile: [minimal, full]
+        profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
         include:
           - label: arm64
             platform: OS64
