@@ -13,6 +13,17 @@ Components (all pinned, all verified by SHA-256):
                       (WITH_DSP_FFMPEG), pixel conversion (WITH_SWSCALE),
                       plus the ffmpeg / ffprobe executables.
 
+Editions (--edition) decide which components are built:
+
+    standard   nothing - FreeRDP with its built-in codecs only
+    ffmpeg     FFmpeg (LGPL, no external encoders) + libusb
+               -> H.264/MJPEG decode, AAC/Opus DSP, swscale; no H.264 encoder
+    openh264   OpenH264 + libusb
+               -> H.264 encode + decode via OpenH264; no FFmpeg
+    media      FFmpeg (with libopenh264) + OpenH264 + libusb  (everything)
+
+The prefix label carries the edition: build/deps/<platform>-<edition>.
+
 Targets
 
     --target host       Linux and macOS build from source with the native
@@ -134,7 +145,7 @@ FFMPEG_COMPONENTS = {
 # ---------------------------------------------------------------------------
 
 # Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
-BUILD_SCRIPT_VERSION = 6
+BUILD_SCRIPT_VERSION = 7
 
 
 def log(msg):
@@ -245,17 +256,20 @@ def ncpu():
         return 2
 
 
-def label_for(target, arch=None, abi=None, ios_platform=None):
+def label_for(target, arch=None, abi=None, ios_platform=None, edition="media"):
     if target == "android":
-        return "android-{0}".format(abi)
-    if target == "ios":
-        return "ios-{0}".format(ios_platform)
-    sysname = platform.system()
-    if sysname == "Windows":
-        return "windows-{0}".format(arch or "x64")
-    m = platform.machine().lower()
-    m = {"amd64": "x86_64", "arm64": "arm64", "aarch64": "aarch64"}.get(m, m)
-    return "{0}-{1}".format(sysname.lower(), m)
+        base = "android-{0}".format(abi)
+    elif target == "ios":
+        base = "ios-{0}".format(ios_platform)
+    else:
+        sysname = platform.system()
+        if sysname == "Windows":
+            base = "windows-{0}".format(arch or "x64")
+        else:
+            m = platform.machine().lower()
+            m = {"amd64": "x86_64", "arm64": "arm64", "aarch64": "aarch64"}.get(m, m)
+            base = "{0}-{1}".format(sysname.lower(), m)
+    return "{0}-{1}".format(base, edition)
 
 
 # ---------------------------------------------------------------------------
@@ -372,6 +386,10 @@ class Toolchain(object):
                   "NDKLEVEL={0}".format(self.api_level)]
             if self.abi in ("x86", "x86_64") and not have("nasm"):
                 v += ["USE_ASM=No"]
+            if self.abi == "x86":
+                # 32-bit x86 asm is non-PIC unless told otherwise; a shared
+                # libopenh264.so needs PIC (R_386_32 relocations otherwise).
+                v += ["ENABLEPIC=Yes"]
         elif self.target == "ios":
             # build/platform-ios.mk defaults to -miphoneos-version-min=5.1
             # (rejected for arm64) - override; bitcode is patched out in
@@ -380,8 +398,11 @@ class Toolchain(object):
         else:
             m = platform.machine().lower()
             arch = {"x86_64": "x86_64", "amd64": "x86_64",
-                    "aarch64": "arm64", "arm64": "arm64"}.get(m, m)
+                    "aarch64": "arm64", "arm64": "arm64",
+                    "i686": "i386", "i386": "i386"}.get(m, m)
             v += ["ARCH={0}".format(arch)]
+            if arch == "i386":
+                v += ["ENABLEPIC=Yes"]
             if self.host_os == "Darwin":
                 v += ["OS=darwin"]
         if not have("nasm") and self.target != "android":
@@ -390,10 +411,13 @@ class Toolchain(object):
 
     # -- FFmpeg configure flags --------------------------------------------
 
-    def ffmpeg_configure_flags(self):
+    def ffmpeg_configure_flags(self, with_openh264=True):
         f = ["--prefix={0}".format(self.prefix),
              "--disable-doc", "--disable-debug", "--enable-pic",
-             "--disable-ffplay", "--enable-libopenh264",
+             "--disable-ffplay"]
+        if with_openh264:
+            f.append("--enable-libopenh264")
+        f += [
              # Deterministic, dependency-free build:
              "--disable-autodetect", "--enable-pthreads",
              "--pkg-config-flags=--static" if not self.shared else
@@ -401,6 +425,8 @@ class Toolchain(object):
              "--disable-everything"]
         for kind, items in FFMPEG_COMPONENTS.items():
             for it in items:
+                if it == "libopenh264" and not with_openh264:
+                    continue
                 f.append("--enable-{0}={1}".format(kind, it))
         if self.shared:
             f += ["--enable-shared", "--disable-static",
@@ -528,13 +554,14 @@ def build_openh264(tc, work):
             p = os.path.join(src, exe)
             if os.path.isfile(p):
                 shutil.copy2(p, os.path.join(bindir, exe))
-        # Encoder config files the h264enc executable needs.
+        # Encoder config files the h264enc executable needs (testbin/*.cfg;
+        # welsenc.cfg references layer2.cfg).
         share = os.path.join(tc.prefix, "share", "openh264")
         if not os.path.isdir(share):
             os.makedirs(share)
-        for fn in os.listdir(os.path.join(src, "res")):
-            if fn.endswith((".cfg", ".txt")):
-                shutil.copy2(os.path.join(src, "res", fn),
+        for fn in os.listdir(os.path.join(src, "testbin")):
+            if fn.endswith(".cfg"):
+                shutil.copy2(os.path.join(src, "testbin", fn),
                              os.path.join(share, fn))
     if tc.host_os == "Darwin" and tc.shared:
         # Give the dylib an @rpath install name like FFmpeg's.
@@ -546,13 +573,13 @@ def build_openh264(tc, work):
                      "@rpath/" + os.path.basename(dylib), dylib])
 
 
-def build_ffmpeg(tc, work):
+def build_ffmpeg(tc, work, with_openh264=True):
     if tc.target == "ios" and tc.ios_platform.startswith("SIMULATOR"):
         raise SystemExit("FFmpeg/OpenH264 are built for the iOS device SDK only; "
-                         "use --profile minimal for simulator targets.")
+                         "use --edition standard for simulator targets.")
     src = fetch_source("ffmpeg", work)
     env = dict(tc.env)
-    flags = tc.ffmpeg_configure_flags()
+    flags = tc.ffmpeg_configure_flags(with_openh264)
     run(["./configure"] + flags, cwd=src, env=env)
     run(["make", "-j{0}".format(tc.jobs)], cwd=src, env=env)
     run(["make", "install"], cwd=src, env=env)
@@ -603,7 +630,15 @@ def prepare_vcpkg_manifest(src_manifest, vcpkg_root, prefix):
     return dst_dir
 
 
-def build_windows_vcpkg(prefix, arch, jobs, profile="full"):
+EDITION_VCPKG_FEATURES = {
+    "standard": [],
+    "ffmpeg": ["ffmpeg", "usb"],
+    "openh264": ["openh264", "usb"],
+    "media": ["media", "usb"],
+}
+
+
+def build_windows_vcpkg(prefix, arch, jobs, profile="full", edition="media"):
     vcpkg_root = (os.environ.get("VCPKG_ROOT")
                   or os.environ.get("VCPKG_INSTALLATION_ROOT"))
     if not vcpkg_root:
@@ -623,8 +658,10 @@ def build_windows_vcpkg(prefix, arch, jobs, profile="full"):
            "--x-manifest-root={0}".format(manifest_dir),
            "--x-install-root={0}".format(installed),
            "--clean-after-build"]
+    for feat in EDITION_VCPKG_FEATURES[edition]:
+        cmd.append("--x-feature={0}".format(feat))
     if profile == "full":
-        cmd += ["--x-feature=media", "--x-feature=sdl"]
+        cmd.append("--x-feature=sdl")   # sdl-freerdp client
     run(cmd, env=env)
     # Flatten to the same <prefix>/{bin,lib,include} shape as source builds
     # so build_freerdp.py can treat all targets alike.
@@ -742,7 +779,8 @@ def fix_prefix_rpaths(prefix, target):
 
 
 def write_manifest(prefix, label, built):
-    lines = ["# pyfreerdp dependency prefix", "label={0}".format(label)]
+    lines = ["# pyfreerdp dependency prefix", "label={0}".format(label),
+             "edition={0}".format(label.rsplit("-", 1)[-1])]
     for name in built:
         lines.append("{0}={1}".format(name, SOURCES[name]["version"]))
     with open(os.path.join(prefix, "DEPS-MANIFEST.txt"), "w") as fh:
@@ -765,11 +803,15 @@ def main():
     p.add_argument("--work", help="download/extract dir (default: temp)")
     p.add_argument("--jobs", type=int, default=ncpu())
     p.add_argument("--only", help="comma list of components: libusb,openh264,ffmpeg")
+    p.add_argument("--edition", choices=("standard", "ffmpeg", "openh264", "media"),
+                   default="media",
+                   help="standard: no media/USB deps (Windows: only "
+                        "OpenSSL/zlib/cJSON from vcpkg). ffmpeg: FFmpeg + "
+                        "libusb. openh264: OpenH264 + libusb. media "
+                        "(default): FFmpeg with libopenh264 + OpenH264 + libusb.")
     p.add_argument("--profile", choices=("minimal", "full"), default="full",
-                   help="full (default): everything. minimal: only what the "
-                        "size-optimised library build needs - on Windows that "
-                        "is OpenSSL/zlib/cJSON from vcpkg; on other platforms "
-                        "nothing (FreeRDP's minimal build uses system OpenSSL).")
+                   help="full adds the SDL3 client libraries on Windows (vcpkg "
+                        "'sdl' feature); no effect elsewhere.")
     p.add_argument("--require-version", type=int, metavar="N",
                    help="exit 0 if this script is version N, else exit 2")
     p.add_argument("--print-hashes", action="store_true",
@@ -786,7 +828,8 @@ def main():
                                             BUILD_SCRIPT_VERSION))
         return 0
 
-    label = label_for(args.target, args.arch, args.abi, args.ios_platform)
+    label = label_for(args.target, args.arch, args.abi, args.ios_platform,
+                      args.edition)
     prefix = os.path.abspath(args.prefix or os.path.join(
         repo_root(), "build", "deps", label))
     work = os.path.abspath(args.work or os.path.join(
@@ -803,20 +846,23 @@ def main():
         args.target, label, prefix, args.jobs))
 
     if args.target == "host" and platform.system() == "Windows":
-        build_windows_vcpkg(prefix, args.arch, args.jobs, args.profile)
+        build_windows_vcpkg(prefix, args.arch, args.jobs, args.profile,
+                            args.edition)
         write_manifest(prefix, label, [])
         return 0
-    if args.profile == "minimal":
-        log("profile minimal: no source dependencies to build on this "
+    if args.edition == "standard":
+        log("edition standard: no source dependencies to build on this "
             "platform (system OpenSSL is used); nothing to do")
-        write_manifest(prefix, label + "-minimal", [])
+        write_manifest(prefix, label, [])
         return 0
 
     require_tools(["make", "pkg-config"])
     if args.target == "host" and platform.system() == "Linux":
         require_tools(["cc"])
-    only = set(args.only.split(",")) if args.only else {"libusb", "openh264",
-                                                         "ffmpeg"}
+    wanted = {"ffmpeg": {"libusb", "ffmpeg"},
+              "openh264": {"libusb", "openh264"},
+              "media": {"libusb", "openh264", "ffmpeg"}}[args.edition]
+    only = (set(args.only.split(",")) & wanted) if args.only else wanted
     tc = Toolchain(args.target, prefix, args.jobs, abi=args.abi,
                    api_level=args.api_level, ios_platform=args.ios_platform)
     built = []
@@ -828,7 +874,7 @@ def main():
         build_openh264(tc, work)
         built.append("openh264")
     if "ffmpeg" in only:
-        build_ffmpeg(tc, work)
+        build_ffmpeg(tc, work, with_openh264=("openh264" in only))
         built.append("ffmpeg")
     fix_prefix_rpaths(prefix, args.target)
     write_manifest(prefix, label, built)

@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 6
+BUILD_SCRIPT_VERSION = 7
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -669,39 +669,50 @@ def dedupe_defines(opts):
     return out
 
 
+EDITIONS = ("standard", "ffmpeg", "openh264", "media")
+
+
+def deps_has_ffmpeg(deps_prefix):
+    return bool(deps_prefix) and deps_has(deps_prefix, "libavcodec")
+
+
+def deps_has_openh264(deps_prefix):
+    return bool(deps_prefix) and deps_has(deps_prefix, "openh264")
+
+
 def deps_media_available(deps_prefix):
-    """Does the prefix carry FFmpeg + OpenH264 (i.e. was it built --profile
-    full)? A minimal Windows prefix only has OpenSSL/zlib/cJSON."""
-    if not deps_prefix:
-        return False
-    return deps_has(deps_prefix, "libavcodec") and deps_has(deps_prefix,
-                                                            "openh264")
+    """Any media component present (FFmpeg and/or OpenH264)?"""
+    return deps_has_ffmpeg(deps_prefix) or deps_has_openh264(deps_prefix)
 
 
 def media_options(deps_prefix, host_os):
     """
-    -D switches that turn on everything a build/deps/<label> prefix (from
-    scripts/build_deps.py --profile full) provides: FFmpeg (H.264/MJPEG
-    decode, RDP audio codecs, swscale), OpenH264 (H.264 encode/decode) and
-    libusb (USB redirection, camera V4L backend). A prefix without media
-    (minimal) only contributes CMAKE_PREFIX_PATH so OpenSSL/zlib are found.
+    -D switches for whatever the build/deps/<label>-<edition> prefix (from
+    scripts/build_deps.py) provides. FFmpeg and OpenH264 are switched
+    independently so the ffmpeg / openh264 / media editions all work from
+    the same code path:
+
+      FFmpeg present   -> WITH_FFMPEG, WITH_DSP_FFMPEG (AAC/Opus), WITH_SWSCALE
+                          (scaler) instead of cairo
+      OpenH264 present -> WITH_OPENH264 (H.264 encode + decode)
+      neither          -> only CMAKE_PREFIX_PATH (Windows: OpenSSL/zlib/cJSON)
     """
     if not deps_prefix:
         return []
-    if not deps_media_available(deps_prefix):
-        return ["-DCMAKE_PREFIX_PATH={0}".format(deps_prefix)]
-    opts = [
-        "-DCMAKE_PREFIX_PATH={0}".format(deps_prefix),
-        "-DWITH_FFMPEG=ON",
-        "-DWITH_DSP_FFMPEG=ON",
-        "-DWITH_SWSCALE=ON",        # FFmpeg scaler instead of cairo
-        "-DWITH_CAIRO=OFF",
-        "-DWITH_OPENH264=ON",
-        "-DWITH_OPENH264_LOADING=OFF",
-    ]
-    if host_os == "Windows":
-        # vcpkg's openh264 port installs openh264.lib (not openh264_dll).
-        opts.append("-DOPENH264_ROOT={0}".format(deps_prefix))
+    opts = ["-DCMAKE_PREFIX_PATH={0}".format(deps_prefix)]
+    if deps_has_ffmpeg(deps_prefix):
+        opts += ["-DWITH_FFMPEG=ON", "-DWITH_DSP_FFMPEG=ON",
+                 "-DWITH_SWSCALE=ON", "-DWITH_CAIRO=OFF"]
+    else:
+        opts += ["-DWITH_FFMPEG=OFF", "-DWITH_DSP_FFMPEG=OFF",
+                 "-DWITH_SWSCALE=OFF"]
+    if deps_has_openh264(deps_prefix):
+        opts += ["-DWITH_OPENH264=ON", "-DWITH_OPENH264_LOADING=OFF"]
+        if host_os == "Windows":
+            # vcpkg's openh264 port installs openh264.lib (not openh264_dll).
+            opts.append("-DOPENH264_ROOT={0}".format(deps_prefix))
+    else:
+        opts.append("-DWITH_OPENH264=OFF")
     return opts
 
 
@@ -727,8 +738,7 @@ def media_channels(deps_prefix, host_os, target="host"):
         chans.append("urbdrc")
     # rdpecam client: needs swscale and a capture backend; only Linux has
     # one (V4L) in FreeRDP 3.16. Server side is always on.
-    if host_os == "Linux" and target == "host" and deps_media_available(
-            deps_prefix):
+    if host_os == "Linux" and target == "host" and deps_has_ffmpeg(deps_prefix):
         chans.append("rdpecam")
     return chans
 
@@ -995,7 +1005,7 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
         "native SSPI (Windows)" if host_os == "Windows" else
         ("ON" if "-DWITH_KRB5=ON" in krb_opts else "OFF")))
     build_host.krb5_libdir = krb_libdir
-    if deps_media_available(deps_prefix):
+    if deps_has_ffmpeg(deps_prefix):
         # cairo probe is irrelevant when swscale is used
         opts = [o for o in opts if not o.startswith("-DWITH_CAIRO=")]
         opts.append("-DWITH_CAIRO=OFF")
@@ -1024,7 +1034,7 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
             list(enable_channels or []) + media_channels(deps_prefix, host_os),
             disable_channels))
     if deps_media_available(deps_prefix):
-        verify_media_cache(build_dir)
+        verify_media_cache(build_dir, deps_prefix)
     if host_os != "Windows":
         verify_krb5_cache(build_dir, "-DWITH_KRB5=ON" in krb_opts)
     config = "Release" if profile == "full" else "MinSizeRel"
@@ -1059,8 +1069,9 @@ def verify_krb5_cache(build_dir, expect_on):
         print("[verify] Kerberos: WITH_KRB5=OFF")
 
 
-def verify_media_cache(build_dir):
-    """After configure: FFmpeg/OpenH264 really got detected and enabled."""
+def verify_media_cache(build_dir, deps_prefix=None):
+    """After configure: the media components the prefix provides really got
+    detected and enabled (and nothing else was silently turned on)."""
     cache = os.path.join(build_dir, "CMakeCache.txt")
     vals = {}
     with open(cache) as fh:
@@ -1068,21 +1079,37 @@ def verify_media_cache(build_dir):
             if ":" in line and "=" in line and not line.startswith(("#", "//")):
                 k, _, rest = line.strip().partition(":")
                 vals[k] = rest.partition("=")[2]
-    problems = []
-    for k in ("WITH_FFMPEG", "WITH_DSP_FFMPEG", "WITH_SWSCALE",
-              "WITH_OPENH264"):
-        if vals.get(k, "").upper() not in ("ON", "TRUE", "1"):
-            problems.append("{0}={1}".format(k, vals.get(k)))
-    for k in ("AVCODEC_LIBRARIES", "SWSCALE_LIBRARIES", "OPENH264_LIBRARY"):
+
+    def on(k):
+        return vals.get(k, "").upper() in ("ON", "TRUE", "1")
+
+    def found(k):
         v = vals.get(k, "")
-        if not v or v.endswith("-NOTFOUND"):
-            problems.append("{0}={1}".format(k, v or "<missing>"))
+        return bool(v) and not v.endswith("-NOTFOUND")
+
+    problems = []
+    want_ff = deps_has_ffmpeg(deps_prefix)
+    want_oh = deps_has_openh264(deps_prefix)
+    for k in ("WITH_FFMPEG", "WITH_DSP_FFMPEG", "WITH_SWSCALE"):
+        if on(k) != want_ff:
+            problems.append("{0}={1} (expected {2})".format(
+                k, vals.get(k), "ON" if want_ff else "OFF"))
+    if want_ff:
+        for k in ("AVCODEC_LIBRARIES", "SWSCALE_LIBRARIES"):
+            if not found(k):
+                problems.append("{0}=<missing>".format(k))
+    if on("WITH_OPENH264") != want_oh:
+        problems.append("WITH_OPENH264={0} (expected {1})".format(
+            vals.get("WITH_OPENH264"), "ON" if want_oh else "OFF"))
+    if want_oh and not found("OPENH264_LIBRARY"):
+        problems.append("OPENH264_LIBRARY=<missing>")
     if problems:
         raise SystemExit("\nMedia dependencies not picked up by CMake: {0}\n"
                          "Check that --deps-prefix contains lib/pkgconfig/"
                          "{{libavcodec,libswscale,openh264}}.pc".format(problems))
     print("[verify] media: FFmpeg {0}, OpenH264 {1}".format(
-        vals.get("AVCODEC_VERSION", "?"), vals.get("OPENH264_LIBRARY", "?")))
+        vals.get("AVCODEC_VERSION", "?") if want_ff else "off",
+        vals.get("OPENH264_LIBRARY", "?") if want_oh else "off"))
 
 
 # Library families we expect after install for each profile, used to
@@ -1863,6 +1890,10 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
         "-DWITH_CAIRO=OFF",
         "-DWITH_UNICODE_BUILTIN=ON",
         "-DWITH_CLIENT_SDL=OFF",
+        # FreeRDP turns ThinLTO on by default; with the NDK's
+        # -Wl,--fatal-warnings a "loop not vectorized" remark from
+        # prim_copy.c becomes a link error on i686. Not worth it.
+        "-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=OFF",
     ]
     # OpenSSL for Android is not in the NDK. Callers point us at a
     # cross-built copy with PYFREERDP_EXTRA_CMAKE, e.g.
@@ -1887,7 +1918,7 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
         verify_channel_cache(build_dir, expected_channel_cache(
             profile, "Android", enable_channels, disable_channels))
     if deps_media_available(deps_prefix):
-        verify_media_cache(build_dir)
+        verify_media_cache(build_dir, deps_prefix)
     env = deps_env(deps_prefix, cross=True)
     run(["cmake", "--build", build_dir, "--parallel", str(jobs)], env=env)
     run(["cmake", "--install", build_dir], env=env)
@@ -2001,7 +2032,7 @@ def build_ios(src, jobs, profile, enable_channels=None,
     env = deps_env(deps_prefix, cross=True)
     run(cfg, env=env)
     if deps_media_available(deps_prefix):
-        verify_media_cache(build_dir)
+        verify_media_cache(build_dir, deps_prefix)
     if channels_enabled:
         verify_channel_cache(build_dir, expected_channel_cache(
             profile, "iOS", enable_channels, disable_channels))
@@ -2076,16 +2107,17 @@ def resolve_deps_prefix(args):
         m = platform.machine().lower()
         m = {"amd64": "x86_64"}.get(m, m)
         label = "{0}-{1}".format(platform.system().lower(), m)
-    cand = os.path.join(repo_root(), "build", "deps", label)
+    cand = os.path.join(repo_root(), "build", "deps",
+                        "{0}-{1}".format(label, args.edition))
     if os.path.isdir(cand):
         return cand
-    print("[pyfreerdp-build] --deps-prefix auto: {0} not found; building "
-          "without media deps".format(cand))
+    print("[pyfreerdp-build] --deps-prefix auto: {0} not found".format(cand))
     return None
 
 
-def verify_media_linked(out_dir):
-    """The staged libfreerdp3 must actually import FFmpeg and OpenH264."""
+def verify_media_linked(out_dir, deps_prefix=None):
+    """The staged libfreerdp3 must import exactly the media libs the edition
+    provides, and those must be staged next to it."""
     sysname = platform.system()
     core = None
     for fn in os.listdir(out_dir):
@@ -2104,7 +2136,12 @@ def verify_media_linked(out_dir):
     else:
         deps = pe_imports(core)
     low = " ".join(d.lower() for d in deps)
-    missing = [n for n in ("avcodec", "openh264", "swscale") if n not in low]
+    want = []
+    if deps_has_ffmpeg(deps_prefix):
+        want += ["avcodec", "swscale"]
+    if deps_has_openh264(deps_prefix):
+        want.append("openh264")
+    missing = [n for n in want if n not in low]
     if missing:
         raise SystemExit("[verify] libfreerdp3 does not link {0}; imports: "
                          "{1}".format(missing, deps))
@@ -2174,6 +2211,13 @@ def main():
                         "Linux) channels, and bundles those libraries into "
                         "pyfreerdp/_libs. 'auto' = build/deps/<label> if "
                         "it exists.")
+    p.add_argument("--edition", choices=EDITIONS, default=None,
+                   help="Media stack: standard (built-in codecs only), ffmpeg "
+                        "(FFmpeg: H.264/MJPEG decode, AAC/Opus, swscale; no "
+                        "H.264 encoder), openh264 (OpenH264 encode+decode), "
+                        "media (both). Selects build/deps/<label>-<edition> "
+                        "for --deps-prefix auto. Default: media for the full "
+                        "profile, standard for the others.")
     p.add_argument("--with-krb5", dest="with_krb5", action="store_true",
                    default=None,
                    help="Force Kerberos on (Linux: default anyway; macOS: uses "
@@ -2224,20 +2268,34 @@ def main():
     channels_enabled = not args.no_channels
     # Profile defaults: full pulls in the media deps and the executables
     # unless told otherwise; minimal never does.
-    if args.deps_prefix is None and args.profile == "full" and not args.no_deps:
+    if args.edition is None:
+        args.edition = "media" if args.profile == "full" else "standard"
+    if args.no_deps:
+        args.edition = "standard"
+    needs_deps = args.edition != "standard" or (
+        platform.system() == "Windows" and args.target == "host")
+    if args.deps_prefix is None and needs_deps:
         args.deps_prefix = "auto"
     if args.no_deps:
         args.deps_prefix = None
+    print("[pyfreerdp-build] edition: {0}".format(args.edition))
     if args.profile == "full" and args.target == "host" and not args.no_executables:
         args.with_executables = True
     deps_prefix = resolve_deps_prefix(args)
-    if args.profile == "full" and args.deps_prefix and not deps_prefix \
-            and not args.no_deps and not args.list_channels and not (
-                platform.system() == "Windows" and args.target == "host"):
+    if needs_deps and args.deps_prefix and not deps_prefix \
+            and not args.list_channels:
         raise SystemExit(
-            "--profile full needs the media dependencies. Run "
-            "scripts/build_deps.py first (or pass --no-deps for a full "
-            "build without FFmpeg/OpenH264/libusb).")
+            "edition '{0}' needs a dependency prefix. Run "
+            "scripts/build_deps.py --edition {0} first (or use "
+            "--edition standard).".format(args.edition))
+    if deps_prefix and args.edition != "standard":
+        have_ff, have_oh = deps_has_ffmpeg(deps_prefix), deps_has_openh264(deps_prefix)
+        want_ff = args.edition in ("ffmpeg", "media")
+        want_oh = args.edition in ("openh264", "media")
+        if have_ff != want_ff or have_oh != want_oh:
+            raise SystemExit(
+                "deps prefix {0} does not match edition {1} (has ffmpeg={2}, "
+                "openh264={3})".format(deps_prefix, args.edition, have_ff, have_oh))
     if deps_prefix:
         print("[pyfreerdp-build] deps prefix: {0}".format(deps_prefix))
         args.enable_channel = list(args.enable_channel) + media_channels(
@@ -2296,7 +2354,7 @@ def main():
         if not args.skip_verify:
             verify_loadable(out, args.profile, arch=args.arch)
             if deps_media_available(deps_prefix):
-                verify_media_linked(out)
+                verify_media_linked(out, deps_prefix)
         print("\nDone. Library installed under {0}.".format(out))
         return 0
 

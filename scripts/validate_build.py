@@ -56,7 +56,7 @@ SYS = platform.system()
 EXT = {"Windows": ".dll", "Darwin": ".dylib"}.get(SYS, ".so")
 
 # Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
-BUILD_SCRIPT_VERSION = 6
+BUILD_SCRIPT_VERSION = 7
 
 
 RESULTS = []
@@ -380,14 +380,19 @@ DSP_FORMATS = {"AAC": (0xA106, 2, 44100, 16), "Opus": (0x704F, 2, 48000, 16),
                "PCM": (0x0001, 2, 44100, 16)}
 
 
-def check_media(libs, paths):
+def check_media(libs, paths, edition="media"):
+    ffmpeg = edition in ("ffmpeg", "media")
+    openh264 = edition in ("openh264", "media")
     core = paths.get("freerdp3")
     deps = dyn_deps(core)
     low = " ".join(os.path.basename(d).lower() for d in deps)
-    missing = [n for n in ("avcodec", "swscale", "openh264") if n not in low]
-    if missing:
-        fail("media.linked", "libfreerdp3 does not import {0}; imports: "
-             "{1}".format(missing, deps))
+    want = (["avcodec", "swscale"] if ffmpeg else []) + (["openh264"] if openh264 else [])
+    forbid = ([] if ffmpeg else ["avcodec"]) + ([] if openh264 else ["openh264"])
+    missing = [n for n in want if n not in low]
+    present_forbidden = [n for n in forbid if n in low]
+    if missing or present_forbidden:
+        fail("media.linked", "edition {0}: libfreerdp3 missing {1}, unexpectedly "
+             "links {2}; imports: {3}".format(edition, missing, present_forbidden, deps))
         return
     for d in deps:
         b = os.path.basename(d)
@@ -396,7 +401,8 @@ def check_media(libs, paths):
             if not os.path.exists(os.path.join(libs, b)):
                 fail("media.staged", "{0} imported but not in {1}".format(b, libs))
                 return
-    ok("media.linked", "libfreerdp3 imports FFmpeg + OpenH264 and they are staged")
+    ok("media.linked", "edition {0}: libfreerdp3 imports {1} and they are staged".format(
+        edition, ", ".join(want)))
 
     if SYS == "Windows":
         os.add_dll_directory(libs)
@@ -414,12 +420,19 @@ def check_media(libs, paths):
         results.append(bool(ctx))
         if ctx:
             lib.h264_context_free(ctx)
-    if all(results):
-        ok("media.h264", "h264_context_new() works for decoder and encoder "
-                         "(OpenH264 backend active)")
+    # FFmpeg alone has no H.264 *encoder* (LGPL build), so the ffmpeg edition
+    # must decode but is expected to have no encoder context.
+    expect_enc = openh264
+    if results[0] and results[1] == expect_enc:
+        ok("media.h264", "h264_context_new(): decoder yes, encoder {0} - as "
+                         "expected for edition {1}".format(
+                             "yes" if results[1] else "no", edition))
     else:
-        fail("media.h264", "h264_context_new returned NULL (decoder={0}, "
-                           "encoder={1}) - no usable H.264 backend".format(*results))
+        fail("media.h264", "h264_context_new decoder={0} encoder={1}; expected "
+                           "decoder=True encoder={2} for edition {3}".format(
+                               results[0], results[1], expect_enc, edition))
+    if not ffmpeg:
+        return  # DSP FFmpeg backend is absent by design in openh264 edition
 
     try:
         lib.freerdp_dsp_supports_format.restype = ctypes.c_int
@@ -445,7 +458,7 @@ def check_media(libs, paths):
 # ffmpeg / openh264 / libusb
 # ---------------------------------------------------------------------------
 
-def check_ffmpeg(bins, libs, tmp):
+def check_ffmpeg(bins, libs, tmp, with_openh264=True):
     ffmpeg = find_exe(bins, "ffmpeg")
     ffprobe = find_exe(bins, "ffprobe")
     if not ffmpeg or not ffprobe:
@@ -458,22 +471,47 @@ def check_ffmpeg(bins, libs, tmp):
         return None
     ok("ffmpeg.version", out.splitlines()[0])
 
-    h264 = os.path.join(tmp, "test.h264")
-    rc, out = run([ffmpeg, "-hide_banner", "-y", "-f", "lavfi",
-                   "-i", "testsrc2=size=320x240:rate=25", "-frames:v", "25",
-                   "-pix_fmt", "yuv420p", "-c:v", "libopenh264",
-                   "-f", "h264", h264], env=env)
-    if rc != 0 or not os.path.getsize(h264):
-        fail("ffmpeg.encode_openh264", out.strip()[-1200:])
-        return None
-    rc, out = run([ffprobe, "-v", "error", "-count_frames", "-show_entries",
-                   "stream=codec_name,nb_read_frames", "-of", "csv=p=0", h264],
-                  env=env)
-    if rc != 0 or "h264" not in out or ",25" not in out.replace("\n", ""):
-        fail("ffmpeg.decode_h264", "ffprobe: {0}".format(out.strip()))
-        return None
-    ok("ffmpeg.h264_roundtrip", "25 frames encoded with libopenh264, decoded "
-                                "with FFmpeg h264")
+    h264 = None
+    if with_openh264:
+        h264 = os.path.join(tmp, "test.h264")
+        rc, out = run([ffmpeg, "-hide_banner", "-y", "-f", "lavfi",
+                       "-i", "testsrc2=size=320x240:rate=25", "-frames:v", "25",
+                       "-pix_fmt", "yuv420p", "-c:v", "libopenh264",
+                       "-f", "h264", h264], env=env)
+        if rc != 0 or not os.path.getsize(h264):
+            fail("ffmpeg.encode_openh264", out.strip()[-1200:])
+            return None
+        rc, out = run([ffprobe, "-v", "error", "-count_frames", "-show_entries",
+                       "stream=codec_name,nb_read_frames", "-of", "csv=p=0", h264],
+                      env=env)
+        if rc != 0 or "h264" not in out or ",25" not in out.replace("\n", ""):
+            fail("ffmpeg.decode_h264", "ffprobe: {0}".format(out.strip()))
+            return None
+        ok("ffmpeg.h264_roundtrip", "25 frames encoded with libopenh264, decoded "
+                                    "with FFmpeg h264")
+    else:
+        # No H.264 encoder in the LGPL-only build: prove the video path with
+        # MJPEG (the camera channel's format) and confirm h264 decoding is
+        # compiled in.
+        mjpg = os.path.join(tmp, "test.mjpeg")
+        rc, out = run([ffmpeg, "-hide_banner", "-y", "-f", "lavfi",
+                       "-i", "testsrc2=size=320x240:rate=25", "-frames:v", "25",
+                       "-pix_fmt", "yuvj420p", "-c:v", "mjpeg", "-f", "mjpeg", mjpg],
+                      env=env)
+        if rc != 0:
+            fail("ffmpeg.encode_mjpeg", out.strip()[-800:])
+            return None
+        rc, out = run([ffprobe, "-v", "error", "-count_frames", "-show_entries",
+                       "stream=codec_name,nb_read_frames", "-of", "csv=p=0", mjpg],
+                      env=env)
+        if rc != 0 or "mjpeg" not in out or ",25" not in out.replace("\n", ""):
+            fail("ffmpeg.decode_mjpeg", "ffprobe: {0}".format(out.strip()))
+            return None
+        rc, out = run([ffmpeg, "-hide_banner", "-decoders"], env=env)
+        if " h264 " not in out:
+            fail("ffmpeg.h264_decoder", "h264 decoder not compiled in")
+            return None
+        ok("ffmpeg.mjpeg_roundtrip", "25 MJPEG frames round-tripped; h264 decoder present")
 
     aac = os.path.join(tmp, "test.adts")
     rc, out = run([ffmpeg, "-hide_banner", "-y", "-f", "lavfi",
@@ -491,6 +529,42 @@ def check_ffmpeg(bins, libs, tmp):
     else:
         ok("ffmpeg.aac_roundtrip", "1 s sine -> AAC -> PCM")
     return h264
+
+
+def encode_with_h264enc(bins, libs, tmp):
+    """Produce an H.264 stream with OpenH264's own h264enc from a synthetic
+    YUV420 sequence (no FFmpeg needed). Returns the path or None."""
+    enc = find_exe(bins, "h264enc")
+    cfg = None
+    for d in bins:
+        c = os.path.join(d, "openh264-config", "welsenc.cfg")
+        if os.path.isfile(c):
+            cfg = c
+            break
+    if not enc or not cfg:
+        return None
+    w, h, n = 320, 240, 25
+    yuv = os.path.join(tmp, "in.yuv")
+    with open(yuv, "wb") as fh:
+        for i in range(n):
+            # moving gradient: Y plane, then flat U and V
+            fh.write(bytes(((x + y + 3 * i) & 0xFF) for y in range(h) for x in range(w)))
+            fh.write(bytes([128 + (i % 16)]) * (w * h // 4))
+            fh.write(bytes([128 - (i % 16)]) * (w * h // 4))
+    out_264 = os.path.join(tmp, "enc.264")
+    # h264enc: -dw/-dh are per spatial layer (layer index first); one layer,
+    # configured from layer2.cfg next to welsenc.cfg.
+    layer_cfg = os.path.join(os.path.dirname(cfg), "layer2.cfg")
+    rc, out = run([enc, cfg, "-org", yuv, "-sw", str(w), "-sh", str(h),
+                   "-frms", str(n), "-bf", out_264, "-numl", "1",
+                   "-lconfig", "0", layer_cfg, "-dw", "0", str(w), "-dh", "0", str(h)],
+                  env=exe_env(libs), timeout=120, cwd=os.path.dirname(cfg))
+    if rc != 0 or not os.path.exists(out_264) or not os.path.getsize(out_264):
+        fail("openh264.h264enc", "rc={0} {1}".format(rc, out.strip()[-600:]))
+        return None
+    ok("openh264.h264enc", "encoded {0} synthetic frames ({1} bytes)".format(
+        n, os.path.getsize(out_264)))
+    return out_264
 
 
 def check_openh264(bins, libs, tmp, h264_stream):
@@ -521,7 +595,9 @@ def check_openh264(bins, libs, tmp, h264_stream):
         skip("openh264.h264dec", "executable not staged")
         return
     if not h264_stream:
-        skip("openh264.h264dec", "no H.264 stream from the ffmpeg step")
+        h264_stream = encode_with_h264enc(bins, libs, tmp)
+    if not h264_stream:
+        skip("openh264.h264dec", "no H.264 stream available")
         return
     yuv = os.path.join(tmp, "dec.yuv")
     rc, out = run([dec, h264_stream, yuv], env=exe_env(libs))
@@ -754,7 +830,10 @@ def main():
     p.add_argument("--profile", default="full",
                    choices=("full", "minimal", "client-only", "server-only"))
     p.add_argument("--media", action="store_true",
-                   help="require FFmpeg/OpenH264/libusb integration")
+                   help="require the media integration of --edition")
+    p.add_argument("--edition", choices=("standard", "ffmpeg", "openh264", "media"),
+                   default="media",
+                   help="which media stack the package was built with")
     p.add_argument("--executables", action="store_true")
     p.add_argument("--loopback", action="store_true")
     p.add_argument("--no-usb", action="store_true",
@@ -798,12 +877,15 @@ def main():
         else:
             expect = args.kerberos == "on"
         check_kerberos(paths, expect)
-        if args.media:
-            check_media(libs, paths)
+        if args.media and args.edition != "standard":
+            check_media(libs, paths, args.edition)
     h264 = None
-    if args.media:
-        h264 = check_ffmpeg(bins, libs, tmp)
-        check_openh264(bins, libs, tmp, h264)
+    if args.media and args.edition != "standard":
+        if args.edition in ("ffmpeg", "media"):
+            h264 = check_ffmpeg(bins, libs, tmp,
+                                with_openh264=(args.edition == "media"))
+        if args.edition in ("openh264", "media"):
+            check_openh264(bins, libs, tmp, h264)
         if not args.no_usb:
             check_libusb(bins, libs)
     if args.executables:

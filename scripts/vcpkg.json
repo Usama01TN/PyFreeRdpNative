@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
   "name": "pyfreerdp-deps",
   "version-string": "1",
-  "description": "Windows build dependencies for pyfreerdp's FreeRDP build (x64-windows, x86-windows, arm64-windows). Core = what every profile needs; 'media' and 'sdl' are pulled in by --profile full.",
+  "description": "Windows build dependencies for pyfreerdp's FreeRDP build (x64-windows, x86-windows, arm64-windows). Core = every edition; features are selected by scripts/build_deps.py --edition/--profile.",
   "builtin-baseline": "3d33b7f7a8121da6e4fa80b35618fc8e960be686",
   "dependencies": [
     "openssl",
@@ -10,33 +10,38 @@
     "cjson"
   ],
   "features": {
-    "media": {
-      "description": "FFmpeg (LGPL subset with libopenh264), OpenH264, libusb",
+    "ffmpeg": {
+      "description": "FFmpeg LGPL subset without external encoders (edition: ffmpeg)",
       "dependencies": [
-        "openh264",
-        "libusb",
         {
           "name": "ffmpeg",
           "default-features": false,
-          "features": [
-            "avcodec",
-            "avformat",
-            "avfilter",
-            "swresample",
-            "swscale",
-            "openh264",
-            "ffmpeg",
-            "ffprobe"
-          ]
+          "features": ["avcodec", "avformat", "avfilter", "swresample", "swscale", "ffmpeg", "ffprobe"]
         }
       ]
     },
-    "sdl": {
-      "description": "SDL3 + SDL3_ttf for the cross-platform sdl-freerdp client",
+    "openh264": {
+      "description": "OpenH264 (edition: openh264)",
+      "dependencies": ["openh264"]
+    },
+    "media": {
+      "description": "FFmpeg with libopenh264 + OpenH264 (edition: media)",
       "dependencies": [
-        "sdl3",
-        "sdl3-ttf"
+        "openh264",
+        {
+          "name": "ffmpeg",
+          "default-features": false,
+          "features": ["avcodec", "avformat", "avfilter", "swresample", "swscale", "openh264", "ffmpeg", "ffprobe"]
+        }
       ]
+    },
+    "usb": {
+      "description": "libusb for the urbdrc channel",
+      "dependencies": ["libusb"]
+    },
+    "sdl": {
+      "description": "SDL3 + SDL3_ttf for the sdl-freerdp client (full profile)",
+      "dependencies": ["sdl3", "sdl3-ttf"]
     }
   }
 }

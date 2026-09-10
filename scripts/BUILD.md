@@ -13,6 +13,28 @@ from pinned sources:
 Everything is driven by `.github/workflows/build-freerdp.yml` (all platforms,
 artifacts + optional release) and `ci.yml` (Linux, every push/PR).
 
+## Editions (media stack)
+
+Every platform x architecture is built in four editions, selected with
+`--edition` on both `build_deps.py` and `build_freerdp.py` (workflow input
+`editions: all|standard|ffmpeg|openh264|media`):
+
+| Edition | Third-party libs | H.264 | Audio DSP | Scaler | Camera (`rdpecam`) | USB (`urbdrc`) |
+|---|---|---|---|---|---|---|
+| `standard` | none | built-in only (no H.264) | built-in (PCM/ADPCM/G.711) | cairo | server side only | no |
+| `ffmpeg` | FFmpeg (LGPL) + libusb | **decode** only (FFmpeg has no LGPL H.264 encoder) | + AAC, Opus | swscale | client (Linux/V4L) + server | yes |
+| `openh264` | OpenH264 + libusb | encode + decode | built-in | cairo | server side only | yes |
+| `media` | FFmpeg (with libopenh264) + OpenH264 + libusb | encode + decode | + AAC, Opus | swscale | client (Linux/V4L) + server | yes |
+
+Dependency prefixes are per edition: `build/deps/<platform>-<edition>`. The
+validator adapts to the edition: for `ffmpeg` it expects an H.264 *decoder*
+context but no encoder and round-trips MJPEG + AAC; for `openh264` it encodes
+with `h264enc` and decodes with `h264dec`; for `media` it does both. All four
+were built and validated on Linux x86_64 (media 16/16, ffmpeg 13/13,
+openh264 12/12, standard 4/4).
+
+Artifacts are named `freerdp-<ref>-<platform>-<profile>-<edition>`.
+
 ## Two profiles, built independently
 
 | | `minimal` | `full` |
@@ -24,18 +46,18 @@ artifacts + optional release) and `ci.yml` (Linux, every push/PR).
 | Executables | none | platform client(s), `sdl-freerdp` where SDL3 is available, `sfreerdp-server`, `freerdp-proxy`, `freerdp-shadow-cli` (Linux), `winpr-makecert`, `winpr-hash`, `ffmpeg`, `ffprobe`, `h264enc`, `h264dec`, `listdevs` |
 | Build type | `MinSizeRel`, stripped, one SONAME file per library | `Release`, dev links kept |
 | Linux x86_64 size | **3.5 MB** | 28 MB `_libs` + 3.7 MB `_bin` |
-| Command | `build_freerdp.py --profile minimal` | `build_deps.py` then `build_freerdp.py --profile full` |
+| Command | `build_freerdp.py --profile minimal --edition <e>` | `build_deps.py --edition <e>` then `build_freerdp.py --profile full --edition <e>` |
 
 The profiles share nothing at build time except the FreeRDP source checkout;
 each one wipes and repopulates `pyfreerdp/_libs` (and `_bin` for full), so
 build the one you want to ship last. In CI every platform produces both as
 separate artifacts (`freerdp-<ref>-<platform>-minimal` / `-full`).
 
-`--profile full` implies `--deps-prefix auto` and `--with-executables`; use
-`--no-deps` / `--no-executables` to override. `--profile minimal` never builds
-media dependencies or executables; on Windows it still consumes the vcpkg
-prefix for OpenSSL/zlib (`build_deps.py --profile minimal`), which does not
-turn media on - activation is driven by what the prefix contains.
+`--profile full` defaults to `--edition media` and implies `--with-executables`;
+`--profile minimal` defaults to `--edition standard`. Any profile can be paired
+with any edition. On Windows every edition consumes a vcpkg prefix (at least
+OpenSSL/zlib/cJSON); media activation is driven by what the prefix actually
+contains, and the script refuses a prefix that does not match the edition.
 
 ### What "full" means per platform
 
@@ -118,7 +140,7 @@ including telemetry, rdpemsc and rdpecam. `--list-channels` prints the table;
 | Linux x86_64 / aarch64 | source (autotools/make) | shared |
 | macOS arm64 / x86_64 | source; `@rpath` install names; SDL3 via Homebrew | shared |
 | Windows x64 / x86 / arm64 | vcpkg manifest (`scripts/vcpkg.json`: core + `media` + `sdl` features, pinned baseline); x86 + arm64 cross-compiled with `-A Win32` / `-A ARM64` | shared |
-| Android arm64-v8a / armeabi-v7a / x86_64 / x86 | NDK cross; OpenSSL cross-built in the workflow | shared |
+| Android arm64-v8a / armeabi-v7a / x86_64 / x86 | NDK cross; OpenSSL cross-built in the workflow; LTO off (NDK `--fatal-warnings`); OpenH264 x86 built with `ENABLEPIC=Yes` | shared |
 | iOS OS64 (device, both profiles) / SIMULATORARM64 (minimal only) | static; libusb skipped (no USB host API); OpenH264/FFmpeg build for the device SDK only | static |
 
 `build_freerdp.py --arch {x64,x86,arm64}` selects the Windows target;
