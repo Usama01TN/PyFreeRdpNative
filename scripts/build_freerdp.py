@@ -114,7 +114,9 @@ def package_root():
 
 
 def repo_root():
-    return os.path.dirname(package_root())
+    # The script lives in <repo>/scripts/, so the repo is package_root().
+    # (Used for build/<target> install dirs, cmake/toolchains/, build/deps/.)
+    return package_root()
 
 
 # ---------------------------------------------------------------------------
@@ -401,27 +403,105 @@ def verify_channel_cache(build_dir, expected):
         ", ".join(on_server) or "none"))
 
 
+# CMake variables that are ;-separated lists: several sources (OpenSSL
+# prefix, deps prefix) may each contribute, so merge rather than override.
+_LIST_DEFINES = ("CMAKE_PREFIX_PATH", "CMAKE_FIND_ROOT_PATH",
+                 "CMAKE_MODULE_PATH")
+
+
 def dedupe_defines(opts):
     """
     For -DKEY=VALUE entries keep only the last occurrence of each KEY (a
     channel's 'extra' flags may override something in the common list,
-    e.g. WITH_CUPS). Non -D entries are kept as is, in order.
+    e.g. WITH_CUPS). List-type variables (_LIST_DEFINES) are merged in
+    order with ';' instead. Non -D entries are kept as is, in order.
     """
+    def key_of(o):
+        k = o[2:].split("=", 1)[0]
+        return k.split(":", 1)[0]  # strip ":TYPE"
+
+    merged = {}
     last = {}
     for i, o in enumerate(opts):
         if o.startswith("-D") and "=" in o:
-            last[o[2:].split("=", 1)[0]] = i
+            k = key_of(o)
+            if k in _LIST_DEFINES:
+                vals = merged.setdefault(k, [])
+                for v in o.split("=", 1)[1].split(";"):
+                    if v and v not in vals:
+                        vals.append(v)
+            last[k] = i
     out = []
+    emitted = set()
     for i, o in enumerate(opts):
         if o.startswith("-D") and "=" in o:
-            if last[o[2:].split("=", 1)[0]] != i:
+            k = key_of(o)
+            if k in _LIST_DEFINES:
+                if k in emitted:
+                    continue
+                emitted.add(k)
+                out.append("-D{0}={1}".format(k, ";".join(merged[k])))
+                continue
+            if last[k] != i:
                 continue
         out.append(o)
     return out
 
 
+def media_options(deps_prefix, host_os):
+    """
+    -D switches that turn on everything a build/deps/<label> prefix (from
+    scripts/build_deps.py) provides: FFmpeg (H.264/MJPEG decode, RDP audio
+    codecs, swscale), OpenH264 (H.264 encode/decode) and libusb (USB
+    redirection, camera V4L backend).
+    """
+    if not deps_prefix:
+        return []
+    opts = [
+        "-DCMAKE_PREFIX_PATH={0}".format(deps_prefix),
+        "-DWITH_FFMPEG=ON",
+        "-DWITH_DSP_FFMPEG=ON",
+        "-DWITH_SWSCALE=ON",        # FFmpeg scaler instead of cairo
+        "-DWITH_CAIRO=OFF",
+        "-DWITH_OPENH264=ON",
+        "-DWITH_OPENH264_LOADING=OFF",
+    ]
+    if host_os == "Windows":
+        # vcpkg's openh264 port installs openh264.lib (not openh264_dll).
+        opts.append("-DOPENH264_ROOT={0}".format(deps_prefix))
+    return opts
+
+
+def deps_has(deps_prefix, pc_name):
+    """True if <deps_prefix> carries a pkg-config file for pc_name."""
+    if not deps_prefix:
+        return False
+    for sub in ("lib", "lib64"):
+        if os.path.isfile(os.path.join(deps_prefix, sub, "pkgconfig",
+                                       pc_name + ".pc")):
+            return True
+    # vcpkg flattens to lib/pkgconfig too, but check the .lib as fallback.
+    return bool(glob.glob(os.path.join(deps_prefix, "lib",
+                                       "*" + pc_name.split("-")[0] + "*")))
+
+
+def media_channels(deps_prefix, host_os, target="host"):
+    """Extra channels to enable when the deps prefix provides their libs."""
+    if not deps_prefix:
+        return []
+    chans = []
+    if deps_has(deps_prefix, "libusb-1.0") and target != "ios":
+        chans.append("urbdrc")
+    # rdpecam client: needs swscale (always in deps) and a capture backend;
+    # only Linux has one (V4L) in FreeRDP 3.16. Server side is always on.
+    if host_os == "Linux" and target == "host":
+        chans.append("rdpecam")
+    return chans
+
+
 def cmake_options_for(profile, host_os, enable_channels=None,
-                      disable_channels=None, channels_enabled=True):
+                      disable_channels=None, channels_enabled=True,
+                      deps_prefix=None, executables=False):
     """
     Return the list of -D CMake options for the given build profile.
 
@@ -511,10 +591,36 @@ def cmake_options_for(profile, host_os, enable_channels=None,
             "-DWITH_CLIENT_WINDOWS=OFF", "-DWITH_CLIENT_SDL=OFF",
         ]
 
+    if deps_prefix:
+        enable_channels = list(enable_channels or []) + media_channels(
+            deps_prefix, host_os)
+        opts += media_options(deps_prefix, host_os)
+    if executables:
+        opts += executable_options(profile, host_os)
+
     opts += channel_options(profile, host_os, enable_channels,
                             disable_channels, channels_enabled)
 
     return dedupe_defines(common + opts)
+
+
+def executable_options(profile, host_os):
+    """
+    Turn on the executables that build cleanly on each platform:
+      * winpr-makecert / winpr-hash   (WITH_WINPR_TOOLS, all platforms)
+      * sfreerdp-server               (WITH_SAMPLE, all platforms)
+      * xfreerdp / wlfreerdp          (Linux, via WITH_X11 / WITH_WAYLAND
+                                       in the full profile)
+      * wfreerdp                      (Windows)
+      * freerdp-shadow-cli, freerdp-proxy (full profile only)
+    """
+    want_client, want_server = PROFILE_SIDES[profile]
+    opts = ["-DWITH_WINPR_TOOLS=ON"]
+    if want_server:
+        opts.append("-DWITH_SAMPLE=ON")
+    if want_client and host_os == "Windows":
+        opts.append("-DWITH_CLIENT_WINDOWS=ON")
+    return opts
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +651,7 @@ def host_windows_arch(arch="host"):
     return arch
 
 
-def host_dependency_probe(host_os, arch="host"):
+def host_dependency_probe(host_os, arch="host", deps_prefix=None):
     """
     Look for optional-but-default-ON FreeRDP dependencies on the host and
     turn the matching feature off with a loud warning when they're absent,
@@ -594,6 +700,14 @@ def host_dependency_probe(host_os, arch="host"):
                          "-DVCPKG_TARGET_TRIPLET={0}".format(triplet)]
                 print("[probe] using vcpkg toolchain {0} ({1})".format(
                     tc, triplet))
+                # build_deps.py installs the manifest into
+                # <deps>/vcpkg_installed; point the toolchain at it instead
+                # of $VCPKG_ROOT/installed and keep it from re-running the
+                # manifest against FreeRDP's own source tree.
+                inst = os.path.join(deps_prefix or "", "vcpkg_installed")
+                if deps_prefix and os.path.isdir(inst):
+                    opts += ["-DVCPKG_INSTALLED_DIR={0}".format(inst),
+                             "-DVCPKG_MANIFEST_MODE=OFF"]
     if host_os in ("Linux", "Darwin") and not _pkg_config_has("cairo"):
         print("\n[warn] cairo.pc not found - building with WITH_CAIRO=OFF. "
               "Screen scaling (SmartSizing) will be unavailable. Install "
@@ -615,13 +729,32 @@ def _pkg_config_has(module):
                           stderr=subprocess.DEVNULL).returncode == 0
 
 
+def deps_env(deps_prefix, cross=False):
+    """Environment additions so pkg-config finds the deps prefix."""
+    env = dict(os.environ)
+    if not deps_prefix:
+        return env
+    pcs = [os.path.join(deps_prefix, "lib", "pkgconfig"),
+           os.path.join(deps_prefix, "lib64", "pkgconfig")]
+    key = "PKG_CONFIG_LIBDIR" if cross else "PKG_CONFIG_PATH"
+    old = env.get(key)
+    env[key] = os.pathsep.join(pcs + ([old] if old and not cross else []))
+    if cross:
+        env["PKG_CONFIG_SYSROOT_DIR"] = ""
+    return env
+
+
 def build_host(src, prefix, jobs, profile, enable_channels=None,
-               disable_channels=None, channels_enabled=True, arch="host"):
+               disable_channels=None, channels_enabled=True, arch="host",
+               deps_prefix=None, executables=False):
     require_tools(["cmake", "git"])
     host_os = platform.system()
     if host_os != "Windows" and arch not in (None, "", "host"):
         raise SystemExit("--arch is only supported for Windows host builds "
                          "(use --target android/ios for mobile).")
+    if deps_prefix and not os.path.isdir(deps_prefix):
+        raise SystemExit("--deps-prefix {0} does not exist; run "
+                         "scripts/build_deps.py first".format(deps_prefix))
     build_dir = os.path.join(src, "build")
     if os.path.exists(build_dir):
         shutil.rmtree(build_dir)
@@ -630,9 +763,16 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
     opts = cmake_options_for(profile, host_os=host_os,
                              enable_channels=enable_channels,
                              disable_channels=disable_channels,
-                             channels_enabled=channels_enabled)
-    opts += host_dependency_probe(host_os, arch)
+                             channels_enabled=channels_enabled,
+                             deps_prefix=deps_prefix, executables=executables)
+    opts += host_dependency_probe(host_os, arch, deps_prefix)
+    if deps_prefix:
+        # cairo probe is irrelevant when swscale is used
+        opts = [o for o in opts if not o.startswith("-DWITH_CAIRO=")]
+        opts.append("-DWITH_CAIRO=OFF")
+    opts = dedupe_defines(opts)
     extra = os.environ.get("PYFREERDP_EXTRA_CMAKE", "").split()
+    env = deps_env(deps_prefix)
 
     cfg = ["cmake", "-S", src, "-B", build_dir,
            "-DCMAKE_INSTALL_PREFIX={0}".format(prefix)] + opts + extra
@@ -648,14 +788,44 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
     elif have("ninja"):
         cfg += ["-G", "Ninja"]
 
-    run(cfg)
+    run(cfg, env=env)
     if channels_enabled:
         verify_channel_cache(build_dir, expected_channel_cache(
-            profile, host_os, enable_channels, disable_channels))
+            profile, host_os,
+            list(enable_channels or []) + media_channels(deps_prefix, host_os),
+            disable_channels))
+    if deps_prefix:
+        verify_media_cache(build_dir)
     run(["cmake", "--build", build_dir, "--config", "Release",
-         "--parallel", str(jobs)])
-    run(["cmake", "--install", build_dir, "--config", "Release"])
+         "--parallel", str(jobs)], env=env)
+    run(["cmake", "--install", build_dir, "--config", "Release"], env=env)
     return prefix
+
+
+def verify_media_cache(build_dir):
+    """After configure: FFmpeg/OpenH264 really got detected and enabled."""
+    cache = os.path.join(build_dir, "CMakeCache.txt")
+    vals = {}
+    with open(cache) as fh:
+        for line in fh:
+            if ":" in line and "=" in line and not line.startswith(("#", "//")):
+                k, _, rest = line.strip().partition(":")
+                vals[k] = rest.partition("=")[2]
+    problems = []
+    for k in ("WITH_FFMPEG", "WITH_DSP_FFMPEG", "WITH_SWSCALE",
+              "WITH_OPENH264"):
+        if vals.get(k, "").upper() not in ("ON", "TRUE", "1"):
+            problems.append("{0}={1}".format(k, vals.get(k)))
+    for k in ("AVCODEC_LIBRARIES", "SWSCALE_LIBRARIES", "OPENH264_LIBRARY"):
+        v = vals.get(k, "")
+        if not v or v.endswith("-NOTFOUND"):
+            problems.append("{0}={1}".format(k, v or "<missing>"))
+    if problems:
+        raise SystemExit("\nMedia dependencies not picked up by CMake: {0}\n"
+                         "Check that --deps-prefix contains lib/pkgconfig/"
+                         "{{libavcodec,libswscale,openh264}}.pc".format(problems))
+    print("[verify] media: FFmpeg {0}, OpenH264 {1}".format(
+        vals.get("AVCODEC_VERSION", "?"), vals.get("OPENH264_LIBRARY", "?")))
 
 
 # Library families we expect after install for each profile, used to
@@ -988,7 +1158,8 @@ def _vcpkg_bin_dir(arch):
     return d if os.path.isdir(d) else None
 
 
-def bundle_windows_runtime_deps(out_dir, arch="host"):
+def bundle_windows_runtime_deps(out_dir, arch="host", deps_prefix=None,
+                                roots=None):
     """
     Walk the import tables of the staged FreeRDP DLLs and copy every
     third-party DLL they (transitively) need from vcpkg's bin/ into
@@ -996,22 +1167,27 @@ def bundle_windows_runtime_deps(out_dir, arch="host"):
     skipped; anything copied must have the same PE machine type as the
     FreeRDP DLLs.
     """
-    src_dir = _vcpkg_bin_dir(arch)
-    if not src_dir:
-        print("[deps] no vcpkg bin dir found; not bundling runtime DLLs")
+    src_dirs = [d for d in (_vcpkg_bin_dir(arch),
+                            os.path.join(deps_prefix, "bin") if deps_prefix
+                            else None)
+                if d and os.path.isdir(d)]
+    if not src_dirs:
+        print("[deps] no vcpkg/deps bin dir found; not bundling runtime DLLs")
         return
+    src_dir = ", ".join(src_dirs)
     available = {}
-    for fn in os.listdir(src_dir):
-        if fn.lower().endswith(".dll"):
-            available[fn.lower()] = os.path.join(src_dir, fn)
+    for d in src_dirs:
+        for fn in os.listdir(d):
+            if fn.lower().endswith(".dll"):
+                available.setdefault(fn.lower(), os.path.join(d, fn))
 
     staged = [os.path.join(out_dir, f) for f in os.listdir(out_dir)
-              if f.lower().endswith(".dll")]
+              if f.lower().endswith((".dll", ".exe"))]
     if not staged:
         return
     want_machine = pe_machine(staged[0])
 
-    queue = list(staged)
+    queue = list(roots) if roots else list(staged)
     seen = set(os.path.basename(p).lower() for p in staged)
     copied = []
     while queue:
@@ -1037,7 +1213,184 @@ def bundle_windows_runtime_deps(out_dir, arch="host"):
         len(copied), src_dir, ", ".join(sorted(copied)) or "none"))
 
 
-def install_into_package(artifacts, arch="host"):
+def _elf_needed(path):
+    out = subprocess.check_output(["readelf", "-d", path]).decode(
+        errors="replace")
+    needed = []
+    for line in out.splitlines():
+        if "(NEEDED)" in line and "[" in line:
+            needed.append(line[line.index("[") + 1:line.rindex("]")])
+    return needed
+
+
+def _macho_deps(path):
+    out = subprocess.check_output(["otool", "-L", path]).decode(
+        errors="replace")
+    deps = []
+    for line in out.splitlines()[1:]:
+        line = line.strip()
+        if line and " (" in line:
+            deps.append(line.split(" (")[0])
+    return deps
+
+
+def bundle_unix_runtime_deps(out_dir, deps_prefix, roots=None):
+    """
+    Linux/macOS counterpart of bundle_windows_runtime_deps(): walk the
+    dynamic dependencies of everything staged in out_dir and copy the ones
+    that live in <deps_prefix>/lib (libavcodec, libopenh264, libusb-1.0,
+    ...) next to them. System libraries are left alone. On macOS the
+    install names of the copied dylibs, and every reference to them, are
+    rewritten to @rpath/<name> so @loader_path resolution works.
+    """
+    if not deps_prefix:
+        return
+    sysname = platform.system()
+    libdirs = [d for d in (os.path.join(deps_prefix, "lib"),
+                           os.path.join(deps_prefix, "lib64"))
+               if os.path.isdir(d)]
+    available = {}
+    for d in libdirs:
+        for fn in os.listdir(d):
+            available[fn] = os.path.join(d, fn)
+
+    def staged_files():
+        return [os.path.join(r, f) for r, _d, fs in os.walk(out_dir)
+                for f in fs if not os.path.islink(os.path.join(r, f))]
+
+    queue = list(roots) if roots else staged_files()
+    seen = set(os.path.basename(p) for p in staged_files())
+    copied = []
+    while queue:
+        f = queue.pop()
+        if sysname == "Linux":
+            if ".so" not in os.path.basename(f) and not os.access(f, os.X_OK):
+                continue
+            try:
+                deps = _elf_needed(f)
+            except subprocess.CalledProcessError:
+                continue
+        else:
+            if not (f.endswith(".dylib") or ".so" in f or os.access(f, os.X_OK)):
+                continue
+            try:
+                deps = [os.path.basename(d) for d in _macho_deps(f)]
+            except subprocess.CalledProcessError:
+                continue
+        for dep in deps:
+            if dep in seen or dep not in available:
+                continue
+            seen.add(dep)
+            srcp = os.path.realpath(available[dep])
+            dst = os.path.join(out_dir, dep)
+            shutil.copy2(srcp, dst)
+            copied.append(dep)
+            queue.append(dst)
+    print("[deps] bundled {0} runtime libraries from {1}: {2}".format(
+        len(copied), deps_prefix, ", ".join(sorted(copied)) or "none"))
+
+    if sysname == "Darwin":
+        # Normalise install names: every reference into deps_prefix (or
+        # to a bare @rpath name) must point at @rpath/<basename>.
+        for f in staged_files():
+            if not (f.endswith(".dylib") or os.access(f, os.X_OK)):
+                continue
+            try:
+                refs = _macho_deps(f)
+            except subprocess.CalledProcessError:
+                continue
+            for ref in refs:
+                base = os.path.basename(ref)
+                if base in seen and ref != "@rpath/" + base and (
+                        ref.startswith(deps_prefix) or not ref.startswith("/")):
+                    subprocess.check_call(["install_name_tool", "-change", ref,
+                                           "@rpath/" + base, f])
+            if f.endswith(".dylib") and os.path.basename(f) in copied:
+                subprocess.check_call(["install_name_tool", "-id",
+                                       "@rpath/" + os.path.basename(f), f])
+
+
+# Executables we know how to smoke-test. Anything else in bin/ is shipped
+# too, this list just drives validate_build.py.
+KNOWN_EXECUTABLES = ("xfreerdp", "wlfreerdp", "sdl-freerdp", "wfreerdp",
+                     "sfreerdp-server", "freerdp-shadow-cli", "freerdp-proxy",
+                     "winpr-makecert", "winpr-hash",
+                     "ffmpeg", "ffprobe", "h264enc", "h264dec", "listdevs")
+
+
+def stage_executables(prefixes, libs_dir, deps_prefix=None, arch="host"):
+    """
+    Copy executables from the bin/ dirs of the given prefixes into
+    pyfreerdp/_bin/ (Windows: into _libs/, where the DLLs are - Windows
+    resolves imports from the executable's own directory) and point their
+    rpath at ../_libs. Returns the list of staged paths.
+    """
+    sysname = platform.system()
+    if sysname == "Windows":
+        out = libs_dir
+    else:
+        out = os.path.join(os.path.dirname(libs_dir), "_bin")
+    if not os.path.isdir(out):
+        os.makedirs(out)
+    staged = []
+    for pfx in prefixes:
+        bindir = os.path.join(pfx, "bin")
+        if not os.path.isdir(bindir):
+            continue
+        for fn in sorted(os.listdir(bindir)):
+            p = os.path.join(bindir, fn)
+            if not os.path.isfile(p):
+                continue
+            if sysname == "Windows":
+                if not fn.lower().endswith(".exe"):
+                    continue
+            elif not os.access(p, os.X_OK) or fn.endswith(
+                    (".so", ".dylib", ".a", ".la", ".pc")):
+                continue
+            dst = os.path.join(out, fn)
+            shutil.copy2(p, dst)
+            staged.append(dst)
+            print("[bin] {0}".format(dst))
+    if sysname == "Linux" and staged:
+        pe = _ensure_patchelf()
+        for p in staged:
+            try:
+                subprocess.check_call([pe, "--set-rpath", "$ORIGIN/../_libs", p])
+            except subprocess.CalledProcessError:
+                print("[bin] warning: could not set rpath on {0}".format(p))
+    elif sysname == "Darwin" and staged:
+        for p in staged:
+            try:
+                have_rpaths = subprocess.check_output(["otool", "-l", p]).decode(
+                    errors="replace")
+                if "@executable_path/../_libs" not in have_rpaths:
+                    subprocess.check_call(["install_name_tool", "-add_rpath",
+                                           "@executable_path/../_libs", p])
+            except subprocess.CalledProcessError:
+                print("[bin] warning: could not set rpath on {0}".format(p))
+    # The executables pull in libraries the core libs don't (ffmpeg ->
+    # libavformat/avfilter/avdevice, xfreerdp -> libfreerdp-client ...).
+    # Walk their imports too, then make the newly copied libs relocatable.
+    if staged:
+        if sysname == "Windows":
+            bundle_windows_runtime_deps(libs_dir, arch, deps_prefix,
+                                        roots=staged)
+        else:
+            bundle_unix_runtime_deps(libs_dir, deps_prefix, roots=staged)
+        _fix_rpath(libs_dir)
+    # OpenH264's h264enc needs its config files.
+    for pfx in prefixes:
+        share = os.path.join(pfx, "share", "openh264")
+        if os.path.isdir(share):
+            dst = os.path.join(out, "openh264-config")
+            if os.path.isdir(dst):
+                shutil.rmtree(dst)
+            shutil.copytree(share, dst)
+    print("[bin] {0} executables staged into {1}".format(len(staged), out))
+    return staged
+
+
+def install_into_package(artifacts, arch="host", deps_prefix=None):
     out = os.path.join(package_root(), "pyfreerdp", "_libs")
     if not os.path.isdir(out):
         os.makedirs(out)
@@ -1061,7 +1414,9 @@ def install_into_package(artifacts, arch="host"):
     for d in sorted(module_dirs):
         print("[install] loadable modules staged into {0}".format(d))
     if platform.system() == "Windows":
-        bundle_windows_runtime_deps(out, arch)
+        bundle_windows_runtime_deps(out, arch, deps_prefix)
+    else:
+        bundle_unix_runtime_deps(out, deps_prefix)
     _fix_rpath(out)
     return out
 
@@ -1146,7 +1501,8 @@ ANDROID_ABIS = ("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
 
 
 def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
-                  disable_channels=None, channels_enabled=True):
+                  disable_channels=None, channels_enabled=True,
+                  deps_prefix=None):
     if abi not in ANDROID_ABIS:
         raise SystemExit("Unknown ABI: {0}. Pick one of {1}".format(
             abi, ANDROID_ABIS))
@@ -1181,7 +1537,11 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
     opts = cmake_options_for(profile, host_os="Android",
                              enable_channels=enable_channels,
                              disable_channels=disable_channels,
-                             channels_enabled=channels_enabled)
+                             channels_enabled=channels_enabled,
+                             deps_prefix=deps_prefix)
+    if deps_prefix:
+        # The NDK toolchain restricts find_* to the sysroot.
+        opts.append("-DCMAKE_FIND_ROOT_PATH={0}".format(deps_prefix))
     opts += [
         "-DWITH_X11=OFF", "-DWITH_WAYLAND=OFF",
         "-DWITH_PULSE=OFF", "-DWITH_ALSA=OFF",
@@ -1207,12 +1567,15 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
         "-DCMAKE_INSTALL_PREFIX={0}".format(install_dir),
     ] + opts + extra + ["-G", "Ninja"]
     require_tools(["cmake", "ninja"])
-    run(cfg)
+    run(cfg, env=deps_env(deps_prefix, cross=True))
     if channels_enabled:
         verify_channel_cache(build_dir, expected_channel_cache(
             profile, "Android", enable_channels, disable_channels))
-    run(["cmake", "--build", build_dir, "--parallel", str(jobs)])
-    run(["cmake", "--install", build_dir])
+    if deps_prefix:
+        verify_media_cache(build_dir)
+    env = deps_env(deps_prefix, cross=True)
+    run(["cmake", "--build", build_dir, "--parallel", str(jobs)], env=env)
+    run(["cmake", "--install", build_dir], env=env)
 
     target = os.path.join(package_root(), "pyfreerdp", "_libs", "android", abi)
     if not os.path.isdir(target):
@@ -1221,6 +1584,14 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
         dst = os.path.join(target, os.path.basename(so))
         shutil.copy2(so, dst)
         print("[android:{0}] {1}".format(abi, dst))
+    if deps_prefix:
+        # Ship the media libs the FreeRDP .so files import.
+        bundle_unix_runtime_deps(target, deps_prefix)
+        for so in glob.glob(os.path.join(deps_prefix, "lib", "*.so")):
+            dst = os.path.join(target, os.path.basename(so))
+            if not os.path.exists(dst):
+                shutil.copy2(so, dst)
+                print("[android] {0}".format(dst))
     return target
 
 
@@ -1233,7 +1604,7 @@ IOS_PLATFORMS = ("OS64", "SIMULATOR64", "SIMULATORARM64")
 
 def build_ios(src, jobs, profile, enable_channels=None,
               disable_channels=None, channels_enabled=True,
-              ios_platform="OS64"):
+              ios_platform="OS64", deps_prefix=None):
     if platform.system() != "Darwin":
         raise SystemExit("iOS builds require macOS + Xcode.")
     if ios_platform not in IOS_PLATFORMS:
@@ -1266,7 +1637,11 @@ def build_ios(src, jobs, profile, enable_channels=None,
     opts = cmake_options_for(profile, host_os="iOS",
                              enable_channels=enable_channels,
                              disable_channels=disable_channels,
-                             channels_enabled=channels_enabled)
+                             channels_enabled=channels_enabled,
+                             deps_prefix=deps_prefix)
+    if deps_prefix:
+        opts += ["-DCMAKE_FIND_ROOT_PATH={0}".format(deps_prefix),
+                 "-DWITH_CAIRO=OFF"]
     opts += [
         "-DBUILD_SHARED_LIBS=OFF",          # static archives for iOS
         "-DWITH_CAIRO=OFF",                 # no cairo on iOS
@@ -1306,19 +1681,22 @@ def build_ios(src, jobs, profile, enable_channels=None,
         "-DPLATFORM={0}".format(ios_platform),
         "-DCMAKE_INSTALL_PREFIX={0}".format(install_dir),
     ] + opts + extra + generator
-    run(cfg)
+    env = deps_env(deps_prefix, cross=True)
+    run(cfg, env=env)
+    if deps_prefix:
+        verify_media_cache(build_dir)
     if channels_enabled:
         verify_channel_cache(build_dir, expected_channel_cache(
             profile, "iOS", enable_channels, disable_channels))
     run(["cmake", "--build", build_dir, "--config", "Release",
-         "--parallel", str(jobs)])
+         "--parallel", str(jobs)], env=env)
 
     # Install is only used to get the archives into one directory. If it
     # fails (historically: Xcode generator path resolution), fall back to
     # harvesting the .a files straight from the build tree - the libraries
     # themselves were already built successfully by the step above.
     rc = run(["cmake", "--install", build_dir, "--config", "Release"],
-             check=False)
+             check=False, env=env)
     if rc == 0:
         archives = glob.glob(os.path.join(install_dir, "lib", "*.a"))
     else:
@@ -1349,6 +1727,11 @@ def build_ios(src, jobs, profile, enable_channels=None,
         shutil.copy2(a, dst)
         staged.append(os.path.basename(a).lower())
         print("[ios] {0}".format(dst))
+    if deps_prefix:
+        for a in glob.glob(os.path.join(deps_prefix, "lib", "*.a")):
+            dst = os.path.join(target, os.path.basename(a))
+            shutil.copy2(a, dst)
+            print("[ios] {0} (dependency)".format(dst))
     missing = [s for s in EXPECTED_LIBS[profile]
                if not any(s in n for n in staged)]
     if missing:
@@ -1360,6 +1743,63 @@ def build_ios(src, jobs, profile, enable_channels=None,
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+def resolve_deps_prefix(args):
+    if not args.deps_prefix:
+        return None
+    if args.deps_prefix != "auto":
+        return os.path.abspath(args.deps_prefix)
+    if args.target == "android":
+        label = "android-{0}".format(args.abi)
+    elif args.target == "ios":
+        label = "ios-{0}".format(args.ios_platform)
+    elif platform.system() == "Windows":
+        label = "windows-{0}".format(host_windows_arch(args.arch))
+    else:
+        m = platform.machine().lower()
+        m = {"amd64": "x86_64"}.get(m, m)
+        label = "{0}-{1}".format(platform.system().lower(), m)
+    cand = os.path.join(repo_root(), "build", "deps", label)
+    if os.path.isdir(cand):
+        return cand
+    print("[pyfreerdp-build] --deps-prefix auto: {0} not found; building "
+          "without media deps".format(cand))
+    return None
+
+
+def verify_media_linked(out_dir):
+    """The staged libfreerdp3 must actually import FFmpeg and OpenH264."""
+    sysname = platform.system()
+    core = None
+    for fn in os.listdir(out_dir):
+        low = fn.lower()
+        if low.startswith(("libfreerdp3", "freerdp3")) and (
+                ".so" in low or low.endswith((".dylib", ".dll"))) and \
+                not os.path.islink(os.path.join(out_dir, fn)):
+            core = os.path.join(out_dir, fn)
+            break
+    if not core:
+        raise SystemExit("[verify] libfreerdp3 not found in {0}".format(out_dir))
+    if sysname == "Linux":
+        deps = _elf_needed(core)
+    elif sysname == "Darwin":
+        deps = [os.path.basename(d) for d in _macho_deps(core)]
+    else:
+        deps = pe_imports(core)
+    low = " ".join(d.lower() for d in deps)
+    missing = [n for n in ("avcodec", "openh264", "swscale") if n not in low]
+    if missing:
+        raise SystemExit("[verify] libfreerdp3 does not link {0}; imports: "
+                         "{1}".format(missing, deps))
+    present = [d for d in deps if any(n in d.lower() for n in
+                                       ("av", "sw", "openh264", "usb"))]
+    for d in present:
+        if not os.path.exists(os.path.join(out_dir, d)):
+            raise SystemExit("[verify] {0} imports {1} but it is not staged "
+                             "in {2}".format(os.path.basename(core), d, out_dir))
+    print("[verify] libfreerdp3 links and ships: {0}".format(
+        ", ".join(sorted(present))))
+
 
 def main():
     p = argparse.ArgumentParser(description="Build FreeRDP for pyfreerdp")
@@ -1399,6 +1839,19 @@ def main():
                    help="iOS only: OS64 = arm64 device (default), "
                         "SIMULATORARM64 = arm64 simulator, "
                         "SIMULATOR64 = x86_64 simulator.")
+    p.add_argument("--deps-prefix", metavar="DIR",
+                   help="Prefix produced by scripts/build_deps.py (FFmpeg, "
+                        "OpenH264, libusb). Enables WITH_FFMPEG/DSP_FFMPEG/"
+                        "SWSCALE/OPENH264 and the urbdrc (+ rdpecam on "
+                        "Linux) channels, and bundles those libraries into "
+                        "pyfreerdp/_libs. 'auto' = build/deps/<label> if "
+                        "it exists.")
+    p.add_argument("--with-executables", action="store_true",
+                   help="Also build and stage the executables (xfreerdp/"
+                        "wfreerdp, sfreerdp-server, freerdp-shadow-cli, "
+                        "freerdp-proxy, winpr-makecert, winpr-hash, plus "
+                        "ffmpeg/ffprobe/h264enc/h264dec/listdevs from the "
+                        "deps prefix) into pyfreerdp/_bin (Windows: _libs).")
     p.add_argument("--abi", default="arm64-v8a")
     p.add_argument("--api-level", type=int, default=24)
     p.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
@@ -1413,6 +1866,11 @@ def main():
     host_os = {"host": platform.system(), "android": "Android",
                "ios": "iOS"}[args.target]
     channels_enabled = not args.no_channels
+    deps_prefix = resolve_deps_prefix(args)
+    if deps_prefix:
+        print("[pyfreerdp-build] deps prefix: {0}".format(deps_prefix))
+        args.enable_channel = list(args.enable_channel) + media_channels(
+            deps_prefix, host_os, args.target)
     if args.list_channels:
         print(format_channel_table(args.profile, host_os,
                                    args.enable_channel, args.disable_channel))
@@ -1447,7 +1905,8 @@ def main():
         build_host(src, prefix, args.jobs, args.profile,
                    enable_channels=args.enable_channel,
                    disable_channels=args.disable_channel,
-                   channels_enabled=channels_enabled, arch=args.arch)
+                   channels_enabled=channels_enabled, arch=args.arch,
+                   deps_prefix=deps_prefix, executables=args.with_executables)
         artifacts = collect_host_artifacts(prefix)
         if not artifacts:
             sys.stderr.write(
@@ -1455,9 +1914,15 @@ def main():
             return 3
         if not args.skip_verify:
             verify_artifacts(artifacts, args.profile)
-        out = install_into_package(artifacts, arch=args.arch)
+        out = install_into_package(artifacts, arch=args.arch,
+                                   deps_prefix=deps_prefix)
+        if args.with_executables:
+            stage_executables([prefix] + ([deps_prefix] if deps_prefix else []),
+                              out, deps_prefix=deps_prefix, arch=args.arch)
         if not args.skip_verify:
             verify_loadable(out, args.profile, arch=args.arch)
+            if deps_prefix:
+                verify_media_linked(out)
         print("\nDone. Library installed under {0}.".format(out))
         return 0
 
@@ -1465,7 +1930,8 @@ def main():
         build_android(src, args.abi, args.api_level, args.jobs, args.profile,
                       enable_channels=args.enable_channel,
                       disable_channels=args.disable_channel,
-                      channels_enabled=channels_enabled)
+                      channels_enabled=channels_enabled,
+                      deps_prefix=deps_prefix)
         return 0
 
     if args.target == "ios":
@@ -1473,7 +1939,7 @@ def main():
                   enable_channels=args.enable_channel,
                   disable_channels=args.disable_channel,
                   channels_enabled=channels_enabled,
-                  ios_platform=args.ios_platform)
+                  ios_platform=args.ios_platform, deps_prefix=deps_prefix)
         return 0
 
     return 1

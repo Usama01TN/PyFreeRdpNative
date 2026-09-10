@@ -1,0 +1,27 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "pyfreerdp-deps",
+  "version-string": "1",
+  "description": "Windows build dependencies for pyfreerdp's FreeRDP build (consumed by scripts/build_deps.py --target host on Windows, for the x64-windows, x86-windows and arm64-windows triplets).",
+  "builtin-baseline": "3d33b7f7a8121da6e4fa80b35618fc8e960be686",
+  "dependencies": [
+    "openssl",
+    "zlib",
+    "openh264",
+    "libusb",
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "avformat",
+        "avfilter",
+        "swresample",
+        "swscale",
+        "openh264",
+        "ffmpeg",
+        "ffprobe"
+      ]
+    }
+  ]
+}

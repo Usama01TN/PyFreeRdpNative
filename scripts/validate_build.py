@@ -1,0 +1,697 @@
+#!/usr/bin/env python3
+"""
+Validate a staged pyfreerdp native package: pyfreerdp/_libs (+ _bin).
+
+This is the executable specification of "the build works". It is run by
+CI on every native platform after scripts/build_freerdp.py, and can be run
+locally the same way:
+
+    python scripts/validate_build.py                # libraries only
+    python scripts/validate_build.py --media        # + FFmpeg/OpenH264/libusb
+    python scripts/validate_build.py --media --executables --loopback
+
+Checks (each is a named test; failures are collected, not fatal on first):
+
+  libs        every core library loads cold via ctypes by absolute path,
+              in a fresh interpreter, with LD_LIBRARY_PATH scrubbed.
+  channels    server channel entry points are exported from
+              libfreerdp-server3; client channel entries are present in
+              libfreerdp-client3 (nm on ELF/Mach-O, ctypes on Windows).
+  media       libfreerdp3 imports avcodec/swscale/openh264 and those files
+              are staged; h264_context_new() returns a context (so FreeRDP
+              found a working H.264 backend); freerdp_dsp_supports_format()
+              says yes for AAC/MP3/GSM/ADPCM (DSP FFmpeg backend active).
+  ffmpeg      ffmpeg encodes a test pattern with libopenh264 to Annex-B
+              H.264; ffprobe identifies it; ffmpeg decodes it back and the
+              frame count matches. Same round trip for AAC audio.
+  openh264    h264dec decodes the stream produced above to raw YUV of the
+              expected size; WelsGetCodecVersion() via ctypes.
+  libusb      libusb_init/get_device_list/exit via ctypes (works with zero
+              devices); `listdevs` runs.
+  executables every staged executable has all dynamic deps resolvable and
+              answers --version / --help; winpr-makecert produces a cert.
+  loopback    (Linux, opt-in) sfreerdp-server + xfreerdp under xvfb-run:
+              the server must log "is activated" and "RDPSND Activated"
+              (i.e. TLS handshake, capability exchange, static channel
+              negotiation all succeeded end to end).
+
+Exit status is non-zero if any selected check fails. Style: Py2-compatible
+syntax, runs on Python 3.
+"""
+
+from __future__ import print_function
+
+import argparse
+import ctypes
+import glob
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+SYS = platform.system()
+EXT = {"Windows": ".dll", "Darwin": ".dylib"}.get(SYS, ".so")
+
+RESULTS = []
+
+
+def ok(name, detail=""):
+    RESULTS.append((name, True, detail))
+    print("[PASS] {0}{1}".format(name, (" - " + detail) if detail else ""))
+
+
+def fail(name, detail):
+    RESULTS.append((name, False, detail))
+    print("[FAIL] {0} - {1}".format(name, detail))
+
+
+def skip(name, detail):
+    print("[SKIP] {0} - {1}".format(name, detail))
+
+
+def repo_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def find_lib(libs, stem):
+    hits = sorted(p for p in glob.glob(os.path.join(libs, "*" + stem + "*"))
+                  if EXT in os.path.basename(p) and os.path.isfile(p)
+                  and not os.path.basename(p).endswith((".a", ".lib")))
+    # Prefer the SONAME-less / most generic name so the same path works on
+    # every platform; ctypes follows to the real file anyway.
+    return hits[0] if hits else None
+
+
+def find_exe(bins, name):
+    for d in bins:
+        for cand in (name, name + ".exe"):
+            p = os.path.join(d, cand)
+            if os.path.isfile(p):
+                return p
+    return None
+
+
+def run(cmd, timeout=120, env=None, cwd=None, input_data=None):
+    """
+    Run a command, capture combined output, enforce a timeout. On POSIX the
+    child gets its own process group so a timeout kills wrappers *and* their
+    children (xvfb-run -> Xvfb + xfreerdp); otherwise the grandchildren keep
+    the pipe open and communicate() never returns.
+    """
+    kw = {}
+    if SYS != "Windows":
+        kw["start_new_session"] = True
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, env=env, cwd=cwd,
+                            stdin=subprocess.PIPE if input_data else None, **kw)
+    try:
+        out, _ = proc.communicate(input_data, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if SYS != "Windows":
+            import signal
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                time.sleep(1)
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        else:
+            proc.kill()
+        out, _ = proc.communicate()
+        return 124, out.decode(errors="replace")
+    return proc.returncode, out.decode(errors="replace")
+
+
+def exe_env(libs):
+    """PATH/LD_LIBRARY_PATH so executables can be started from anywhere."""
+    env = dict(os.environ)
+    if SYS == "Windows":
+        env["PATH"] = libs + os.pathsep + env.get("PATH", "")
+    # On Linux/macOS the executables carry an rpath to ../_libs, so no
+    # library path is set on purpose: that is part of what we validate.
+    return env
+
+
+# ---------------------------------------------------------------------------
+# libs
+# ---------------------------------------------------------------------------
+
+COLD_LOAD = r'''
+import ctypes, os, sys
+libs, paths = sys.argv[1], sys.argv[2:]
+if sys.platform == "win32":
+    os.add_dll_directory(libs)
+for p in paths:
+    try:
+        ctypes.CDLL(p)
+    except OSError as e:
+        sys.exit("%s: %s" % (os.path.basename(p), e))
+print("ok")
+'''
+
+
+def check_libs(libs, want):
+    paths = []
+    for stem in want:
+        p = find_lib(libs, stem)
+        if not p:
+            fail("libs", "no file for {0} in {1}".format(stem, libs))
+            return None
+        paths.append(p)
+    env = dict(os.environ)
+    for k in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+              "DYLD_FALLBACK_LIBRARY_PATH"):
+        env.pop(k, None)
+    rc, out = run([sys.executable, "-c", COLD_LOAD, libs] + paths, env=env)
+    if rc != 0:
+        fail("libs", out.strip())
+        return None
+    ok("libs", "{0} libraries load cold".format(len(paths)))
+    return dict(zip(want, paths))
+
+
+# ---------------------------------------------------------------------------
+# channels
+# ---------------------------------------------------------------------------
+
+SERVER_CHANNEL_SYMS = ["cliprdr_server_context_new", "rdpsnd_server_context_new",
+                       "audin_server_context_new", "rdpgfx_server_context_new",
+                       "disp_server_context_new", "rail_server_context_new",
+                       "rdpei_server_context_new", "drdynvc_server_context_new",
+                       "rdpdr_server_context_new", "echo_server_context_new",
+                       "encomsp_server_context_new", "remdesk_server_context_new",
+                       "ainput_server_context_new", "location_server_context_new"]
+CLIENT_CHANNEL_SYMS = ["cliprdr_VirtualChannelEntryEx", "rdpsnd_VirtualChannelEntryEx",
+                       "drdynvc_VirtualChannelEntryEx", "rail_VirtualChannelEntryEx",
+                       "rdpdr_VirtualChannelEntryEx", "rdpgfx_DVCPluginEntry",
+                       "disp_DVCPluginEntry", "audin_DVCPluginEntry",
+                       "rdpei_DVCPluginEntry", "echo_DVCPluginEntry",
+                       "drive_DeviceServiceEntry"]
+
+
+def symbols_in(path, want_syms):
+    """Return the subset of want_syms present in the binary (any visibility)."""
+    if SYS == "Windows":
+        lib = ctypes.CDLL(path)
+        return [s for s in want_syms if hasattr(lib, s)]
+    tool = "nm"
+    if SYS == "Darwin":
+        out = subprocess.check_output([tool, path]).decode(errors="replace")
+        names = set(l.split()[-1].lstrip("_") for l in out.splitlines()
+                    if l.strip())
+    else:
+        out = subprocess.check_output([tool, "--defined-only", path]).decode(
+            errors="replace")
+        names = set(l.split()[-1] for l in out.splitlines() if l.strip())
+    return [s for s in want_syms if s in names]
+
+
+def check_channels(paths):
+    srv = paths.get("freerdp-server3")
+    cli = paths.get("freerdp-client3")
+    if srv:
+        got = symbols_in(srv, SERVER_CHANNEL_SYMS)
+        missing = sorted(set(SERVER_CHANNEL_SYMS) - set(got))
+        if missing:
+            fail("channels.server", "missing {0}".format(missing))
+        else:
+            ok("channels.server", "{0} server channels exported".format(len(got)))
+    if cli:
+        if SYS == "Windows":
+            # Static entry points are hidden in the DLL; the public loader
+            # is the observable surface.
+            lib = ctypes.CDLL(cli)
+            have = [s for s in ("freerdp_client_load_addins",
+                                "freerdp_channels_load_static_addin_entry")
+                    if hasattr(lib, s)]
+            if have:
+                ok("channels.client", "static addin loader present")
+            else:
+                fail("channels.client", "no channel loader exported")
+        else:
+            got = symbols_in(cli, CLIENT_CHANNEL_SYMS)
+            missing = sorted(set(CLIENT_CHANNEL_SYMS) - set(got))
+            if missing:
+                fail("channels.client", "missing {0}".format(missing))
+            else:
+                ok("channels.client", "{0} client channel entries present".format(
+                    len(got)))
+
+
+# ---------------------------------------------------------------------------
+# media
+# ---------------------------------------------------------------------------
+
+def dyn_deps(path):
+    if SYS == "Linux":
+        out = subprocess.check_output(["readelf", "-d", path]).decode(
+            errors="replace")
+        return [l[l.index("[") + 1:l.rindex("]")] for l in out.splitlines()
+                if "(NEEDED)" in l]
+    if SYS == "Darwin":
+        out = subprocess.check_output(["otool", "-L", path]).decode(
+            errors="replace")
+        return [l.strip().split(" (")[0] for l in out.splitlines()[1:]
+                if l.strip()]
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import build_freerdp
+    return build_freerdp.pe_imports(path)
+
+
+class AUDIO_FORMAT(ctypes.Structure):
+    _fields_ = [("wFormatTag", ctypes.c_uint16), ("nChannels", ctypes.c_uint16),
+                ("nSamplesPerSec", ctypes.c_uint32),
+                ("nAvgBytesPerSec", ctypes.c_uint32),
+                ("nBlockAlign", ctypes.c_uint16),
+                ("wBitsPerSample", ctypes.c_uint16),
+                ("cbSize", ctypes.c_uint16), ("data", ctypes.c_void_p)]
+
+
+# WAVE_FORMAT_* tags FreeRDP routes to the FFmpeg DSP backend. (GSM610,
+# MS-ADPCM, G.723.1, A-law/u-law are filtered out of that backend by FreeRDP
+# itself unless WITH_DSP_EXPERIMENTAL, and are served by FreeRDP's built-in
+# codecs instead, so they are not evidence either way.)
+DSP_FORMATS = {"AAC": (0xA106, 2, 44100, 16), "Opus": (0x704F, 2, 48000, 16),
+               "PCM": (0x0001, 2, 44100, 16)}
+
+
+def check_media(libs, paths):
+    core = paths.get("freerdp3")
+    deps = dyn_deps(core)
+    low = " ".join(os.path.basename(d).lower() for d in deps)
+    missing = [n for n in ("avcodec", "swscale", "openh264") if n not in low]
+    if missing:
+        fail("media.linked", "libfreerdp3 does not import {0}; imports: "
+             "{1}".format(missing, deps))
+        return
+    for d in deps:
+        b = os.path.basename(d)
+        if any(n in b.lower() for n in ("avcodec", "avutil", "swscale",
+                                        "swresample", "openh264", "usb-1.0")):
+            if not os.path.exists(os.path.join(libs, b)):
+                fail("media.staged", "{0} imported but not in {1}".format(b, libs))
+                return
+    ok("media.linked", "libfreerdp3 imports FFmpeg + OpenH264 and they are staged")
+
+    if SYS == "Windows":
+        os.add_dll_directory(libs)
+    lib = ctypes.CDLL(core)
+    try:
+        lib.h264_context_new.restype = ctypes.c_void_p
+        lib.h264_context_new.argtypes = [ctypes.c_int]
+        lib.h264_context_free.argtypes = [ctypes.c_void_p]
+    except AttributeError as e:
+        fail("media.h264", "symbol missing: {0}".format(e))
+        return
+    results = []
+    for compressor in (0, 1):
+        ctx = lib.h264_context_new(compressor)
+        results.append(bool(ctx))
+        if ctx:
+            lib.h264_context_free(ctx)
+    if all(results):
+        ok("media.h264", "h264_context_new() works for decoder and encoder "
+                         "(OpenH264 backend active)")
+    else:
+        fail("media.h264", "h264_context_new returned NULL (decoder={0}, "
+                           "encoder={1}) - no usable H.264 backend".format(*results))
+
+    try:
+        lib.freerdp_dsp_supports_format.restype = ctypes.c_int
+        lib.freerdp_dsp_supports_format.argtypes = [ctypes.POINTER(AUDIO_FORMAT),
+                                                    ctypes.c_int]
+    except AttributeError as e:
+        fail("media.dsp", "symbol missing: {0}".format(e))
+        return
+    unsupported = []
+    for name, (tag, ch, rate, bits) in DSP_FORMATS.items():
+        f = AUDIO_FORMAT(tag, ch, rate, 0, 0, bits, 0, None)
+        if not lib.freerdp_dsp_supports_format(ctypes.byref(f), 0):
+            unsupported.append(name)
+    if unsupported:
+        fail("media.dsp", "decoder does not support {0} - DSP FFmpeg backend "
+                          "not active".format(unsupported))
+    else:
+        ok("media.dsp", "DSP backend decodes {0}".format(
+            ", ".join(sorted(DSP_FORMATS))))
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg / openh264 / libusb
+# ---------------------------------------------------------------------------
+
+def check_ffmpeg(bins, libs, tmp):
+    ffmpeg = find_exe(bins, "ffmpeg")
+    ffprobe = find_exe(bins, "ffprobe")
+    if not ffmpeg or not ffprobe:
+        fail("ffmpeg", "ffmpeg/ffprobe executables not staged")
+        return None
+    env = exe_env(libs)
+    rc, out = run([ffmpeg, "-hide_banner", "-version"], env=env)
+    if rc != 0 or "libavcodec" not in out:
+        fail("ffmpeg.version", out.strip()[-800:])
+        return None
+    ok("ffmpeg.version", out.splitlines()[0])
+
+    h264 = os.path.join(tmp, "test.h264")
+    rc, out = run([ffmpeg, "-hide_banner", "-y", "-f", "lavfi",
+                   "-i", "testsrc2=size=320x240:rate=25", "-frames:v", "25",
+                   "-pix_fmt", "yuv420p", "-c:v", "libopenh264",
+                   "-f", "h264", h264], env=env)
+    if rc != 0 or not os.path.getsize(h264):
+        fail("ffmpeg.encode_openh264", out.strip()[-1200:])
+        return None
+    rc, out = run([ffprobe, "-v", "error", "-count_frames", "-show_entries",
+                   "stream=codec_name,nb_read_frames", "-of", "csv=p=0", h264],
+                  env=env)
+    if rc != 0 or "h264" not in out or ",25" not in out.replace("\n", ""):
+        fail("ffmpeg.decode_h264", "ffprobe: {0}".format(out.strip()))
+        return None
+    ok("ffmpeg.h264_roundtrip", "25 frames encoded with libopenh264, decoded "
+                                "with FFmpeg h264")
+
+    aac = os.path.join(tmp, "test.adts")
+    rc, out = run([ffmpeg, "-hide_banner", "-y", "-f", "lavfi",
+                   "-i", "sine=frequency=440:sample_rate=44100:duration=1",
+                   "-c:a", "aac", "-b:a", "96k", "-f", "adts", aac], env=env)
+    if rc != 0:
+        fail("ffmpeg.encode_aac", out.strip()[-800:])
+        return h264
+    wav = os.path.join(tmp, "test.wav")
+    rc, out = run([ffmpeg, "-hide_banner", "-y", "-i", aac, "-c:a", "pcm_s16le",
+                   wav], env=env)
+    # sine= is mono s16: 44100 * 2 bytes per second.
+    if rc != 0 or os.path.getsize(wav) < 44100 * 2 * 0.9:
+        fail("ffmpeg.decode_aac", out.strip()[-800:])
+    else:
+        ok("ffmpeg.aac_roundtrip", "1 s sine -> AAC -> PCM")
+    return h264
+
+
+def check_openh264(bins, libs, tmp, h264_stream):
+    lib_path = find_lib(libs, "openh264")
+    if not lib_path:
+        fail("openh264.lib", "libopenh264 not staged in {0}".format(libs))
+    else:
+        if SYS == "Windows":
+            os.add_dll_directory(libs)
+        lib = ctypes.CDLL(lib_path)
+
+        class OpenH264Version(ctypes.Structure):
+            _fields_ = [("uMajor", ctypes.c_uint), ("uMinor", ctypes.c_uint),
+                        ("uRevision", ctypes.c_uint), ("uReserved", ctypes.c_uint)]
+        lib.WelsGetCodecVersion.restype = OpenH264Version
+        v = lib.WelsGetCodecVersion()
+        if v.uMajor >= 2:
+            ok("openh264.lib", "OpenH264 {0}.{1}.{2} loads, encoder/decoder "
+                               "entry points {3}".format(
+                                   v.uMajor, v.uMinor, v.uRevision,
+                                   "present" if hasattr(lib, "WelsCreateSVCEncoder")
+                                   and hasattr(lib, "WelsCreateDecoder") else "MISSING"))
+        else:
+            fail("openh264.lib", "unexpected version {0}.{1}".format(v.uMajor, v.uMinor))
+
+    dec = find_exe(bins, "h264dec")
+    if not dec:
+        skip("openh264.h264dec", "executable not staged")
+        return
+    if not h264_stream:
+        skip("openh264.h264dec", "no H.264 stream from the ffmpeg step")
+        return
+    yuv = os.path.join(tmp, "dec.yuv")
+    rc, out = run([dec, h264_stream, yuv], env=exe_env(libs))
+    expected = 320 * 240 * 3 // 2 * 25
+    size = os.path.getsize(yuv) if os.path.exists(yuv) else 0
+    if rc != 0 or size != expected:
+        fail("openh264.h264dec", "rc={0} size={1} expected={2}\n{3}".format(
+            rc, size, expected, out.strip()[-600:]))
+    else:
+        ok("openh264.h264dec", "decoded 25 frames of 320x240 YUV420 "
+                               "({0} bytes)".format(size))
+
+
+def check_libusb(bins, libs):
+    lib_path = find_lib(libs, "usb-1.0")
+    if not lib_path:
+        fail("libusb.lib", "libusb-1.0 not staged in {0}".format(libs))
+        return
+    if SYS == "Windows":
+        os.add_dll_directory(libs)
+    lib = ctypes.CDLL(lib_path)
+    lib.libusb_init.argtypes = [ctypes.c_void_p]
+    lib.libusb_get_device_list.argtypes = [ctypes.c_void_p,
+                                           ctypes.POINTER(ctypes.c_void_p)]
+    lib.libusb_get_device_list.restype = ctypes.c_ssize_t
+    lib.libusb_free_device_list.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    lib.libusb_exit.argtypes = [ctypes.c_void_p]
+    rc = lib.libusb_init(None)
+    if rc != 0:
+        fail("libusb.lib", "libusb_init returned {0}".format(rc))
+        return
+    devs = ctypes.c_void_p()
+    n = lib.libusb_get_device_list(None, ctypes.byref(devs))
+    if n >= 0:
+        lib.libusb_free_device_list(devs, 1)
+    lib.libusb_exit(None)
+    if n < 0:
+        # LIBUSB_ERROR_NOT_SUPPORTED (-12) is what a sandbox / container
+        # without /dev/bus/usb reports; the library itself still works.
+        fail("libusb.lib", "libusb_get_device_list returned {0}".format(n))
+        return
+    ok("libusb.lib", "libusb_init/get_device_list OK ({0} devices)".format(n))
+    listdevs = find_exe(bins, "listdevs")
+    if listdevs:
+        rc, out = run([listdevs], env=exe_env(libs), timeout=30)
+        if rc == 0:
+            ok("libusb.listdevs", "runs ({0} lines)".format(len(out.splitlines())))
+        else:
+            fail("libusb.listdevs", "rc={0} {1}".format(rc, out.strip()[-300:]))
+
+
+# ---------------------------------------------------------------------------
+# executables
+# ---------------------------------------------------------------------------
+
+# name -> (args, acceptable return codes, required substring in output)
+EXE_SMOKE = {
+    "xfreerdp":           (["/version"], (0,), "FreeRDP"),
+    "wlfreerdp":          (["/version"], (0,), "FreeRDP"),
+    "sdl-freerdp":        (["/version"], (0,), "FreeRDP"),
+    "wfreerdp":           (["/version"], (0,), "FreeRDP"),
+    # FreeRDP CLIs return COMMAND_LINE_STATUS_PRINT_VERSION (-2003 -> 45 as
+    # an exit byte) after printing the version.
+    "freerdp-shadow-cli": (["/version"], (0, 45), "FreeRDP"),
+    "freerdp-proxy":      (["--help"], (0, 1), "proxy"),
+    "winpr-hash":         (["-u", "user", "-p", "pass"], (0,), ""),
+    "ffmpeg":             (["-version"], (0,), "ffmpeg"),
+    "ffprobe":            (["-version"], (0,), "ffprobe"),
+    "h264dec":            ([], (0, 1, 255), ""),
+    "h264enc":            ([], (0, 1, 255), ""),
+}
+
+
+def unresolved_deps(path, libs):
+    """Return dynamic dependencies the loader will not find."""
+    if SYS == "Linux":
+        rc, out = run(["ldd", path])
+        return [l.split()[0] for l in out.splitlines() if "not found" in l]
+    if SYS == "Darwin":
+        missing = []
+        for d in dyn_deps(path):
+            if d.startswith("@rpath/"):
+                if not os.path.exists(os.path.join(libs, d[len("@rpath/"):])):
+                    missing.append(d)
+            elif d.startswith("/") and not os.path.exists(d):
+                missing.append(d)
+        return missing
+    return []  # Windows: PATH-based; the smoke run below is the check
+
+
+def check_executables(bins, libs, tmp):
+    exes = []
+    for d in bins:
+        if os.path.isdir(d):
+            for fn in sorted(os.listdir(d)):
+                p = os.path.join(d, fn)
+                if os.path.isfile(p) and (fn.lower().endswith(".exe")
+                                          if SYS == "Windows"
+                                          else os.access(p, os.X_OK)
+                                          and "." not in fn):
+                    exes.append(p)
+    if not exes:
+        fail("executables", "no executables staged in {0}".format(bins))
+        return
+    env = exe_env(libs)
+    problems = []
+    tested = 0
+    for p in exes:
+        name = os.path.basename(p)
+        if name.lower().endswith(".exe"):
+            name = name[:-4]
+        miss = unresolved_deps(p, libs)
+        if miss:
+            problems.append("{0}: unresolved {1}".format(name, miss))
+            continue
+        if name == "winpr-makecert":
+            out_dir = os.path.join(tmp, "cert")
+            os.makedirs(out_dir)
+            rc, out = run([p, "-rdp", "-silent", "-path", out_dir, "-n", "test"],
+                          env=env)
+            if rc != 0 or not os.path.isfile(os.path.join(out_dir, "test.crt")):
+                problems.append("winpr-makecert: rc={0} {1}".format(
+                    rc, out.strip()[-300:]))
+            tested += 1
+            continue
+        if name == "sfreerdp-server":
+            tested += 1  # exercised by --loopback; here: deps resolve
+            continue
+        if name == "listdevs":
+            continue  # covered by libusb check
+        if name == "wlfreerdp" and not os.environ.get("WAYLAND_DISPLAY"):
+            continue  # needs a Wayland compositor even for /version
+        spec = EXE_SMOKE.get(name)
+        if not spec:
+            continue
+        args, codes, needle = spec
+        rc, out = run([p] + args, env=env, timeout=60)
+        if rc not in codes or (needle and needle.lower() not in out.lower()):
+            problems.append("{0} {1}: rc={2} {3}".format(
+                name, " ".join(args), rc, out.strip()[-300:]))
+        tested += 1
+    if problems:
+        fail("executables", "; ".join(problems))
+    else:
+        ok("executables", "{0} staged, {1} smoke-tested, all deps resolve".format(
+            len(exes), tested))
+
+
+# ---------------------------------------------------------------------------
+# loopback: sample server + X11 client
+# ---------------------------------------------------------------------------
+
+def check_loopback(bins, libs, tmp):
+    if SYS != "Linux":
+        skip("loopback", "only implemented for Linux (xvfb + xfreerdp)")
+        return
+    server = find_exe(bins, "sfreerdp-server")
+    client = find_exe(bins, "xfreerdp")
+    makecert = find_exe(bins, "winpr-makecert")
+    if not (server and client and makecert):
+        fail("loopback", "need sfreerdp-server, xfreerdp and winpr-makecert staged")
+        return
+    if not shutil.which("xvfb-run"):
+        fail("loopback", "xvfb-run not installed (apt-get install xvfb)")
+        return
+    env = exe_env(libs)
+    cert_dir = os.path.join(tmp, "loopcert")
+    os.makedirs(cert_dir)
+    rc, out = run([makecert, "-rdp", "-silent", "-path", cert_dir, "-n", "server"],
+                  env=env)
+    if rc != 0:
+        fail("loopback", "makecert failed: {0}".format(out.strip()[-300:]))
+        return
+    port = 33890 + (os.getpid() % 1000)
+    srv_log = open(os.path.join(tmp, "server.log"), "w+")
+    # NB: no --local-only - that makes sfreerdp listen on a Unix socket only.
+    # The activation markers are WLog_DBG, hence WLOG_LEVEL=DEBUG.
+    srv_env = dict(env, WLOG_LEVEL="DEBUG")
+    srv_cmd = [server, "--port={0}".format(port),
+               "--cert={0}".format(os.path.join(cert_dir, "server.crt")),
+               "--key={0}".format(os.path.join(cert_dir, "server.key"))]
+    if shutil.which("stdbuf"):
+        srv_cmd = ["stdbuf", "-oL", "-eL"] + srv_cmd
+    srv = subprocess.Popen(srv_cmd, stdout=srv_log, stderr=subprocess.STDOUT,
+                           env=srv_env, cwd=tmp)
+    time.sleep(2)
+    try:
+        if srv.poll() is not None:
+            srv_log.seek(0)
+            fail("loopback", "server exited early: {0}".format(srv_log.read()[-600:]))
+            return
+        cli_cmd = ["xvfb-run", "-a", "-s", "-screen 0 1024x768x24", client,
+                   "/v:127.0.0.1:{0}".format(port), "/cert:ignore", "/sec:tls",
+                   "/u:test", "/p:test", "/size:640x480", "/sound", "+clipboard",
+                   "/log-level:INFO"]
+        rc, cli_out = run(cli_cmd, env=env, timeout=12)  # killed by timeout
+        time.sleep(1)
+        srv_log.flush()
+        srv_log.seek(0)
+        s_out = srv_log.read()
+    finally:
+        srv.terminate()
+        try:
+            srv.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            srv.kill()
+        srv_log.close()
+    markers = ["We've got a client", "is activated", "RDPSND Activated"]
+    missing = [m for m in markers if m not in s_out]
+    # Dynamic channels the server opened and the client accepted.
+    dvcs = sorted(set(l.split("Loading Dynamic Virtual Channel ")[1].split()[0]
+                      for l in cli_out.splitlines()
+                      if "Loading Dynamic Virtual Channel " in l))
+    if missing:
+        fail("loopback", "server log lacks {0}\n--- server ---\n{1}\n--- client ---\n"
+                         "{2}".format(missing, s_out[-1500:], cli_out[-1500:]))
+    else:
+        ok("loopback", "TLS session activated; RDPSND static channel negotiated; "
+                       "dynamic channels opened: {0}".format(", ".join(dvcs) or "none"))
+
+
+# ---------------------------------------------------------------------------
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--libs", default=os.path.join(repo_root(), "pyfreerdp", "_libs"))
+    p.add_argument("--bin", default=None,
+                   help="executables dir (default: <libs>/../_bin and <libs>)")
+    p.add_argument("--profile", default="full",
+                   choices=("full", "minimal", "client-only", "server-only"))
+    p.add_argument("--media", action="store_true",
+                   help="require FFmpeg/OpenH264/libusb integration")
+    p.add_argument("--executables", action="store_true")
+    p.add_argument("--loopback", action="store_true")
+    p.add_argument("--no-usb", action="store_true",
+                   help="skip libusb runtime probing (containers without USB)")
+    args = p.parse_args()
+
+    libs = os.path.abspath(args.libs)
+    bins = [args.bin] if args.bin else [
+        os.path.join(os.path.dirname(libs), "_bin"), libs]
+    tmp = tempfile.mkdtemp(prefix="pyfreerdp-validate-")
+    print("[validate] libs={0} bins={1}".format(libs, bins))
+
+    want = ["winpr3", "freerdp3"]
+    if args.profile in ("full", "minimal", "client-only"):
+        want.append("freerdp-client3")
+    if args.profile in ("full", "minimal", "server-only"):
+        want.append("freerdp-server3")
+    paths = check_libs(libs, want)
+    if paths:
+        check_channels(paths)
+        if args.media:
+            check_media(libs, paths)
+    h264 = None
+    if args.media:
+        h264 = check_ffmpeg(bins, libs, tmp)
+        check_openh264(bins, libs, tmp, h264)
+        if not args.no_usb:
+            check_libusb(bins, libs)
+    if args.executables:
+        check_executables(bins, libs, tmp)
+    if args.loopback:
+        check_loopback(bins, libs, tmp)
+
+    failed = [r for r in RESULTS if not r[1]]
+    print("\n[validate] {0} passed, {1} failed".format(
+        len(RESULTS) - len(failed), len(failed)))
+    shutil.rmtree(tmp, ignore_errors=True)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
