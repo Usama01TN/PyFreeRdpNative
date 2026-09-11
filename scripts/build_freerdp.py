@@ -258,7 +258,7 @@ CHANNELS = {
     "rdpear":   dict(type="dynamic", client=True,  server=False, default=False,
                      note="Kerberos/NTLM remote credential guard; optional "
                           "krb5 dep, upstream default OFF"),
-    "rdp2tcp":  dict(type="static",  client=True,  server=False, default=False,
+    "rdp2tcp":  dict(type="static",  client=True,  server=False, default=True,
                      note="TCP tunnelling over a static channel, upstream "
                           "default OFF"),
     "sshagent": dict(type="dynamic", client=True,  server=False, default=False,
