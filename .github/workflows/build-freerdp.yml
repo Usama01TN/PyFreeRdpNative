@@ -210,7 +210,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 12
+            python scripts/$s.py --require-version 14
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -231,7 +231,7 @@ jobs:
               libx11-dev libxext-dev libxrandr-dev libxinerama-dev \
               libxfixes-dev libxcursor-dev libxi-dev libxv-dev \
               libxkbfile-dev libxkbcommon-dev \
-              libwayland-dev wayland-protocols \
+              libwayland-dev wayland-protocols libpixman-1-dev \
               nasm libudev-dev libv4l-dev xvfb
           fi
           # Optional channel deps, only if the user asked for them.
@@ -554,7 +554,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 12
+            python scripts/$s.py --require-version 14
           done
 
       - name: Install host tools
@@ -844,7 +844,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 12
+            python scripts/$s.py --require-version 14
           done
 
       - name: Install host tools
