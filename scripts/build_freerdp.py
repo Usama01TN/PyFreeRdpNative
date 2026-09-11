@@ -258,7 +258,7 @@ CHANNELS = {
     "rdpear":   dict(type="dynamic", client=True,  server=False, default=False,
                      note="Kerberos/NTLM remote credential guard; optional "
                           "krb5 dep, upstream default OFF"),
-    "rdp2tcp":  dict(type="static",  client=True,  server=False, default=True,
+    "rdp2tcp":  dict(type="static",  client=True,  server=False, default=False,
                      note="TCP tunnelling over a static channel, upstream "
                           "default OFF"),
     "sshagent": dict(type="dynamic", client=True,  server=False, default=False,
@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 18
+BUILD_SCRIPT_VERSION = 19
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -1014,6 +1014,46 @@ def deps_env(deps_prefix, cross=False):
     return env
 
 
+def patch_source_tree(src, host_os, profile, windows_shadow=None):
+    """
+    Fix upstream bugs in the fetched FreeRDP tree that would otherwise make a
+    supported configuration fail to build.
+
+    1. Windows shadow subsystem (server/shadow/Win): FreeRDP's top-level
+       CMakeLists.txt does add_compile_definitions(NONAMELESSUNION), which
+       renames the Windows SDK's anonymous unions to DUMMYUNIONNAME - but
+       win_shadow.c and win_wds.c still use the nameless form (event.ki,
+       variant.vt), so MSVC reports "'ki' is not a member of 'tagINPUT'".
+       Dropping that define for this one directory makes the subsystem
+       compile; named vs nameless unions have identical layout, so mixing
+       the two across translation units is ABI-safe.
+    """
+    if host_os != "Windows" or profile != "full" or windows_shadow is False:
+        return
+    path = os.path.join(src, "server", "shadow", "Win", "CMakeLists.txt")
+    if not os.path.isfile(path):
+        return
+    with open(path) as fh:
+        text = fh.read()
+    if "remove_definitions(-DNONAMELESSUNION)" in text:
+        return
+    anchor = "add_compile_definitions(WITH_SHADOW_WIN)"
+    if anchor not in text:
+        print("[patch] {0}: anchor not found, skipping NONAMELESSUNION "
+              "fix".format(path))
+        return
+    note = (
+        "# pyfreerdp: win_shadow.c / win_wds.c use the SDK's nameless unions"
+        "\n# (event.ki, variant.vt); the project-wide NONAMELESSUNION define"
+        "\n# renames them to DUMMYUNIONNAME, so drop it for this directory."
+        "\nremove_definitions(-DNONAMELESSUNION)\n")
+    text = text.replace(anchor, note + anchor, 1)
+    with open(path, "w") as fh:
+        fh.write(text)
+    print("[patch] server/shadow/Win: dropped NONAMELESSUNION so the shadow "
+          "subsystem compiles")
+
+
 def build_host(src, prefix, jobs, profile, enable_channels=None,
                disable_channels=None, channels_enabled=True, arch="host",
                deps_prefix=None, executables=False, with_krb5=None,
@@ -1031,6 +1071,7 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
         shutil.rmtree(build_dir)
     os.makedirs(build_dir)
 
+    patch_source_tree(src, host_os, profile, windows_shadow)
     sdl = profile == "full" and sdl_available(host_os, deps_prefix)
     if profile == "full":
         print("[build] SDL3 client: {0}".format(
