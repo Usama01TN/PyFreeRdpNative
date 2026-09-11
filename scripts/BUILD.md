@@ -68,7 +68,7 @@ encoded once in `FULL_PLATFORM` in `build_freerdp.py`:
 |---|---|---|---|---|---|
 | Linux | yes (X11 subsystem) | yes | yes | yes | xfreerdp, wlfreerdp, sdl-freerdp (if SDL3) |
 | macOS | **no** - upstream: "Mac shadow server implementation no longer compiles" | yes | yes | yes | sdl-freerdp (brew sdl3 + sdl3_ttf) |
-| Windows | **no** - upstream builds Windows with `WITH_SHADOW=OFF` | yes | yes | yes | wfreerdp, sdl-freerdp (vcpkg sdl3 + sdl3-ttf) |
+| Windows | opt-in via `--with-windows-shadow` (dispatch input `windows_shadow`); DXGI capture, upstream-unmaintained, off by default | yes | yes | yes | wfreerdp, sdl-freerdp (vcpkg sdl3 + sdl3-ttf) |
 | Android | no | no | no | no | none (libraries only; media + channels included) |
 | iOS | no | no | no | no | none (static libraries only; no libusb - no USB host API) |
 
@@ -172,6 +172,21 @@ goes into libkrb5 and returns e.g. `SEC_E_NO_CREDENTIALS` instantly; a build
 without krb5 returns `SEC_E_UNSUPPORTED_FUNCTION`. Configuration at runtime is
 the standard `/etc/krb5.conf` / `KRB5_CONFIG`; a ticket cache from `kinit` (or
 `/u:user@REALM /p:...`) is used by the client as usual.
+
+## Viewing logs
+
+FreeRDP logs through WinPR's WLog. On Linux/macOS every executable prints to
+the terminal. On Windows `wfreerdp.exe` is built with `WITH_WIN_CONSOLE=ON`
+(console subsystem) so its output appears in the cmd/PowerShell window too;
+`/log-level:DEBUG` raises verbosity, `/log-filters:com.freerdp.core:TRACE`
+targets modules. To capture to a file on any platform:
+
+```
+WLOG_APPENDER=FILE  WLOG_FILEAPPENDER_OUTPUT_FILE_PATH=<dir>
+WLOG_FILEAPPENDER_OUTPUT_FILE_NAME=freerdp.log  WLOG_LEVEL=INFO
+```
+
+(set as environment variables before launching).
 
 ## Validation
 

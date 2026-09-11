@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 14
+BUILD_SCRIPT_VERSION = 15
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -313,10 +313,16 @@ FULL_PLATFORM = {
 }
 
 
-def profile_options(profile, host_os, sdl=False):
+def profile_options(profile, host_os, sdl=False, windows_shadow=False):
     """-D switches that distinguish minimal from full (beyond channels)."""
     shadow, proxy, sample, tools = FULL_PLATFORM.get(
         host_os, (False, False, False, False))
+    # Opt-in: upstream can build the Windows shadow server (DXGI capture) but
+    # marks the subsystem "unmaintained" and its own CI ships WITH_SHADOW=OFF,
+    # so it is off by default here. --with-windows-shadow turns it on as a
+    # best-effort extra. (macOS still cannot: "no longer compiles".)
+    if windows_shadow and host_os == "Windows":
+        shadow = True
     want_client, want_server = PROFILE_SIDES[profile]
     if profile == "full":
         opts = [
@@ -356,10 +362,12 @@ def profile_options(profile, host_os, sdl=False):
     ]
 
 
-def expected_libs(profile, host_os):
+def expected_libs(profile, host_os, windows_shadow=False):
     """Library families that must exist after the build, per platform."""
     libs = list(EXPECTED_LIBS[profile])
     shadow = FULL_PLATFORM.get(host_os, (False,))[0]
+    if windows_shadow and host_os == "Windows":
+        shadow = True
     if profile == "full" and not shadow:
         libs = [l for l in libs if l != "freerdp-shadow"]
     # uwac (Wayland client backend) is built with WITH_WAYLAND, i.e. the
@@ -760,7 +768,8 @@ def media_channels(deps_prefix, host_os, target="host"):
 
 def cmake_options_for(profile, host_os, enable_channels=None,
                       disable_channels=None, channels_enabled=True,
-                      deps_prefix=None, executables=False, sdl=False):
+                      deps_prefix=None, executables=False, sdl=False,
+                      windows_shadow=False):
     """
     Return the list of -D CMake options for the given build profile.
 
@@ -802,7 +811,8 @@ def cmake_options_for(profile, host_os, enable_channels=None,
         "-DWITH_CLIENT_COMMON={0}".format("ON" if want_client else "OFF"),
         "-DWITH_SERVER={0}".format("ON" if want_server else "OFF"),
     ]
-    opts += profile_options(profile, host_os, sdl=sdl)
+    opts += profile_options(profile, host_os, sdl=sdl,
+                            windows_shadow=windows_shadow)
 
     if host_os == "Linux":
         # X11/Wayland only matter for the xfreerdp/wlfreerdp executables;
@@ -1000,7 +1010,8 @@ def deps_env(deps_prefix, cross=False):
 
 def build_host(src, prefix, jobs, profile, enable_channels=None,
                disable_channels=None, channels_enabled=True, arch="host",
-               deps_prefix=None, executables=False, with_krb5=None):
+               deps_prefix=None, executables=False, with_krb5=None,
+               windows_shadow=False):
     require_tools(["cmake", "git"])
     host_os = platform.system()
     if host_os != "Windows" and arch not in (None, "", "host"):
@@ -1023,7 +1034,8 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
                              disable_channels=disable_channels,
                              channels_enabled=channels_enabled,
                              deps_prefix=deps_prefix, executables=executables,
-                             sdl=sdl)
+                             sdl=sdl, windows_shadow=windows_shadow)
+    build_host.windows_shadow = windows_shadow and host_os == "Windows"
     opts += host_dependency_probe(host_os, arch, deps_prefix)
     krb_opts, krb_libdir = krb5_options(profile, host_os, "host", with_krb5)
     opts += krb_opts
@@ -1319,7 +1331,7 @@ def collect_host_artifacts(prefix):
     return candidates
 
 
-def verify_artifacts(artifacts, profile, host_os=None):
+def verify_artifacts(artifacts, profile, host_os=None, windows_shadow=False):
     """
     Assert that every library family the profile promised actually exists.
     Prevents shipping a wheel where CMake silently dropped server support
@@ -1328,7 +1340,8 @@ def verify_artifacts(artifacts, profile, host_os=None):
     """
     core_names = [os.path.basename(p).lower()
                   for p, sub in artifacts if not sub]
-    want = expected_libs(profile, host_os or platform.system())
+    want = expected_libs(profile, host_os or platform.system(),
+                         windows_shadow=windows_shadow)
     missing = []
     for stem in want:
         if not any(stem in n for n in core_names):
@@ -2396,6 +2409,12 @@ def main():
                         "media (both). Selects build/deps/<label>-<edition> "
                         "for --deps-prefix auto. Default: media for the full "
                         "profile, standard for the others.")
+    p.add_argument("--with-windows-shadow", action="store_true",
+                   help="Windows only, best-effort: also build the shadow "
+                        "server (freerdp-shadow-cli, DXGI screen capture). "
+                        "Upstream marks this subsystem unmaintained and its "
+                        "CI ships it off, so it is opt-in and not guaranteed "
+                        "to work. No effect on other platforms.")
     p.add_argument("--with-krb5", dest="with_krb5", action="store_true",
                    default=None,
                    help="Force Kerberos on (Linux: default anyway; macOS: uses "
@@ -2514,14 +2533,16 @@ def main():
                    disable_channels=args.disable_channel,
                    channels_enabled=channels_enabled, arch=args.arch,
                    deps_prefix=deps_prefix, executables=args.with_executables,
-                   with_krb5=args.with_krb5)
+                   with_krb5=args.with_krb5,
+                   windows_shadow=args.with_windows_shadow)
         artifacts = collect_host_artifacts(prefix)
         if not artifacts:
             sys.stderr.write(
                 "No artifacts found after build - something went wrong.\n")
             return 3
         if not args.skip_verify:
-            verify_artifacts(artifacts, args.profile, host_os)
+            verify_artifacts(artifacts, args.profile, host_os,
+                             windows_shadow=args.with_windows_shadow)
         out = install_into_package(
             artifacts, arch=args.arch, deps_prefix=deps_prefix,
             compact=(args.profile != "full"),
