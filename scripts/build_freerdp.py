@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 10
+BUILD_SCRIPT_VERSION = 11
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -1057,7 +1057,56 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
     if profile != "full" and host_os != "Windows":
         install.append("--strip")   # size: drop symbol tables
     run(install, env=env)
+    if executables and host_os == "Windows" and PROFILE_SIDES[profile][0]:
+        build_sample_client(src, prefix, host_os, arch, deps_prefix, jobs,
+                            [o for o in opts if o.startswith(
+                                ("-DCMAKE_TOOLCHAIN_FILE=", "-DVCPKG_",
+                                 "-DCMAKE_PREFIX_PATH="))],
+                            env)
     return prefix
+
+
+def build_sample_client(src, prefix, host_os, arch, deps_prefix, jobs,
+                        toolchain_opts, env):
+    """
+    Build client/Sample (sfreerdp, the minimal reference client) as a
+    standalone CMake project against the just-installed prefix.
+
+    On Linux/macOS it is built in-tree by WITH_SAMPLE. On Windows upstream's
+    client/CMakeLists.txt only adds it in the non-WIN32 branch (wfreerdp
+    takes that slot), so we build it separately. client/Sample supports
+    standalone builds via find_package(WinPR/FreeRDP/FreeRDP-Client), but
+    3.16.0 forgets to include InstallFreeRDPDesktop.cmake, which is why
+    CMAKE_PROJECT_sfreerdp_INCLUDE points at it.
+    """
+    sample_src = os.path.join(src, "client", "Sample")
+    if not os.path.isdir(sample_src):
+        print("[sample] client/Sample not present in this FreeRDP ref; skipping")
+        return
+    build_dir = os.path.join(src, "build-sample-client")
+    if os.path.exists(build_dir):
+        shutil.rmtree(build_dir)
+    prefixes = [prefix] + ([deps_prefix] if deps_prefix else [])
+    cfg = ["cmake", "-S", sample_src, "-B", build_dir,
+           "-DCMAKE_BUILD_TYPE=Release",
+           "-DCMAKE_INSTALL_PREFIX={0}".format(prefix),
+           "-DCMAKE_PREFIX_PATH={0}".format(";".join(prefixes)),
+           "-DCMAKE_PROJECT_sfreerdp_INCLUDE={0}".format(
+               os.path.join(src, "cmake", "InstallFreeRDPDesktop.cmake"))]
+    cfg += [o for o in toolchain_opts if not o.startswith("-DCMAKE_PREFIX_PATH=")]
+    cfg = dedupe_defines(cfg)
+    if host_os == "Windows":
+        cfg += ["-A", WINDOWS_ARCHS[host_windows_arch(arch)][0]]
+    elif have("ninja"):
+        cfg += ["-G", "Ninja"]
+    if host_os == "Linux" and deps_prefix:
+        cfg.append("-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,{0}".format(
+            os.path.join(deps_prefix, "lib")))
+    print("[sample] building the sample client (sfreerdp) against {0}".format(prefix))
+    run(cfg, env=env)
+    run(["cmake", "--build", build_dir, "--config", "Release",
+         "--parallel", str(jobs)], env=env)
+    run(["cmake", "--install", build_dir, "--config", "Release"], env=env)
 
 
 def verify_krb5_cache(build_dir, expect_on):

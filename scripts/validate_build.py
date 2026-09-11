@@ -56,7 +56,7 @@ SYS = platform.system()
 EXT = {"Windows": ".dll", "Darwin": ".dylib"}.get(SYS, ".so")
 
 # Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
-BUILD_SCRIPT_VERSION = 10
+BUILD_SCRIPT_VERSION = 11
 
 
 RESULTS = []
@@ -735,6 +735,7 @@ EXE_SMOKE = {
     "wlfreerdp":          (["/version"], (0,), "FreeRDP"),
     "sdl-freerdp":        (["/version"], (0,), "FreeRDP"),
     "wfreerdp":           (["/version"], (0,), "FreeRDP"),
+    "sfreerdp":           (["/version"], (0,), "FreeRDP"),   # client/Sample
     # FreeRDP CLIs return COMMAND_LINE_STATUS_PRINT_VERSION (-2003 -> 45 as
     # an exit byte) after printing the version.
     "freerdp-shadow-cli": (["/version"], (0, 45), "FreeRDP"),

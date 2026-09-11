@@ -43,7 +43,7 @@ Artifacts are named `freerdp-<ref>-<platform>-<profile>-<edition>`.
 | Libraries | libwinpr3, libfreerdp3, libfreerdp-client3, libfreerdp-server3 (+ librdtk0) | those plus FFmpeg, OpenH264, libusb, shadow (Linux), proxy |
 | Channels | every channel with no external dependency (20 client / 17 server) | all of them, incl. `urbdrc` (USB) and `rdpecam` client (Linux camera) |
 | Media | none | H.264 encode/decode (OpenH264 + FFmpeg), AAC/Opus DSP, swscale |
-| Executables | none | platform client(s), `sdl-freerdp` where SDL3 is available, `sfreerdp-server`, `freerdp-proxy`, `freerdp-shadow-cli` (Linux), `winpr-makecert`, `winpr-hash`, `ffmpeg`, `ffprobe`, `h264enc`, `h264dec`, `listdevs` |
+| Executables | none | platform client(s), `sfreerdp` (the sample client from `client/Sample`, on Windows built as a standalone project against the installed prefix), `sdl-freerdp` where SDL3 is available, `sfreerdp-server`, `freerdp-proxy`, `freerdp-shadow-cli` (Linux), `winpr-makecert`, `winpr-hash`, `ffmpeg`, `ffprobe`, `h264enc`, `h264dec` (not on Windows: vcpkg ships no tools), `listdevs` |
 | Build type | `MinSizeRel`, stripped, one SONAME file per library | `Release`, dev links kept |
 | Linux x86_64 size | **3.5 MB** | 28 MB `_libs` + 3.7 MB `_bin` |
 | Command | `build_freerdp.py --profile minimal --edition <e>` | `build_deps.py --edition <e>` then `build_freerdp.py --profile full --edition <e>` |
