@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 9
+BUILD_SCRIPT_VERSION = 10
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -1660,6 +1660,12 @@ KNOWN_EXECUTABLES = ("xfreerdp", "wlfreerdp", "sdl-freerdp", "wfreerdp",
                      "ffmpeg", "ffprobe", "h264enc", "h264dec", "listdevs")
 
 
+# Executables we ship from the *dependency* prefix. vcpkg drops every port's
+# tools into bin/ (brotli.exe, bzip2.exe, ...); only these belong in the
+# package. FreeRDP's own prefix is shipped completely.
+DEPS_EXECUTABLES = ("ffmpeg", "ffprobe", "h264enc", "h264dec", "listdevs")
+
+
 def stage_executables(prefixes, libs_dir, deps_prefix=None, arch="host"):
     """
     Copy executables from the bin/ dirs of the given prefixes into
@@ -1679,10 +1685,13 @@ def stage_executables(prefixes, libs_dir, deps_prefix=None, arch="host"):
         bindir = os.path.join(pfx, "bin")
         if not os.path.isdir(bindir):
             continue
+        is_deps = deps_prefix and os.path.abspath(pfx) == os.path.abspath(deps_prefix)
         for fn in sorted(os.listdir(bindir)):
             p = os.path.join(bindir, fn)
             if not os.path.isfile(p):
                 continue
+            if is_deps and fn.lower().split(".")[0] not in DEPS_EXECUTABLES:
+                continue  # vcpkg tool noise (brotli.exe, bzip2.exe, ...)
             if sysname == "Windows":
                 if not fn.lower().endswith(".exe"):
                     continue
