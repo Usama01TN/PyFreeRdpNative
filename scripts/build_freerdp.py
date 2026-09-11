@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 12
+BUILD_SCRIPT_VERSION = 14
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -335,7 +335,13 @@ def profile_options(profile, host_os, sdl=False):
             # installs that DLL when WITH_CLIENT_INTERFACE is ON. Without it
             # the executable ships without its own library
             # (STATUS_DLL_NOT_FOUND: wfreerdp-client3.dll).
-            opts += ["-DWITH_CLIENT_WINDOWS=ON", "-DWITH_CLIENT_INTERFACE=ON"]
+            opts += ["-DWITH_CLIENT_WINDOWS=ON", "-DWITH_CLIENT_INTERFACE=ON",
+                     # Console subsystem: WLog output (and /version) shows up
+                     # in the cmd/PowerShell window like every other FreeRDP
+                     # executable, instead of vanishing in a GUI-only process.
+                     # Logs can still be redirected to a file with the
+                     # WLOG_APPENDER=FILE environment variables.
+                     "-DWITH_WIN_CONSOLE=ON"]
         if want_client and host_os in ("Linux", "Darwin", "Windows"):
             opts.append("-DWITH_CLIENT_SDL={0}".format("ON" if sdl else "OFF"))
         return opts
@@ -356,6 +362,10 @@ def expected_libs(profile, host_os):
     shadow = FULL_PLATFORM.get(host_os, (False,))[0]
     if profile == "full" and not shadow:
         libs = [l for l in libs if l != "freerdp-shadow"]
+    # uwac (Wayland client backend) is built with WITH_WAYLAND, i.e. the
+    # full profile on Linux only.
+    if profile == "full" and host_os == "Linux":
+        libs.append("uwac")
     return libs
 
 
@@ -800,6 +810,9 @@ def cmake_options_for(profile, host_os, enable_channels=None,
         gui = "ON" if profile == "full" else "OFF"
         opts += [
             "-DWITH_X11={0}".format(gui),
+            # WITH_WAYLAND builds uwac ("Using Wayland As Client") and the
+            # wlfreerdp Wayland client. Needs wayland + pixman (see the apt
+            # list in the workflow / docs).
             "-DWITH_WAYLAND={0}".format(gui),
             "-DWITH_ALSA=ON",
             "-DWITH_CUPS=OFF",
