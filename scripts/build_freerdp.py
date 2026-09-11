@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 11
+BUILD_SCRIPT_VERSION = 12
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -1066,6 +1066,37 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
     return prefix
 
 
+def freerdp_source_version(src):
+    """
+    MAJOR.MINOR.REVISION of the FreeRDP source tree, the way its top-level
+    CMakeLists.txt determines it: .source_tag (release tarballs), else
+    `git describe`, else the RAW_VERSION_STRING default in CMakeLists.txt.
+    """
+    import re
+    tag = os.path.join(src, ".source_tag")
+    if os.path.isfile(tag):
+        with open(tag) as fh:
+            m = re.search(r"(\d+)\.(\d+)\.(\d+)", fh.read())
+            if m:
+                return ".".join(m.groups())
+    try:
+        out = subprocess.check_output(["git", "-C", src, "describe", "--tags",
+                                       "--abbrev=0"], stderr=subprocess.DEVNULL).decode()
+        m = re.search(r"(\d+)\.(\d+)\.(\d+)", out)
+        if m:
+            return ".".join(m.groups())
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    try:
+        with open(os.path.join(src, "CMakeLists.txt")) as fh:
+            m = re.search(r'set\(RAW_VERSION_STRING\s+"(\d+)\.(\d+)\.(\d+)"', fh.read())
+            if m:
+                return ".".join(m.groups())
+    except (OSError, IOError):
+        pass
+    return "3.0.0"
+
+
 def build_sample_client(src, prefix, host_os, arch, deps_prefix, jobs,
                         toolchain_opts, env):
     """
@@ -1087,12 +1118,24 @@ def build_sample_client(src, prefix, host_os, arch, deps_prefix, jobs,
     if os.path.exists(build_dir):
         shutil.rmtree(build_dir)
     prefixes = [prefix] + ([deps_prefix] if deps_prefix else [])
+    # The Windows version resource (cmake/WindowsDLLVersion.rc.in) needs the
+    # RC_VERSION_* variables that FreeRDP's top-level CMakeLists.txt sets;
+    # standalone it would render "FILEVERSION 1,0,0," and rc.exe fails
+    # (RC2127). Feed the real FreeRDP version instead of the 1.0.0.0 default.
+    version = freerdp_source_version(src)
+    parts = (version.split(".") + ["0", "0", "0"])[:3]
     cfg = ["cmake", "-S", sample_src, "-B", build_dir,
            "-DCMAKE_BUILD_TYPE=Release",
            "-DCMAKE_INSTALL_PREFIX={0}".format(prefix),
            "-DCMAKE_PREFIX_PATH={0}".format(";".join(prefixes)),
            "-DCMAKE_PROJECT_sfreerdp_INCLUDE={0}".format(
-               os.path.join(src, "cmake", "InstallFreeRDPDesktop.cmake"))]
+               os.path.join(src, "cmake", "InstallFreeRDPDesktop.cmake")),
+           "-DFREERDP_DEFAULT_PROJECT_VERSION={0}".format(".".join(parts)),
+           "-DRC_VERSION_PATCH=0",
+           "-DRC_VERSION_VENDOR=FreeRDP",
+           "-DRC_VERSION_PRODUCT=FreeRDP",
+           "-DRC_VERSION_DESCRIPTION=FreeRDP sample client (sfreerdp)",
+           "-DRC_VERSION_YEAR={0}".format(__import__("datetime").date.today().year)]
     cfg += [o for o in toolchain_opts if not o.startswith("-DCMAKE_PREFIX_PATH=")]
     cfg = dedupe_defines(cfg)
     if host_os == "Windows":
