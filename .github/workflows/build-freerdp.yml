@@ -217,7 +217,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 18
+            python scripts/$s.py --require-version 19
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -566,7 +566,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 18
+            python scripts/$s.py --require-version 19
           done
 
       - name: Install host tools
@@ -856,7 +856,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 18
+            python scripts/$s.py --require-version 19
           done
 
       - name: Install host tools
