@@ -258,7 +258,7 @@ CHANNELS = {
     "rdpear":   dict(type="dynamic", client=True,  server=False, default=False,
                      note="Kerberos/NTLM remote credential guard; optional "
                           "krb5 dep, upstream default OFF"),
-    "rdp2tcp":  dict(type="static",  client=True,  server=False, default=True,
+    "rdp2tcp":  dict(type="static",  client=True,  server=False, default=False,
                      note="TCP tunnelling over a static channel, upstream "
                           "default OFF"),
     "sshagent": dict(type="dynamic", client=True,  server=False, default=False,
@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 17
+BUILD_SCRIPT_VERSION = 18
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -306,23 +306,24 @@ BUILD_SCRIPT_VERSION = 17
 FULL_PLATFORM = {
     #            shadow proxy  sample tools
     "Linux":    (True,  True,  True,  True),
-    "Darwin":   (False, True,  True,  True),
-    "Windows":  (False, True,  True,  True),
+    "Darwin":   (False, True,  True,  True),   # macOS shadow "no longer compiles"
+    "Windows":  (True,  True,  True,  True),    # DXGI capture; upstream marks it
+                                                # unmaintained - disable with
+                                                # --no-windows-shadow if it breaks
     "Android":  (False, False, False, False),
     "iOS":      (False, False, False, False),
 }
 
 
-def profile_options(profile, host_os, sdl=False, windows_shadow=False):
+def profile_options(profile, host_os, sdl=False, windows_shadow=None):
     """-D switches that distinguish minimal from full (beyond channels)."""
     shadow, proxy, sample, tools = FULL_PLATFORM.get(
         host_os, (False, False, False, False))
-    # Opt-in: upstream can build the Windows shadow server (DXGI capture) but
-    # marks the subsystem "unmaintained" and its own CI ships WITH_SHADOW=OFF,
-    # so it is off by default here. --with-windows-shadow turns it on as a
-    # best-effort extra. (macOS still cannot: "no longer compiles".)
-    if windows_shadow and host_os == "Windows":
-        shadow = True
+    # Windows shadow (DXGI capture) is on by default (FULL_PLATFORM) but
+    # upstream marks it unmaintained; windows_shadow=False force-disables it.
+    # macOS can never build it ("no longer compiles").
+    if host_os == "Windows" and windows_shadow is False:
+        shadow = False
     want_client, want_server = PROFILE_SIDES[profile]
     if profile == "full":
         opts = [
@@ -362,12 +363,12 @@ def profile_options(profile, host_os, sdl=False, windows_shadow=False):
     ]
 
 
-def expected_libs(profile, host_os, windows_shadow=False):
+def expected_libs(profile, host_os, windows_shadow=None):
     """Library families that must exist after the build, per platform."""
     libs = list(EXPECTED_LIBS[profile])
     shadow = FULL_PLATFORM.get(host_os, (False,))[0]
-    if windows_shadow and host_os == "Windows":
-        shadow = True
+    if host_os == "Windows" and windows_shadow is False:
+        shadow = False
     if profile == "full" and not shadow:
         libs = [l for l in libs if l != "freerdp-shadow"]
     # uwac (Wayland client backend) is built with WITH_WAYLAND, i.e. the
@@ -774,7 +775,7 @@ def media_channels(deps_prefix, host_os, target="host"):
 def cmake_options_for(profile, host_os, enable_channels=None,
                       disable_channels=None, channels_enabled=True,
                       deps_prefix=None, executables=False, sdl=False,
-                      windows_shadow=False):
+                      windows_shadow=None):
     """
     Return the list of -D CMake options for the given build profile.
 
@@ -1016,7 +1017,7 @@ def deps_env(deps_prefix, cross=False):
 def build_host(src, prefix, jobs, profile, enable_channels=None,
                disable_channels=None, channels_enabled=True, arch="host",
                deps_prefix=None, executables=False, with_krb5=None,
-               windows_shadow=False):
+               windows_shadow=None):
     require_tools(["cmake", "git"])
     host_os = platform.system()
     if host_os != "Windows" and arch not in (None, "", "host"):
@@ -1040,7 +1041,7 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
                              channels_enabled=channels_enabled,
                              deps_prefix=deps_prefix, executables=executables,
                              sdl=sdl, windows_shadow=windows_shadow)
-    build_host.windows_shadow = windows_shadow and host_os == "Windows"
+    build_host.windows_shadow = windows_shadow
     opts += host_dependency_probe(host_os, arch, deps_prefix)
     krb_opts, krb_libdir = krb5_options(profile, host_os, "host", with_krb5)
     opts += krb_opts
@@ -1775,7 +1776,7 @@ def bundle_unix_runtime_deps(out_dir, deps_prefix, roots=None,
                                        "@rpath/" + os.path.basename(f), f])
 
 
-def expected_executables(profile, host_os, windows_shadow=False):
+def expected_executables(profile, host_os, windows_shadow=None):
     """
     Executables the full profile MUST produce on this platform (server tools
     the user asked to always have). Failure to stage any of these fails the
@@ -1784,8 +1785,8 @@ def expected_executables(profile, host_os, windows_shadow=False):
     if profile != "full" or host_os not in ("Linux", "Darwin", "Windows"):
         return []
     shadow, proxy, sample, tools = FULL_PLATFORM[host_os]
-    if windows_shadow and host_os == "Windows":
-        shadow = True
+    if host_os == "Windows" and windows_shadow is False:
+        shadow = False
     exe = []
     if sample:
         exe += ["sfreerdp-server"]        # sample RDP server
@@ -2462,12 +2463,18 @@ def main():
                         "media (both). Selects build/deps/<label>-<edition> "
                         "for --deps-prefix auto. Default: media for the full "
                         "profile, standard for the others.")
-    p.add_argument("--with-windows-shadow", action="store_true",
-                   help="Windows only, best-effort: also build the shadow "
-                        "server (freerdp-shadow-cli, DXGI screen capture). "
-                        "Upstream marks this subsystem unmaintained and its "
-                        "CI ships it off, so it is opt-in and not guaranteed "
-                        "to work. No effect on other platforms.")
+    p.add_argument("--with-windows-shadow", dest="with_windows_shadow",
+                   action="store_true", default=None,
+                   help="Force-build the Windows shadow server. It is already "
+                        "on by default in the full profile; this only matters "
+                        "to re-enable it in a script that passed "
+                        "--no-windows-shadow. No effect off Windows.")
+    p.add_argument("--no-windows-shadow", dest="with_windows_shadow",
+                   action="store_false",
+                   help="Windows only: do NOT build the shadow server "
+                        "(freerdp-shadow3 / -subsystem3 / -cli). Use this if "
+                        "the upstream-unmaintained DXGI subsystem fails to "
+                        "compile on your toolchain.")
     p.add_argument("--with-krb5", dest="with_krb5", action="store_true",
                    default=None,
                    help="Force Kerberos on (Linux: default anyway; macOS: uses "

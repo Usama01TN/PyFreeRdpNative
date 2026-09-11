@@ -68,7 +68,7 @@ encoded once in `FULL_PLATFORM` in `build_freerdp.py`:
 |---|---|---|---|---|---|
 | Linux | yes (X11 subsystem) | yes | yes | yes | xfreerdp, wlfreerdp, sdl-freerdp (if SDL3) |
 | macOS | **no** - upstream: "Mac shadow server implementation no longer compiles" | yes | yes | yes | sdl-freerdp (brew sdl3 + sdl3_ttf) |
-| Windows | opt-in via `--with-windows-shadow` (dispatch input `windows_shadow`); DXGI capture, upstream-unmaintained, off by default | yes | yes | yes | wfreerdp, sdl-freerdp (vcpkg sdl3 + sdl3-ttf) |
+| Windows | **on by default** (DXGI capture; upstream marks it unmaintained). Disable with `--no-windows-shadow` / untick the `windows_shadow` dispatch input | yes | yes | yes | wfreerdp, sdl-freerdp (vcpkg sdl3 + sdl3-ttf) |
 | Android | no | no | no | no | none (libraries only; media + channels included) |
 | iOS | no | no | no | no | none (static libraries only; no libusb - no USB host API) |
 
