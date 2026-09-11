@@ -74,9 +74,9 @@ on:
         type: choice
         options: [all, standard, ffmpeg, openh264, media]
       windows_shadow:
-        description: "Best-effort: also build the (unmaintained) Windows shadow server"
+        description: "Build the Windows shadow server (on by default; untick to skip the unmaintained DXGI subsystem)"
         required: false
-        default: false
+        default: true
         type: boolean
       enable_channels:
         description: "Extra channels to enable, space separated (e.g. 'urbdrc printer')"
@@ -112,7 +112,8 @@ env:
   FREERDP_REF: ${{ inputs.freerdp_ref || '3.16.0' }}
   PROFILES: ${{ inputs.profiles || 'both' }}
   EDITIONS: ${{ inputs.editions || 'all' }}
-  WINDOWS_SHADOW: ${{ inputs.windows_shadow && 'yes' || 'no' }}
+  # Default (non-dispatch triggers, and the ticked box) is to build it.
+  WINDOWS_SHADOW: ${{ (inputs.windows_shadow == null || inputs.windows_shadow) && 'yes' || 'no' }}
   ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
 
 jobs:
@@ -216,7 +217,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 17
+            python scripts/$s.py --require-version 18
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -345,8 +346,10 @@ jobs:
           if [ "${{ matrix.edition }}" != "standard" ] || [ "$RUNNER_OS" = "Windows" ]; then
             args="$args --deps-prefix build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}"
           fi
-          if [ "$RUNNER_OS" = "Windows" ] && [ "$WINDOWS_SHADOW" = "yes" ] && [ "${{ matrix.profile }}" = "full" ]; then
-            args="$args --with-windows-shadow"
+          # Windows shadow is on by default in the full profile; only pass a
+          # flag to turn it OFF when the dispatch box was unticked.
+          if [ "$RUNNER_OS" = "Windows" ] && [ "$WINDOWS_SHADOW" = "no" ]; then
+            args="$args --no-windows-shadow"
           fi
           python scripts/build_freerdp.py \
             --target host \
@@ -563,7 +566,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 17
+            python scripts/$s.py --require-version 18
           done
 
       - name: Install host tools
@@ -853,7 +856,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 17
+            python scripts/$s.py --require-version 18
           done
 
       - name: Install host tools
