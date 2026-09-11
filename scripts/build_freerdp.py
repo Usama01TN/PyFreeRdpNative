@@ -258,7 +258,7 @@ CHANNELS = {
     "rdpear":   dict(type="dynamic", client=True,  server=False, default=False,
                      note="Kerberos/NTLM remote credential guard; optional "
                           "krb5 dep, upstream default OFF"),
-    "rdp2tcp":  dict(type="static",  client=True,  server=False, default=True,
+    "rdp2tcp":  dict(type="static",  client=True,  server=False, default=False,
                      note="TCP tunnelling over a static channel, upstream "
                           "default OFF"),
     "sshagent": dict(type="dynamic", client=True,  server=False, default=False,
@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 15
+BUILD_SCRIPT_VERSION = 17
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -374,6 +374,11 @@ def expected_libs(profile, host_os, windows_shadow=False):
     # full profile on Linux only.
     if profile == "full" and host_os == "Linux":
         libs.append("uwac")
+    # WITH_SHADOW builds two libraries: the server core (freerdp-shadow) and
+    # its capture backend (freerdp-shadow-subsystem). "freerdp-shadow" alone
+    # substring-matches the subsystem too, so require it explicitly.
+    if shadow and profile == "full":
+        libs.append("freerdp-shadow-subsystem")
     return libs
 
 
@@ -1770,6 +1775,34 @@ def bundle_unix_runtime_deps(out_dir, deps_prefix, roots=None,
                                        "@rpath/" + os.path.basename(f), f])
 
 
+def expected_executables(profile, host_os, windows_shadow=False):
+    """
+    Executables the full profile MUST produce on this platform (server tools
+    the user asked to always have). Failure to stage any of these fails the
+    build, so a silently-dropped WITH_SAMPLE/WITH_PROXY/WITH_SHADOW is caught.
+    """
+    if profile != "full" or host_os not in ("Linux", "Darwin", "Windows"):
+        return []
+    shadow, proxy, sample, tools = FULL_PLATFORM[host_os]
+    if windows_shadow and host_os == "Windows":
+        shadow = True
+    exe = []
+    if sample:
+        exe += ["sfreerdp-server"]        # sample RDP server
+        exe += ["sfreerdp"]               # sample RDP client (client/Sample)
+    if proxy:
+        exe += ["freerdp-proxy"]          # RDP proxy server
+    if shadow:
+        exe += ["freerdp-shadow-cli"]     # shadow / screen-sharing server
+    if tools:
+        exe += ["winpr-makecert", "winpr-hash"]
+    if host_os == "Linux":
+        exe += ["xfreerdp", "wlfreerdp"]  # X11 + Wayland clients
+    elif host_os == "Windows":
+        exe += ["wfreerdp"]               # native Windows client
+    return exe
+
+
 # Executables we know how to smoke-test. Anything else in bin/ is shipped
 # too, this list just drives validate_build.py.
 KNOWN_EXECUTABLES = ("xfreerdp", "wlfreerdp", "sdl-freerdp", "wfreerdp",
@@ -1896,6 +1929,26 @@ def soname_only(artifacts):
                      if os.path.exists(os.path.join(os.path.dirname(rp), soname))
                      else rp, sub))
     return keep
+
+
+def verify_executables(staged, out_dir, profile, host_os, windows_shadow=False):
+    """After staging: every executable the full profile promises is present."""
+    want = expected_executables(profile, host_os, windows_shadow)
+    if not want:
+        return
+    exts = (".exe",) if host_os == "Windows" else ("",)
+    have = set()
+    search = [os.path.dirname(out_dir)]  # _bin sits next to _libs
+    for d in (os.path.join(os.path.dirname(out_dir), "_bin"), out_dir):
+        if os.path.isdir(d):
+            have |= set(os.path.splitext(f)[0] for f in os.listdir(d))
+    missing = [e for e in want if e not in have]
+    if missing:
+        raise SystemExit(
+            "\nfull profile must ship these executables on {0} but they were "
+            "not staged: {1}\nStaged: {2}".format(
+                host_os, missing, sorted(have)))
+    print("[verify] executables present: {0}".format(want))
 
 
 def install_into_package(artifacts, arch="host", deps_prefix=None,
@@ -2548,8 +2601,12 @@ def main():
             compact=(args.profile != "full"),
             krb5_libdir=getattr(build_host, "krb5_libdir", None))
         if args.with_executables:
-            stage_executables([prefix] + ([deps_prefix] if deps_prefix else []),
-                              out, deps_prefix=deps_prefix, arch=args.arch)
+            staged = stage_executables(
+                [prefix] + ([deps_prefix] if deps_prefix else []),
+                out, deps_prefix=deps_prefix, arch=args.arch)
+            if not args.skip_verify:
+                verify_executables(staged, out, args.profile, host_os,
+                                   windows_shadow=args.with_windows_shadow)
         if not args.skip_verify:
             verify_loadable(out, args.profile, arch=args.arch)
             if deps_media_available(deps_prefix):
