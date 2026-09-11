@@ -210,7 +210,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 9
+            python scripts/$s.py --require-version 10
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -554,7 +554,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 9
+            python scripts/$s.py --require-version 10
           done
 
       - name: Install host tools
@@ -772,10 +772,15 @@ jobs:
             if (Test-Path "$libs\ffmpeg.exe") {
               & "$libs\ffmpeg.exe" -hide_banner -version | Select-Object -First 1
               if ($LASTEXITCODE -ne 0) { throw "ffmpeg does not run" }
+              # vcpkg's ffmpeg has no libavdevice (lavfi): feed a raw YUV clip.
+              python -c "import sys; w,h,n=320,240,25; f=open(sys.argv[1],'wb'); [f.write(bytes(((x+y+3*i)&255) for y in range(h) for x in range(w))+bytes([128])*(w*h//2)) for i in range(n)]" "$dest\src.yuv"
               $enc = if (Test-Path "$libs\openh264*.dll") { "libopenh264" } else { "mjpeg" }
               $fmt = if ($enc -eq "libopenh264") { "h264" } else { "mjpeg" }
-              & "$libs\ffmpeg.exe" -hide_banner -y -f lavfi -i "testsrc2=size=320x240:rate=25" -frames:v 25 -pix_fmt yuv420p -c:v $enc -f $fmt "$dest\test.$fmt"
+              $pix = if ($enc -eq "libopenh264") { "yuv420p" } else { "yuvj420p" }
+              & "$libs\ffmpeg.exe" -hide_banner -y -f rawvideo -pix_fmt yuv420p -s 320x240 -r 25 -i "$dest\src.yuv" -frames:v 25 -pix_fmt $pix -c:v $enc -f $fmt "$dest\test.$fmt"
               if ($LASTEXITCODE -ne 0) { throw "ffmpeg $enc encode failed" }
+              & "$libs\ffprobe.exe" -v error -count_frames -show_entries stream=codec_name,nb_read_frames -of csv=p=0 "$dest\test.$fmt"
+              if ($LASTEXITCODE -ne 0) { throw "ffprobe failed to read back the encoded stream" }
             }
             if (Test-Path "$libs\wfreerdp.exe") {
               & "$libs\wfreerdp.exe" /version
@@ -835,7 +840,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 9
+            python scripts/$s.py --require-version 10
           done
 
       - name: Install host tools
