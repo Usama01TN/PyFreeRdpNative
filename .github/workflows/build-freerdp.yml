@@ -210,7 +210,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 10
+            python scripts/$s.py --require-version 11
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -554,7 +554,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 10
+            python scripts/$s.py --require-version 11
           done
 
       - name: Install host tools
@@ -782,6 +782,10 @@ jobs:
               & "$libs\ffprobe.exe" -v error -count_frames -show_entries stream=codec_name,nb_read_frames -of csv=p=0 "$dest\test.$fmt"
               if ($LASTEXITCODE -ne 0) { throw "ffprobe failed to read back the encoded stream" }
             }
+            if (Test-Path "$libs\sfreerdp.exe") {
+              & "$libs\sfreerdp.exe" /version
+              if ($LASTEXITCODE -ne 0) { throw "sfreerdp (sample client) does not run" }
+            }
             if (Test-Path "$libs\wfreerdp.exe") {
               & "$libs\wfreerdp.exe" /version
               & "$libs\winpr-makecert.exe" -rdp -silent -path $dest -n test
@@ -840,7 +844,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 10
+            python scripts/$s.py --require-version 11
           done
 
       - name: Install host tools
