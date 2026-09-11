@@ -73,6 +73,11 @@ on:
         default: "all"
         type: choice
         options: [all, standard, ffmpeg, openh264, media]
+      windows_shadow:
+        description: "Best-effort: also build the (unmaintained) Windows shadow server"
+        required: false
+        default: false
+        type: boolean
       enable_channels:
         description: "Extra channels to enable, space separated (e.g. 'urbdrc printer')"
         required: false
@@ -107,6 +112,7 @@ env:
   FREERDP_REF: ${{ inputs.freerdp_ref || '3.16.0' }}
   PROFILES: ${{ inputs.profiles || 'both' }}
   EDITIONS: ${{ inputs.editions || 'all' }}
+  WINDOWS_SHADOW: ${{ inputs.windows_shadow && 'yes' || 'no' }}
   ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
 
 jobs:
@@ -210,7 +216,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 14
+            python scripts/$s.py --require-version 15
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -338,6 +344,9 @@ jobs:
           # Windows the standard edition also uses it (OpenSSL/zlib/cJSON).
           if [ "${{ matrix.edition }}" != "standard" ] || [ "$RUNNER_OS" = "Windows" ]; then
             args="$args --deps-prefix build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}"
+          fi
+          if [ "$RUNNER_OS" = "Windows" ] && [ "$WINDOWS_SHADOW" = "yes" ] && [ "${{ matrix.profile }}" = "full" ]; then
+            args="$args --with-windows-shadow"
           fi
           python scripts/build_freerdp.py \
             --target host \
@@ -554,7 +563,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 14
+            python scripts/$s.py --require-version 15
           done
 
       - name: Install host tools
@@ -844,7 +853,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 14
+            python scripts/$s.py --require-version 15
           done
 
       - name: Install host tools
