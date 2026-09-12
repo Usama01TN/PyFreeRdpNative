@@ -56,7 +56,7 @@ SYS = platform.system()
 EXT = {"Windows": ".dll", "Darwin": ".dylib"}.get(SYS, ".so")
 
 # Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
-BUILD_SCRIPT_VERSION = 19
+BUILD_SCRIPT_VERSION = 20
 
 
 RESULTS = []
@@ -729,17 +729,39 @@ def check_libusb(bins, libs):
 # executables
 # ---------------------------------------------------------------------------
 
+# FreeRDP CLIs exit with COMMAND_LINE_STATUS_PRINT_VERSION (-2003) or
+# _PRINT_HELP (-2004) after doing exactly what was asked. POSIX shells
+# truncate that to a byte (45 / 44); Windows reports the full 32-bit value
+# (4294965293 / 4294965292). normalize_rc() folds all of those to the signed
+# value so one list of acceptable codes works on every platform.
+CLI_PRINT_VERSION = -2003
+CLI_PRINT_HELP = -2004
+FREERDP_CLI_OK = (0, CLI_PRINT_VERSION, CLI_PRINT_HELP)
+
+
+def normalize_rc(rc):
+    """Signed 32-bit view of a process exit status, with the POSIX
+    single-byte truncation of FreeRDP's negative statuses undone."""
+    if rc > 0x7FFFFFFF:
+        rc -= 0x100000000
+    if 0 < rc < 256:
+        for status in (CLI_PRINT_VERSION, CLI_PRINT_HELP):
+            if rc == status & 0xFF:
+                return status
+    return rc
+
+
 # name -> (args, acceptable return codes, required substring in output)
 EXE_SMOKE = {
-    "xfreerdp":           (["/version"], (0,), "FreeRDP"),
-    "wlfreerdp":          (["/version"], (0,), "FreeRDP"),
-    "sdl-freerdp":        (["/version"], (0,), "FreeRDP"),
-    "wfreerdp":           (["/version"], (0,), "FreeRDP"),
-    "sfreerdp":           (["/version"], (0,), "FreeRDP"),   # client/Sample
+    "xfreerdp":           (["/version"], FREERDP_CLI_OK, "FreeRDP"),
+    "wlfreerdp":          (["/version"], FREERDP_CLI_OK, "FreeRDP"),
+    "sdl-freerdp":        (["/version"], FREERDP_CLI_OK, "FreeRDP"),
+    "wfreerdp":           (["/version"], FREERDP_CLI_OK, "FreeRDP"),
+    "sfreerdp":           (["/version"], FREERDP_CLI_OK, "FreeRDP"),   # client/Sample
     # FreeRDP CLIs return COMMAND_LINE_STATUS_PRINT_VERSION (-2003 -> 45 as
     # an exit byte) after printing the version.
-    "freerdp-shadow-cli": (["/version"], (0, 45), "FreeRDP"),
-    "freerdp-proxy":      (["--help"], (0, 1), "proxy"),
+    "freerdp-shadow-cli": (["/version"], FREERDP_CLI_OK, "FreeRDP"),
+    "freerdp-proxy":      (["--help"], (0, 1) + FREERDP_CLI_OK, "proxy"),
     "winpr-hash":         (["-u", "user", "-p", "pass"], (0,), ""),
     "ffmpeg":             (["-version"], (0,), "ffmpeg"),
     "ffprobe":            (["-version"], (0,), "ffprobe"),
@@ -842,6 +864,7 @@ def check_executables(bins, libs, tmp):
             continue
         args, codes, needle = spec
         rc, out = run([p] + args, env=env, timeout=60)
+        rc = normalize_rc(rc)
         if rc not in codes or (needle and needle.lower() not in out.lower()):
             detail = out.strip()[-300:]
             if SYS == "Windows" and rc & 0xFFFFFFFF == 0xC0000135:
