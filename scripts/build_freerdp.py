@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 27
+BUILD_SCRIPT_VERSION = 28
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -2689,6 +2689,22 @@ def build_ios_app(src, jobs, ios_platform="OS64", sign=False):
     return install_dir
 
 
+def resolve_source(args):
+    """
+    The FreeRDP source tree to build from: --source-dir if given (validated),
+    otherwise a shallow clone of --ref into the temp dir. Returns None if
+    --source-dir is not a FreeRDP checkout.
+    """
+    if args.source_dir:
+        src = os.path.abspath(args.source_dir)
+        if not os.path.isfile(os.path.join(src, "CMakeLists.txt")):
+            sys.stderr.write("Not a FreeRDP source tree: {0}\n".format(src))
+            return None
+        return src
+    return fetch_source(args.ref, os.path.join(tempfile.gettempdir(),
+                                               "pyfreerdp-build"))
+
+
 def main():
     p = argparse.ArgumentParser(description="Build FreeRDP for pyfreerdp")
     p.add_argument("--ref", default=DEFAULT_REF, help="Git ref to build")
@@ -2836,7 +2852,9 @@ def main():
         # The mobile apps are self-contained super-builds: they compile
         # FreeRDP and every dependency themselves, so channel/edition/deps
         # resolution does not apply to them.
-        src = fetch_source(args.ref, args.source_dir)
+        src = resolve_source(args)
+        if src is None:
+            return 2
         if args.target == "android-apk":
             build_android_apk(src, args.jobs,
                               abis=[args.abi] if args.abi else None,
@@ -2895,15 +2913,9 @@ def main():
     else:
         print("[pyfreerdp-build] channels: disabled (--no-channels)")
 
-    if args.source_dir:
-        src = os.path.abspath(args.source_dir)
-        if not os.path.isfile(os.path.join(src, "CMakeLists.txt")):
-            sys.stderr.write(
-                "Not a FreeRDP source tree: {0}\n".format(src))
-            return 2
-    else:
-        work = os.path.join(tempfile.gettempdir(), "pyfreerdp-build")
-        src = fetch_source(args.ref, work)
+    src = resolve_source(args)
+    if src is None:
+        return 2
 
     if args.target == "host":
         print_linux_dep_hint(args.profile, args.enable_channel)
