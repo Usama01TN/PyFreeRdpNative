@@ -46,7 +46,7 @@ if (Test-Path $ver_script) {
 } elseif ($env:PYFREERDP_FREERDP_REF) {
     $FREERDP_VERSION = $env:PYFREERDP_FREERDP_REF
 } else {
-    $FREERDP_VERSION = "3.16.0"
+    $FREERDP_VERSION = "3.31.1"
 }
 Write-Host "[before_all_windows] FREERDP_VERSION=$FREERDP_VERSION"
 
