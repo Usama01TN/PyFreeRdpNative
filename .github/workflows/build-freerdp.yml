@@ -1040,15 +1040,39 @@ jobs:
           python scripts/build_freerdp.py --target android-apk \
             --ref "$FREERDP_REF" --jobs "$(nproc)"
 
-      - name: Inspect the APK
+      - name: Inspect and verify the APKs
         run: |
+          set -e
           ls -lh build/android-apk/
+          # Newest build-tools has apksigner/aapt2.
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          echo "build-tools: $BT"
+          {
+            echo "| APK | ABI(s) | minSdk | signed |"
+            echo "|---|---|---|---|"
+          } > /tmp/apk-table.md
+          fail=0
           for apk in build/android-apk/*.apk; do
-            echo "=== $apk"
-            unzip -l "$apk" | grep -E "lib/.*\.so|AndroidManifest" | head -20
-            unzip -l "$apk" | grep -qE "lib/.*/libfreerdp-android[0-9]*\.so|lib/.*/libfreerdp" \
-              || { echo "::error::$apk contains no FreeRDP native library"; exit 1; }
+            name=$(basename "$apk")
+            echo "=== $name"
+            abis=$(unzip -l "$apk" | sed -n "s|.*lib/\([^/]*\)/.*|\1|p" | sort -u | paste -sd, -)
+            [ -n "$abis" ] || { echo "::error::$name has no native libraries"; fail=1; }
+            unzip -l "$apk" | grep -qE "lib/.*/libfreerdp" \
+              || { echo "::error::$name contains no FreeRDP native library"; fail=1; }
+            minsdk=$("$BT/aapt2" dump badging "$apk" 2>/dev/null \
+                     | sed -n "s/.*sdkVersion:'\([0-9]*\)'.*/\1/p" | head -1)
+            if "$BT/apksigner" verify --print-certs "$apk" >/tmp/sig.txt 2>&1; then
+              signed=yes
+              grep -m1 "Signer #1 certificate DN" /tmp/sig.txt || true
+            else
+              signed="NO"
+              echo "::error::$name is not correctly signed and will fail to install"
+              fail=1
+            fi
+            echo "| \`$name\` | ${abis:-none} | ${minsdk:-?} | $signed |" >> /tmp/apk-table.md
           done
+          cat /tmp/apk-table.md
+          test "$fail" = 0
 
       - name: Upload APK
         id: upload
@@ -1077,6 +1101,11 @@ jobs:
             echo "### aFreeRDP APK — FreeRDP $FREERDP_REF"
             echo
             echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+            echo
+            cat /tmp/apk-table.md
+            echo
+            echo "Install \`aFreeRDP-universal-release.apk\` if unsure which ABI your device uses."
+            echo "These are signed with a build-generated key, so uninstall any existing aFreeRDP first."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
