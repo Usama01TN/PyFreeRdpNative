@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 28
+BUILD_SCRIPT_VERSION = 29
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -1078,6 +1078,35 @@ def deps_env(deps_prefix, cross=False):
     return env
 
 
+def _patch_ios_openh264_flags(src):
+    """
+    client/iOS/cmake/ExternalOpenH264.cmake builds OpenH264 with
+
+        set(IOS_FLAGS "ENABLEPIC=Yes OS=ios ARCH=arm64 SDK_MIN=...")
+        BUILD_COMMAND make ${IOS_FLAGS} ...
+
+    A quoted CMake string is a single list element, so make receives the
+    whole thing as ONE argument and OS=ios / ARCH=arm64 never take effect -
+    OpenH264 is then built for the host instead of iOS. Turning the string
+    into a real list (semicolons) passes them as separate arguments.
+    """
+    path = os.path.join(src, "client", "iOS", "cmake", "ExternalOpenH264.cmake")
+    if not os.path.isfile(path):
+        return
+    with open(path) as fh:
+        text = fh.read()
+    import re
+    m = re.search(r'set\(IOS_FLAGS "([^"]+)"\)', text)
+    if not m:
+        return                      # already a list, or upstream changed it
+    as_list = ";".join(m.group(1).split())
+    text = text.replace(m.group(0), "set(IOS_FLAGS {0})".format(as_list), 1)
+    with open(path, "w") as fh:
+        fh.write(text)
+    print("[patch] client/iOS ExternalOpenH264: IOS_FLAGS -> list ({0})".format(
+        as_list))
+
+
 def patch_source_tree(src, host_os, profile, windows_shadow=None):
     """
     Fix upstream bugs in the fetched FreeRDP tree that would otherwise make a
@@ -1092,6 +1121,9 @@ def patch_source_tree(src, host_os, profile, windows_shadow=None):
        compile; named vs nameless unions have identical layout, so mixing
        the two across translation units is ABI-safe.
     """
+    if host_os == "iOS-app":
+        _patch_ios_openh264_flags(src)
+        return
     if host_os != "Windows" or profile != "full" or windows_shadow is False:
         return
     path = os.path.join(src, "server", "shadow", "Win", "CMakeLists.txt")
@@ -2562,8 +2594,38 @@ def verify_media_linked(out_dir, deps_prefix=None):
 # opus, jpeg, png, webp, uriparser) from source via ExternalProject. They do
 # not consume pyfreerdp/_libs or build/deps, so they are separate targets.
 
+def ensure_apk_keystore(store, alias, store_pw, key_pw):
+    """
+    Gradle's release signing config needs a keystore. Upstream defaults to
+    the literal string "~/.android/debug.keystore", which Gradle does not
+    expand - it resolves inside the module directory and the build fails
+    with "Keystore file ... not found". Create a self-signed one if the
+    caller did not supply a real keystore.
+    """
+    store = os.path.abspath(os.path.expanduser(store))
+    if os.path.isfile(store):
+        print("[apk] signing with existing keystore {0}".format(store))
+        return store
+    if not have("keytool"):
+        raise SystemExit("keytool not found (install a JDK) - needed to "
+                         "create a signing keystore for the release APK.")
+    d = os.path.dirname(store)
+    if d and not os.path.isdir(d):
+        os.makedirs(d)
+    print("[apk] creating a self-signed keystore at {0}\n"
+          "      (fine for sideloading/CI; use --apk-keystore for a real "
+          "release key)".format(store))
+    run(["keytool", "-genkeypair", "-v", "-keystore", store,
+         "-storepass", store_pw, "-keypass", key_pw, "-alias", alias,
+         "-keyalg", "RSA", "-keysize", "2048", "-validity", "10000",
+         "-dname", "CN=pyfreerdp, OU=CI, O=pyfreerdp, C=US"])
+    return store
+
+
 def build_android_apk(src, jobs, abis=None, release_props=None,
-                      build_type="Release"):
+                      build_type="Release", keystore=None,
+                      key_alias="androiddebugkey", store_password="android",
+                      key_password="android"):
     """
     Build the aFreeRDP APK from client/Android/Studio with Gradle.
 
@@ -2582,6 +2644,15 @@ def build_android_apk(src, jobs, abis=None, release_props=None,
         raise SystemExit("Set ANDROID_HOME (or ANDROID_SDK_ROOT) to the "
                          "Android SDK to build the APK.")
     props = dict(release_props or {})
+    if build_type == "Release":
+        store = ensure_apk_keystore(
+            keystore or os.path.join(repo_root(), "build", "android-apk",
+                                     "pyfreerdp-release.keystore"),
+            key_alias, store_password, key_password)
+        props.setdefault("RELEASE_STORE_FILE", store)
+        props.setdefault("RELEASE_KEY_ALIAS", key_alias)
+        props.setdefault("RELEASE_STORE_PASSWORD", store_password)
+        props.setdefault("RELEASE_KEY_PASSWORD", key_password)
     if abis:
         props.setdefault("ABI_FILTERS", ";".join(abis))
         props.setdefault("SPLIT_ARCHITECTURES", ";".join(abis))
@@ -2611,9 +2682,11 @@ def build_android_apk(src, jobs, abis=None, release_props=None,
         cwd=studio, env=env)
 
     out = os.path.join(repo_root(), "build", "android-apk")
-    if os.path.isdir(out):
-        shutil.rmtree(out)
-    os.makedirs(out)
+    if not os.path.isdir(out):
+        os.makedirs(out)
+    for fn in os.listdir(out):          # keep the keystore, drop old packages
+        if fn.endswith((".apk", ".aab")):
+            os.remove(os.path.join(out, fn))
     apks = []
     for root, _dirs, files in os.walk(os.path.join(studio, "aFreeRDP",
                                                    "build", "outputs")):
@@ -2644,6 +2717,7 @@ def build_ios_app(src, jobs, ios_platform="OS64", sign=False):
     ios_src = os.path.join(src, "client", "iOS")
     if not os.path.isdir(ios_src):
         raise SystemExit("client/iOS missing from this FreeRDP ref")
+    patch_source_tree(src, "iOS-app", "full")
     require_tools(["cmake", "xcodebuild"])
     build_dir = os.path.join(src, "build-ios-app-{0}".format(ios_platform))
     if os.path.exists(build_dir):
@@ -2754,6 +2828,13 @@ def main():
     p.add_argument("--apk-build-type", default="Release",
                    choices=("Release", "Debug"),
                    help="android-apk only: gradle assemble<Type>.")
+    p.add_argument("--apk-keystore", metavar="FILE",
+                   help="android-apk: keystore for the release signing "
+                        "config. A self-signed one is generated when this is "
+                        "omitted (suitable for sideloading, not for Play).")
+    p.add_argument("--apk-key-alias", default="androiddebugkey")
+    p.add_argument("--apk-store-password", default="android")
+    p.add_argument("--apk-key-password", default="android")
     p.add_argument("--sign-ios-app", action="store_true",
                    help="ios-app only: let Xcode code-sign the bundle "
                         "(needs a provisioning profile). Off by default so "
@@ -2859,7 +2940,11 @@ def main():
             build_android_apk(src, args.jobs,
                               abis=[args.abi] if args.abi else None,
                               release_props={"VERSION_NAME": args.ref},
-                              build_type=args.apk_build_type)
+                              build_type=args.apk_build_type,
+                              keystore=args.apk_keystore,
+                              key_alias=args.apk_key_alias,
+                              store_password=args.apk_store_password,
+                              key_password=args.apk_key_password)
         else:
             build_ios_app(src, args.jobs, ios_platform=args.ios_platform,
                           sign=args.sign_ios_app)
