@@ -75,7 +75,7 @@ class BuildWithFreeRDP(build_py):
             if not path.isfile(script):
                 raise SystemExit(
                     "Build script missing at {0}".format(script))
-            ref = os.environ.get("PYFREERDP_FREERDP_REF", "3.16.0")
+            ref = os.environ.get("PYFREERDP_FREERDP_REF", "3.31.1")
             cmd = [sys.executable, script,
                    "--ref", ref, "--target", "host"]
             subprocess.check_call(cmd)
