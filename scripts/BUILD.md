@@ -147,6 +147,26 @@ including telemetry, rdpemsc and rdpecam. `--list-channels` prints the table;
 `--ios-platform` and `--abi` select mobile targets. `--deps-prefix auto`
 resolves to `build/deps/<label>` for the current target.
 
+## AAD / Entra ID login WebView
+
+The SDL client can open the Azure AD (Entra ID) login page in an embedded
+browser (`WITH_WEBVIEW`). It is enabled automatically in the **full** profile
+wherever `sdl-freerdp` is built and a backend exists:
+
+| Platform | Backend | Extra build dependency |
+|---|---|---|
+| Linux | WebKitGTK | `libgtk-3-dev`, `libwebkit2gtk-4.1-dev` (probed with pkg-config) |
+| macOS | WebKit (WKWebView) | none - system framework |
+| Windows | Edge WebView2 | none - loader fetched by the webview library |
+
+The webview library itself is pulled in by CMake `FetchContent` at configure
+time, so the build host needs network access. Disable with `--no-webview`;
+force on with `--with-webview`. The minimal profile never builds it.
+
+**`WITH_WEBVIEW_QT` does not exist in FreeRDP 3.16.0** - it is a newer
+upstream option. If you move to a FreeRDP version that has it, it would be a
+one-line addition next to `WITH_WEBVIEW` in `profile_options()`.
+
 ## Kerberos
 
 Kerberos authentication (NLA with a domain account, SSO) goes through winpr's

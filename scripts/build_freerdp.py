@@ -258,7 +258,7 @@ CHANNELS = {
     "rdpear":   dict(type="dynamic", client=True,  server=False, default=False,
                      note="Kerberos/NTLM remote credential guard; optional "
                           "krb5 dep, upstream default OFF"),
-    "rdp2tcp":  dict(type="static",  client=True,  server=False, default=True,
+    "rdp2tcp":  dict(type="static",  client=True,  server=False, default=False,
                      note="TCP tunnelling over a static channel, upstream "
                           "default OFF"),
     "sshagent": dict(type="dynamic", client=True,  server=False, default=False,
@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 20
+BUILD_SCRIPT_VERSION = 21
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -315,7 +315,8 @@ FULL_PLATFORM = {
 }
 
 
-def profile_options(profile, host_os, sdl=False, windows_shadow=None):
+def profile_options(profile, host_os, sdl=False, windows_shadow=None,
+                    webview=None):
     """-D switches that distinguish minimal from full (beyond channels)."""
     shadow, proxy, sample, tools = FULL_PLATFORM.get(
         host_os, (False, False, False, False))
@@ -351,6 +352,10 @@ def profile_options(profile, host_os, sdl=False, windows_shadow=None):
                      "-DWITH_WIN_CONSOLE=ON"]
         if want_client and host_os in ("Linux", "Darwin", "Windows"):
             opts.append("-DWITH_CLIENT_SDL={0}".format("ON" if sdl else "OFF"))
+            # WITH_WEBVIEW only has an effect inside the SDL client.
+            use_webview = sdl and (webview if webview is not None
+                                   else webview_available(host_os))
+            opts.append("-DWITH_WEBVIEW={0}".format("ON" if use_webview else "OFF"))
         return opts
     # minimal / client-only / server-only: small.
     return [
@@ -358,6 +363,7 @@ def profile_options(profile, host_os, sdl=False, windows_shadow=None):
         "-DWITH_CLIENT_WINDOWS=OFF",
         "-DWITH_SHADOW=OFF", "-DWITH_PROXY=OFF", "-DWITH_PROXY_MODULES=OFF",
         "-DWITH_SAMPLE=OFF", "-DWITH_WINPR_TOOLS=OFF", "-DWITH_MANPAGES=OFF",
+        "-DWITH_WEBVIEW=OFF",
         "-DWITH_VERBOSE_WINPR_ASSERT=OFF", "-DWITH_CLIENT_SDL=OFF",
         "-DBUILD_TESTING=OFF",
     ]
@@ -381,6 +387,25 @@ def expected_libs(profile, host_os, windows_shadow=None):
     if shadow and profile == "full":
         libs.append("freerdp-shadow-subsystem")
     return libs
+
+
+# WebView backends the FreeRDP 3.16 SDL client can use for the AAD/Entra ID
+# login popup (client/SDL/common/aad, option WITH_WEBVIEW). The webview
+# library itself is pulled in with FetchContent at configure time, so the
+# build host needs network access. NB: WITH_WEBVIEW_QT does not exist in
+# 3.16.0 - it is a newer upstream addition.
+LINUX_WEBVIEW_PC = ("webkit2gtk-4.1", "webkit2gtk-4.0", "webkitgtk-6.0")
+
+
+def webview_available(host_os):
+    """Can the SDL client's AAD WebView be built on this platform?"""
+    if host_os == "Linux":
+        return any(_pkg_config_has(pc) for pc in LINUX_WEBVIEW_PC)
+    if host_os == "Darwin":
+        return True          # WKWebView from the system WebKit framework
+    if host_os == "Windows":
+        return True          # Edge WebView2 (loader fetched by the webview lib)
+    return False
 
 
 def sdl_available(host_os, deps_prefix=None):
@@ -775,7 +800,7 @@ def media_channels(deps_prefix, host_os, target="host"):
 def cmake_options_for(profile, host_os, enable_channels=None,
                       disable_channels=None, channels_enabled=True,
                       deps_prefix=None, executables=False, sdl=False,
-                      windows_shadow=None):
+                      windows_shadow=None, webview=None):
     """
     Return the list of -D CMake options for the given build profile.
 
@@ -818,7 +843,7 @@ def cmake_options_for(profile, host_os, enable_channels=None,
         "-DWITH_SERVER={0}".format("ON" if want_server else "OFF"),
     ]
     opts += profile_options(profile, host_os, sdl=sdl,
-                            windows_shadow=windows_shadow)
+                            windows_shadow=windows_shadow, webview=webview)
 
     if host_os == "Linux":
         # X11/Wayland only matter for the xfreerdp/wlfreerdp executables;
@@ -1057,7 +1082,7 @@ def patch_source_tree(src, host_os, profile, windows_shadow=None):
 def build_host(src, prefix, jobs, profile, enable_channels=None,
                disable_channels=None, channels_enabled=True, arch="host",
                deps_prefix=None, executables=False, with_krb5=None,
-               windows_shadow=None):
+               windows_shadow=None, webview=None):
     require_tools(["cmake", "git"])
     host_os = platform.system()
     if host_os != "Windows" and arch not in (None, "", "host"):
@@ -1076,12 +1101,19 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
     if profile == "full":
         print("[build] SDL3 client: {0}".format(
             "yes" if sdl else "no (SDL3 + SDL3_ttf not found)"))
+        want_wv = webview if webview is not None else webview_available(host_os)
+        if sdl:
+            print("[build] AAD WebView: {0}".format(
+                "yes" if want_wv else "no (no WebKit/WebView2 backend found)"))
+        elif want_wv:
+            print("[build] AAD WebView: skipped (needs the SDL client)")
     opts = cmake_options_for(profile, host_os=host_os,
                              enable_channels=enable_channels,
                              disable_channels=disable_channels,
                              channels_enabled=channels_enabled,
                              deps_prefix=deps_prefix, executables=executables,
-                             sdl=sdl, windows_shadow=windows_shadow)
+                             sdl=sdl, windows_shadow=windows_shadow,
+                             webview=webview)
     build_host.windows_shadow = windows_shadow
     opts += host_dependency_probe(host_os, arch, deps_prefix)
     krb_opts, krb_libdir = krb5_options(profile, host_os, "host", with_krb5)
@@ -2504,6 +2536,17 @@ def main():
                         "media (both). Selects build/deps/<label>-<edition> "
                         "for --deps-prefix auto. Default: media for the full "
                         "profile, standard for the others.")
+    p.add_argument("--with-webview", dest="webview", action="store_true",
+                   default=None,
+                   help="Force the SDL client's AAD/Entra ID login WebView on "
+                        "(WITH_WEBVIEW). Enabled automatically in the full "
+                        "profile wherever a backend exists: WebKitGTK on "
+                        "Linux, WebKit on macOS, Edge WebView2 on Windows. "
+                        "The webview library is fetched at configure time, so "
+                        "the host needs network access. (WITH_WEBVIEW_QT does "
+                        "not exist in FreeRDP 3.16.)")
+    p.add_argument("--no-webview", dest="webview", action="store_false",
+                   help="Build the SDL client without the AAD login WebView.")
     p.add_argument("--with-windows-shadow", dest="with_windows_shadow",
                    action="store_true", default=None,
                    help="Force-build the Windows shadow server. It is already "
@@ -2635,7 +2678,8 @@ def main():
                    channels_enabled=channels_enabled, arch=args.arch,
                    deps_prefix=deps_prefix, executables=args.with_executables,
                    with_krb5=args.with_krb5,
-                   windows_shadow=args.with_windows_shadow)
+                   windows_shadow=args.with_windows_shadow,
+                   webview=args.webview)
         artifacts = collect_host_artifacts(prefix)
         if not artifacts:
             sys.stderr.write(
