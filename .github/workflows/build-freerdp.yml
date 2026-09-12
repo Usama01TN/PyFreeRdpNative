@@ -217,7 +217,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 23
+            python scripts/$s.py --require-version 25
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -574,7 +574,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 23
+            python scripts/$s.py --require-version 25
           done
 
       - name: Install host tools
@@ -615,16 +615,18 @@ jobs:
           make -j"$(nproc)" build_libs
           make install_sw
 
+      # Every edition needs a dependency prefix on mobile: winpr requires a
+      # JSON library from FreeRDP 3.31 on, and it must be cross-built (cJSON)
+      # rather than picked up from the host.
       - name: Cache dependency prefix
         id: deps-cache
-        if: matrix.edition != 'standard'
         uses: actions/cache@v4
         with:
           path: build/deps/android-${{ matrix.abi }}-${{ matrix.edition }}
           key: deps-v3-android-${{ matrix.abi }}-${{ matrix.edition }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}-${{ hashFiles('scripts/build_deps.py') }}
 
       - name: Build dependencies (${{ matrix.edition }})
-        if: matrix.edition != 'standard' && steps.deps-cache.outputs.cache-hit != 'true'
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           sudo apt-get install -y --no-install-recommends nasm
           python scripts/build_deps.py --target android --abi ${{ matrix.abi }} \
@@ -638,8 +640,7 @@ jobs:
             -DOPENSSL_ROOT_DIR=${{ github.workspace }}/openssl-android-${{ matrix.abi }}
             -DCMAKE_FIND_ROOT_PATH=${{ github.workspace }}/openssl-android-${{ matrix.abi }}
         run: |
-          args="--edition ${{ matrix.edition }}"
-          if [ "${{ matrix.edition }}" != "standard" ]; then args="$args --deps-prefix build/deps/android-${{ matrix.abi }}-${{ matrix.edition }}"; fi
+          args="--edition ${{ matrix.edition }} --deps-prefix build/deps/android-${{ matrix.abi }}-${{ matrix.edition }}"
           python scripts/build_freerdp.py \
             --target android --abi ${{ matrix.abi }} --api-level ${API_LEVEL} \
             --ref "$FREERDP_REF" --profile ${{ matrix.profile }} --jobs "$(nproc)" $args
@@ -864,7 +865,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 23
+            python scripts/$s.py --require-version 25
           done
 
       - name: Install host tools
@@ -897,16 +898,17 @@ jobs:
           make install_dev
           lipo -info "$GITHUB_WORKSPACE/openssl-ios-${{ matrix.platform }}/lib/libssl.a"
 
+      # Every edition needs a dependency prefix on mobile (cross-built cJSON
+      # for winpr's JSON support; see the Android job).
       - name: Cache dependency prefix
         id: deps-cache
-        if: matrix.edition != 'standard'
         uses: actions/cache@v4
         with:
           path: build/deps/ios-${{ matrix.platform }}-${{ matrix.edition }}
           key: deps-v3-ios-${{ matrix.platform }}-${{ matrix.edition }}-xcode${{ hashFiles('/Applications/Xcode.app/Contents/version.plist') }}-${{ hashFiles('scripts/build_deps.py') }}
 
       - name: Build dependencies (${{ matrix.edition }}, static)
-        if: matrix.edition != 'standard' && steps.deps-cache.outputs.cache-hit != 'true'
+        if: steps.deps-cache.outputs.cache-hit != 'true'
         run: |
           brew install nasm
           python scripts/build_deps.py --target ios --ios-platform ${{ matrix.platform }} \
@@ -920,8 +922,7 @@ jobs:
             -DCMAKE_FIND_ROOT_PATH=${{ github.workspace }}/openssl-ios-${{ matrix.platform }}
             -DCMAKE_PREFIX_PATH=${{ github.workspace }}/openssl-ios-${{ matrix.platform }}
         run: |
-          args="--edition ${{ matrix.edition }}"
-          if [ "${{ matrix.edition }}" != "standard" ]; then args="$args --deps-prefix build/deps/ios-${{ matrix.platform }}-${{ matrix.edition }}"; fi
+          args="--edition ${{ matrix.edition }} --deps-prefix build/deps/ios-${{ matrix.platform }}-${{ matrix.edition }}"
           python scripts/build_freerdp.py \
             --target ios --ios-platform ${{ matrix.platform }} \
             --ref "$FREERDP_REF" --profile ${{ matrix.profile }} --jobs "$(sysctl -n hw.ncpu)" $args
