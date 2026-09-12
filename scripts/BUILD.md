@@ -155,7 +155,7 @@ wherever `sdl-freerdp` is built and a backend exists:
 
 | Platform | Backend | Extra build dependency |
 |---|---|---|
-| Linux | WebKitGTK | `libgtk-3-dev`, `libwebkit2gtk-4.1-dev` (probed with pkg-config) |
+| Linux | WebKitGTK | `libgtk-3-dev`, `libwebkit2gtk-4.1-dev` (probed with pkg-config) — and an SDL client, see below |
 | macOS | WebKit (WKWebView) | none - system framework |
 | Windows | Edge WebView2 | none - loader fetched by the webview library |
 

@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 21
+BUILD_SCRIPT_VERSION = 22
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -409,13 +409,27 @@ def webview_available(host_os):
 
 
 def sdl_available(host_os, deps_prefix=None):
-    """SDL3 + SDL3_ttf present? (pkg-config on Unix, vcpkg tree on Windows)"""
+    """
+    Which SDL the sdl-freerdp client can be built against: "sdl3", "sdl2" or
+    False. FreeRDP 3.16 prefers SDL3 and keeps a deprecated SDL2 client as a
+    fallback (client/SDL/CMakeLists.txt auto-detects both); distributions
+    older than SDL3 - Ubuntu 24.04, for instance - only ship SDL2.
+    """
     if host_os == "Windows":
         if not deps_prefix:
             return False
-        return bool(glob.glob(os.path.join(deps_prefix, "lib", "SDL3*.lib"))
-                    and glob.glob(os.path.join(deps_prefix, "lib", "SDL3_ttf*.lib")))
-    return _pkg_config_has("sdl3") and _pkg_config_has("sdl3-ttf")
+        def has(stem):
+            return bool(glob.glob(os.path.join(deps_prefix, "lib", stem)))
+        if has("SDL3*.lib") and has("SDL3_ttf*.lib"):
+            return "sdl3"
+        if has("SDL2*.lib") and has("SDL2_ttf*.lib"):
+            return "sdl2"
+        return False
+    if _pkg_config_has("sdl3") and _pkg_config_has("sdl3-ttf"):
+        return "sdl3"
+    if _pkg_config_has("sdl2") and _pkg_config_has("SDL2_ttf"):
+        return "sdl2"
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1099,8 +1113,9 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
     patch_source_tree(src, host_os, profile, windows_shadow)
     sdl = profile == "full" and sdl_available(host_os, deps_prefix)
     if profile == "full":
-        print("[build] SDL3 client: {0}".format(
-            "yes" if sdl else "no (SDL3 + SDL3_ttf not found)"))
+        print("[build] SDL client: {0}".format(
+            "{0} (deprecated upstream)".format(sdl) if sdl == "sdl2"
+            else sdl if sdl else "no (neither SDL3 nor SDL2 + ttf found)"))
         want_wv = webview if webview is not None else webview_available(host_os)
         if sdl:
             print("[build] AAD WebView: {0}".format(
