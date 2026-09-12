@@ -29,7 +29,7 @@ echo "[before_all_macos] OPENSSL_PREFIX=${OPENSSL_PREFIX}"
 if [ -x "${PROJECT_DIR}/.github/cibw-scripts/get_freerdp_version.sh" ]; then
   FREERDP_VERSION=$("${PROJECT_DIR}/.github/cibw-scripts/get_freerdp_version.sh")
 else
-  FREERDP_VERSION="${PYFREERDP_FREERDP_REF:-3.16.0}"
+  FREERDP_VERSION="${PYFREERDP_FREERDP_REF:-3.31.1}"
 fi
 echo "[before_all_macos] FREERDP_VERSION=${FREERDP_VERSION}"
 
