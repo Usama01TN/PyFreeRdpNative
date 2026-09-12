@@ -13,6 +13,37 @@ from pinned sources:
 Everything is driven by `.github/workflows/build-freerdp.yml` (all platforms,
 artifacts + optional release) and `ci.yml` (Linux, every push/PR).
 
+## Mobile applications (aFreeRDP APK / iFreeRDP.app)
+
+Separate from the library matrix, two targets build FreeRDP's own mobile
+clients. Both are **self-contained super-builds**: their Gradle/CMake projects
+compile FreeRDP *and* every dependency (OpenSSL, FFmpeg, OpenH264, cJSON,
+opus, jpeg, png, webp, uriparser) from source, so they ignore
+`build/deps/` and `pyfreerdp/_libs` entirely — and take up to an hour each.
+
+```bash
+# aFreeRDP APK  (needs a JDK and ANDROID_HOME; the NDK comes from the SDK
+# manager at the version client/Android/Studio/build.gradle asks for)
+python scripts/build_freerdp.py --target android-apk --ref 3.31.1
+#   -> build/android-apk/*.apk   (per-ABI splits + a universal APK)
+
+# iFreeRDP app  (macOS + Xcode)
+python scripts/build_freerdp.py --target ios-app --ios-platform OS64
+#   -> build/ios-app/OS64/iFreeRDP.app
+```
+
+Options: `--abi` narrows the APK's ABI list, `--apk-build-type Debug` builds
+the debug variant, `--ios-platform SIMULATORARM64` targets the simulator, and
+`--sign-ios-app` lets Xcode sign the bundle (needs a provisioning profile).
+
+The iOS bundle is **unsigned by default** so it builds on a runner with no
+signing identity; sign it before installing on a device. In FreeRDP 3.28+ the
+iOS client is a standalone project — there is no `WITH_CLIENT_IOS` option any
+more, which is why this is its own target rather than a library-build flag.
+
+In CI both run as the `android-apk` and `ios-app` jobs, controlled by the
+`mobile_apps` dispatch input (on by default).
+
 ## Editions (media stack)
 
 Every platform x architecture is built in four editions, selected with

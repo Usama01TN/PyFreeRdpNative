@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 26
+BUILD_SCRIPT_VERSION = 27
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -2553,12 +2553,149 @@ def verify_media_linked(out_dir, deps_prefix=None):
         ", ".join(sorted(present))))
 
 
+# ---------------------------------------------------------------------------
+# Mobile applications (aFreeRDP APK / iFreeRDP.app)
+# ---------------------------------------------------------------------------
+#
+# Both are self-contained "super-builds": their own CMake/Gradle projects
+# compile FreeRDP *and* every dependency (OpenSSL, FFmpeg, OpenH264, cJSON,
+# opus, jpeg, png, webp, uriparser) from source via ExternalProject. They do
+# not consume pyfreerdp/_libs or build/deps, so they are separate targets.
+
+def build_android_apk(src, jobs, abis=None, release_props=None,
+                      build_type="Release"):
+    """
+    Build the aFreeRDP APK from client/Android/Studio with Gradle.
+
+    Needs a JDK and the Android SDK (ANDROID_HOME / ANDROID_SDK_ROOT). The
+    NDK version is whatever client/Android/Studio/build.gradle asks for, so
+    it is installed by the SDK manager rather than taken from our own NDK
+    probe. Settings are passed through release.properties, which that
+    build.gradle reads from the project directory.
+    """
+    studio = os.path.join(src, "client", "Android", "Studio")
+    if not os.path.isdir(studio):
+        raise SystemExit("client/Android/Studio missing from this FreeRDP ref")
+    sdk = (os.environ.get("ANDROID_HOME")
+           or os.environ.get("ANDROID_SDK_ROOT"))
+    if not sdk or not os.path.isdir(sdk):
+        raise SystemExit("Set ANDROID_HOME (or ANDROID_SDK_ROOT) to the "
+                         "Android SDK to build the APK.")
+    props = dict(release_props or {})
+    if abis:
+        props.setdefault("ABI_FILTERS", ";".join(abis))
+        props.setdefault("SPLIT_ARCHITECTURES", ";".join(abis))
+    if props:
+        path = os.path.join(studio, "release.properties")
+        with open(path, "w") as fh:
+            for k, v in sorted(props.items()):
+                fh.write("{0}={1}\n".format(k, v))
+        print("[apk] release.properties:\n  " +
+              "\n  ".join("{0}={1}".format(k, v) for k, v in sorted(props.items())))
+
+    env = dict(os.environ)
+    env["ANDROID_HOME"] = sdk
+    env.setdefault("ANDROID_SDK_ROOT", sdk)
+    gradlew = os.path.join(studio, "gradlew")
+    if os.path.isfile(gradlew):
+        os.chmod(gradlew, 0o755)
+        cmd = [gradlew]
+    elif have("gradle"):
+        cmd = ["gradle"]
+    else:
+        raise SystemExit("neither ./gradlew nor gradle found")
+    task = "assemble{0}".format(build_type)
+    run(cmd + ["--no-daemon", "--console=plain",
+               "-Dorg.gradle.jvmargs=-Xmx4g",
+               "--parallel", "--max-workers={0}".format(jobs), task],
+        cwd=studio, env=env)
+
+    out = os.path.join(repo_root(), "build", "android-apk")
+    if os.path.isdir(out):
+        shutil.rmtree(out)
+    os.makedirs(out)
+    apks = []
+    for root, _dirs, files in os.walk(os.path.join(studio, "aFreeRDP",
+                                                   "build", "outputs")):
+        for fn in files:
+            if fn.endswith((".apk", ".aab")):
+                dst = os.path.join(out, fn)
+                shutil.copy2(os.path.join(root, fn), dst)
+                apks.append(dst)
+                print("[apk] {0}".format(dst))
+    if not apks:
+        raise SystemExit("gradle reported success but produced no .apk")
+    print("[apk] {0} package(s) in {1}".format(len(apks), out))
+    return out
+
+
+def build_ios_app(src, jobs, ios_platform="OS64", sign=False):
+    """
+    Build the iFreeRDP iOS application from client/iOS.
+
+    In FreeRDP 3.28+ this is a standalone super-build project (there is no
+    WITH_CLIENT_IOS option any more): it configures FreeRDP and all its
+    dependencies itself. Code signing is off by default so the build works
+    on a CI runner with no provisioning profile; the resulting .app is
+    unsigned and has to be signed before it can run on a device.
+    """
+    if platform.system() != "Darwin":
+        raise SystemExit("iOS app builds require macOS + Xcode.")
+    ios_src = os.path.join(src, "client", "iOS")
+    if not os.path.isdir(ios_src):
+        raise SystemExit("client/iOS missing from this FreeRDP ref")
+    require_tools(["cmake", "xcodebuild"])
+    build_dir = os.path.join(src, "build-ios-app-{0}".format(ios_platform))
+    if os.path.exists(build_dir):
+        shutil.rmtree(build_dir)
+    install_dir = os.path.join(repo_root(), "build", "ios-app", ios_platform)
+    if not os.path.isdir(install_dir):
+        os.makedirs(install_dir)
+    sim = ios_platform.startswith("SIMULATOR")
+    arch = "x86_64" if ios_platform == "SIMULATOR64" else "arm64"
+    cfg = ["cmake", "-S", ios_src, "-B", build_dir, "-G", "Xcode",
+           "-DCMAKE_SYSTEM_NAME=iOS",
+           "-DCMAKE_OSX_ARCHITECTURES={0}".format(arch),
+           "-DCMAKE_OSX_SYSROOT={0}".format(
+               "iphonesimulator" if sim else "iphoneos"),
+           "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0",
+           "-DCMAKE_INSTALL_PREFIX={0}".format(install_dir),
+           "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"]
+    if not sign:
+        cfg += ["-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO",
+                "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO",
+                "-DCMAKE_XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY="]
+    extra = os.environ.get("PYFREERDP_EXTRA_CMAKE", "").split()
+    cfg = dedupe_defines(cfg + extra)
+    print("[ios-app] building iFreeRDP for {0} ({1}, {2})".format(
+        ios_platform, arch, "signed" if sign else "unsigned"))
+    run(cfg)
+    run(["cmake", "--build", build_dir, "--config", "Release",
+         "--parallel", str(jobs)])
+    apps = []
+    for root, dirs, _files in os.walk(build_dir):
+        for d in list(dirs):
+            if d.endswith(".app"):
+                dst = os.path.join(install_dir, d)
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst)
+                shutil.copytree(os.path.join(root, d), dst, symlinks=True)
+                apps.append(dst)
+                dirs.remove(d)
+    if not apps:
+        raise SystemExit("the iOS build produced no .app bundle")
+    for a in apps:
+        print("[ios-app] {0}".format(a))
+    return install_dir
+
+
 def main():
     p = argparse.ArgumentParser(description="Build FreeRDP for pyfreerdp")
     p.add_argument("--ref", default=DEFAULT_REF, help="Git ref to build")
     p.add_argument("--prefix", default=None,
                    help="Install prefix for host builds (default: temp dir)")
-    p.add_argument("--target", choices=("host", "android", "ios"),
+    p.add_argument("--target",
+                   choices=("host", "android", "ios", "android-apk", "ios-app"),
                    default="host")
     p.add_argument("--profile",
                    choices=("full", "client-only", "server-only", "minimal"),
@@ -2598,6 +2735,13 @@ def main():
                         "runner's own). x86/arm64 cross-compile with the "
                         "Visual Studio generator and the matching vcpkg "
                         "triplet.")
+    p.add_argument("--apk-build-type", default="Release",
+                   choices=("Release", "Debug"),
+                   help="android-apk only: gradle assemble<Type>.")
+    p.add_argument("--sign-ios-app", action="store_true",
+                   help="ios-app only: let Xcode code-sign the bundle "
+                        "(needs a provisioning profile). Off by default so "
+                        "CI can build an unsigned .app.")
     p.add_argument("--ios-platform", default="OS64", choices=IOS_PLATFORMS,
                    help="iOS only: OS64 = arm64 device (default), "
                         "SIMULATORARM64 = arm64 simulator, "
@@ -2684,8 +2828,24 @@ def main():
 
     print("[pyfreerdp-build] target={0} profile={1} ref={2} jobs={3}".format(
         args.target, args.profile, args.ref, args.jobs))
+    app_target = args.target in ("android-apk", "ios-app")
     host_os = {"host": platform.system(), "android": "Android",
-               "ios": "iOS"}[args.target]
+               "ios": "iOS", "android-apk": "Android",
+               "ios-app": "iOS"}[args.target]
+    if app_target:
+        # The mobile apps are self-contained super-builds: they compile
+        # FreeRDP and every dependency themselves, so channel/edition/deps
+        # resolution does not apply to them.
+        src = fetch_source(args.ref, args.source_dir)
+        if args.target == "android-apk":
+            build_android_apk(src, args.jobs,
+                              abis=[args.abi] if args.abi else None,
+                              release_props={"VERSION_NAME": args.ref},
+                              build_type=args.apk_build_type)
+        else:
+            build_ios_app(src, args.jobs, ios_platform=args.ios_platform,
+                          sign=args.sign_ios_app)
+        return 0
     channels_enabled = not args.no_channels
     # Profile defaults: full pulls in the media deps and the executables
     # unless told otherwise; minimal never does.
