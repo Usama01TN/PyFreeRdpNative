@@ -2,7 +2,7 @@
 # Resolve the most recent stable FreeRDP release tag from GitHub.
 #
 # Stable = matches /^[0-9]+\.[0-9]+\.[0-9]+$/. Excludes RCs, betas, and
-# the rolling 'master' branch. Prints the tag (e.g. "3.16.0") to stdout.
+# the rolling 'master' branch. Prints the tag (e.g. "3.31.1") to stdout.
 #
 # If the GitHub API is unreachable or rate-limited (commonly happens in
 # CI when no GITHUB_TOKEN is set), falls back to PYFREERDP_FREERDP_REF
@@ -12,7 +12,7 @@
 #   FREERDP_VERSION=$(./.github/cibw-scripts/get_freerdp_version.sh)
 set -euo pipefail
 
-FALLBACK_VERSION="3.16.0"
+FALLBACK_VERSION="3.31.1"
 
 # Prefer caller's explicit pin if they set one.
 if [ -n "${PYFREERDP_FREERDP_REF:-}" ]; then
