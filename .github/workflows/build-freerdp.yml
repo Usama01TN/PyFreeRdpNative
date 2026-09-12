@@ -73,6 +73,11 @@ on:
         default: "all"
         type: choice
         options: [all, standard, ffmpeg, openh264, media]
+      mobile_apps:
+        description: "Also build the aFreeRDP APK and the iFreeRDP iOS app"
+        required: false
+        default: true
+        type: boolean
       windows_shadow:
         description: "Build the Windows shadow server (on by default; untick to skip the unmaintained DXGI subsystem)"
         required: false
@@ -114,6 +119,7 @@ env:
   EDITIONS: ${{ inputs.editions || 'all' }}
   # Default (non-dispatch triggers, and the ticked box) is to build it.
   WINDOWS_SHADOW: ${{ (inputs.windows_shadow == null || inputs.windows_shadow) && 'yes' || 'no' }}
+  MOBILE_APPS: ${{ (inputs.mobile_apps == null || inputs.mobile_apps) && 'yes' || 'no' }}
   ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
 
 jobs:
@@ -217,7 +223,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 26
+            python scripts/$s.py --require-version 27
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -574,7 +580,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 26
+            python scripts/$s.py --require-version 27
           done
 
       - name: Install host tools
@@ -865,7 +871,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 26
+            python scripts/$s.py --require-version 27
           done
 
       - name: Install host tools
@@ -1000,12 +1006,167 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
+  # aFreeRDP (Android APK). client/Android/Studio is a Gradle project whose
+  # CMake build compiles FreeRDP and every dependency (OpenSSL, FFmpeg,
+  # OpenH264, cJSON, opus, jpeg, png, webp, uriparser) from source, so it is
+  # independent of the library matrix above - and correspondingly slow.
+  # ---------------------------------------------------------------------------
+  android-apk:
+    name: aFreeRDP APK
+    if: ${{ (inputs.mobile_apps == null || inputs.mobile_apps) }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check build scripts are the expected version
+        shell: bash
+        run: |
+          for s in build_freerdp build_deps validate_build; do
+            python scripts/$s.py --require-version 27
+          done
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build the APK
+        run: |
+          python scripts/build_freerdp.py --target android-apk \
+            --ref "$FREERDP_REF" --jobs "$(nproc)"
+
+      - name: Inspect the APK
+        run: |
+          ls -lh build/android-apk/
+          for apk in build/android-apk/*.apk; do
+            echo "=== $apk"
+            unzip -l "$apk" | grep -E "lib/.*\.so|AndroidManifest" | head -20
+            unzip -l "$apk" | grep -qE "lib/.*/libfreerdp-android[0-9]*\.so|lib/.*/libfreerdp" \
+              || { echo "::error::$apk contains no FreeRDP native library"; exit 1; }
+          done
+
+      - name: Upload APK
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: afreerdp-apk-${{ env.FREERDP_REF }}
+          path: build/android-apk/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-android-apk
+          path: |
+            build/diagnostics/
+            client/Android/Studio/**/build/reports/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish artifact link to job summary
+        run: |
+          {
+            echo "### aFreeRDP APK — FreeRDP $FREERDP_REF"
+            echo
+            echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # iFreeRDP (iOS app). client/iOS is a standalone CMake super-build in
+  # FreeRDP 3.28+ (there is no WITH_CLIENT_IOS option any more); it builds
+  # FreeRDP and its dependencies itself. The bundle is left unsigned - a
+  # provisioning profile would be needed to run it on a device.
+  # ---------------------------------------------------------------------------
+  ios-app:
+    name: iFreeRDP app (${{ matrix.platform }})
+    if: ${{ (inputs.mobile_apps == null || inputs.mobile_apps) }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [OS64, SIMULATORARM64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check build scripts are the expected version
+        shell: bash
+        run: |
+          for s in build_freerdp build_deps validate_build; do
+            python scripts/$s.py --require-version 27
+          done
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          cmake --version | head -1
+
+      - name: Build the app
+        run: |
+          python scripts/build_freerdp.py --target ios-app \
+            --ios-platform ${{ matrix.platform }} \
+            --ref "$FREERDP_REF" --jobs "$(sysctl -n hw.ncpu)"
+
+      - name: Inspect the bundle
+        run: |
+          app=$(find build/ios-app -maxdepth 2 -name "*.app" | head -1)
+          test -n "$app" || { echo "::error::no .app produced"; exit 1; }
+          echo "=== $app"
+          ls "$app"
+          bin="$app/$(basename "${app%.app}")"
+          test -f "$bin" && lipo -info "$bin"
+
+      - name: Package the app
+        id: pkg
+        run: |
+          name="ifreerdp-${FREERDP_REF}-${{ matrix.platform }}"
+          mkdir -p out
+          tar -C build/ios-app/${{ matrix.platform }} -czf "out/$name.tar.gz" .
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload app
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: out/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-ios-app-${{ matrix.platform }}
+          path: build/diagnostics/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish artifact link to job summary
+        run: |
+          {
+            echo "### iFreeRDP app (${{ matrix.platform }}, unsigned) — FreeRDP $FREERDP_REF"
+            echo
+            echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
   # Collect every artifact link into one table, and optionally attach the
   # files to a GitHub release so the URLs outlive the 30-day artifact TTL.
   # ---------------------------------------------------------------------------
   links:
     name: artifact links
-    needs: [desktop, android, ios]
+    needs: [desktop, android, ios, android-apk, ios-app]
     if: always() && (needs.desktop.result != 'cancelled')
     runs-on: ubuntu-24.04
     permissions:
