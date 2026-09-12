@@ -223,7 +223,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 28
+            python scripts/$s.py --require-version 29
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -580,7 +580,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 28
+            python scripts/$s.py --require-version 29
           done
 
       - name: Install host tools
@@ -871,7 +871,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 28
+            python scripts/$s.py --require-version 29
           done
 
       - name: Install host tools
@@ -1026,7 +1026,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 28
+            python scripts/$s.py --require-version 29
           done
       - uses: actions/setup-java@v4
         with:
@@ -1067,6 +1067,7 @@ jobs:
           path: |
             build/diagnostics/
             client/Android/Studio/**/build/reports/
+            /tmp/pyfreerdp-build/FreeRDP/client/Android/Studio/**/build/reports/
           if-no-files-found: ignore
           retention-days: 7
 
@@ -1092,7 +1093,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        platform: [OS64, SIMULATORARM64]
+        # Device SDK only: the super-build's OpenH264 step is hardcoded to
+        # OS=ios ARCH=arm64 (iphoneos), so a simulator build would link a
+        # device-SDK static library.
+        platform: [OS64]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -1103,7 +1107,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 28
+            python scripts/$s.py --require-version 29
           done
       - name: Show toolchain
         run: |
@@ -1148,7 +1152,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: diagnostics-ios-app-${{ matrix.platform }}
-          path: build/diagnostics/
+          path: |
+            build/diagnostics/
+            /tmp/pyfreerdp-build/FreeRDP/build-ios-app-*/**/*-stamp/*.log
           if-no-files-found: ignore
           retention-days: 7
 
