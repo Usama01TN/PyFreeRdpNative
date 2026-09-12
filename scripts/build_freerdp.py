@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 23
+BUILD_SCRIPT_VERSION = 25
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -738,6 +738,31 @@ def dedupe_defines(opts):
 
 
 EDITIONS = ("standard", "ffmpeg", "openh264", "media")
+
+
+def deps_has_cjson(deps_prefix):
+    """cJSON cross-built into the deps prefix (see build_deps.py)?"""
+    if not deps_prefix:
+        return False
+    if deps_has(deps_prefix, "libcjson"):
+        return True
+    return bool(glob.glob(os.path.join(deps_prefix, "lib", "cmake", "cJSON*"))
+                or glob.glob(os.path.join(deps_prefix, "lib", "*cjson*")))
+
+
+def json_options(deps_prefix):
+    """
+    winpr needs a JSON library from FreeRDP 3.31 on. Its detection is not
+    confined to the target sysroot, so a cross build otherwise finds the
+    *host* json-c and then fails compiling winpr/utils/json/json-c.c
+    ("json.h not found"). With a cJSON in the deps prefix we force cJSON
+    only - WITH_CJSON_REQUIRED skips the json-c probe entirely and fails
+    loudly if ours is not picked up, instead of silently falling back.
+    """
+    if deps_has_cjson(deps_prefix):
+        return ["-DWITH_JSON_DISABLED=OFF", "-DWITH_CJSON_REQUIRED=ON",
+                "-DWITH_JSONC_REQUIRED=OFF", "-DWITH_JANSSON_REQUIRED=OFF"]
+    return ["-DWITH_JSON_DISABLED=ON"]
 
 
 def deps_has_ffmpeg(deps_prefix):
@@ -2248,6 +2273,7 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
                              disable_channels=disable_channels,
                              channels_enabled=channels_enabled,
                              deps_prefix=deps_prefix)
+    opts += json_options(deps_prefix)
     if deps_prefix:
         # The NDK toolchain restricts find_* to the sysroot.
         opts.append("-DCMAKE_FIND_ROOT_PATH={0}".format(deps_prefix))
@@ -2355,20 +2381,15 @@ def build_ios(src, jobs, profile, enable_channels=None,
                              disable_channels=disable_channels,
                              channels_enabled=channels_enabled,
                              deps_prefix=deps_prefix)
+    opts += json_options(deps_prefix)
     if deps_prefix:
         opts += ["-DCMAKE_FIND_ROOT_PATH={0}".format(deps_prefix),
+                 "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH",
                  "-DWITH_CAIRO=OFF"]
     opts += [
         "-DBUILD_SHARED_LIBS=OFF",          # static archives for iOS
         "-DWITH_CAIRO=OFF",                 # no cairo on iOS
         "-DWITH_CLIENT_IOS=OFF",            # native iOS client is an Xcode app
-        # FreeRDP 3.31+ builds winpr with JSON support (AAD / gateway
-        # config). Its detection is not confined to the target sysroot, so a
-        # cross build happily finds the *host* json-c/cJSON and then fails
-        # compiling winpr/utils/json/json-c.c ("json.h not found"). Mobile
-        # library builds do not need it; override with PYFREERDP_EXTRA_CMAKE
-        # if you cross-build a JSON library into the deps prefix.
-        "-DWITH_JSON_DISABLED=ON",
         "-DWITH_CLIENT_SDL=OFF",
         "-DWITH_PLATFORM_SERVER=OFF",
         "-DWITH_SAMPLE=OFF",

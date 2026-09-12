@@ -83,6 +83,14 @@ SOURCES = {
                "refs/tags/v{version}",
         "dirname": "openh264-{version}",
     },
+    "cjson": {
+        "version": "1.7.18",
+        # winpr's JSON support (FreeRDP 3.31+). Built for the cross targets
+        # so they do not silently pick up the *host* json-c/cJSON.
+        "url": "https://codeload.github.com/DaveGamble/cJSON/tar.gz/"
+               "refs/tags/v{version}",
+        "dirname": "cJSON-{version}",
+    },
     "ffmpeg": {
         "version": "7.1.5",
         "url": "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/"
@@ -95,6 +103,7 @@ SOURCES = {
 # set PYFREERDP_DEPS_SKIP_HASH=1 to bypass when bumping versions, then run
 # with --print-hashes and paste the new values here.
 KNOWN_HASHES = {
+    "cjson-1.7.18": "3aa806844a03442c00769b83e99970be70fbef03735ff898f4811dd03b9f5ee5",
     "libusb-1.0.30": "fea36f34f9156400209595e300840767ab1a385ede1dc7ee893015aea9c6dbaf",
     "openh264-2.6.0": "558544ad358283a7ab2930d69a9ceddf913f4a51ee9bf1bfb9e377322af81a69",
     "ffmpeg-7.1.5": "e3963a50831c985933e1a625ed566ec4c7adb5c012c34fa9f84438e1d61bdacc",
@@ -145,7 +154,7 @@ FFMPEG_COMPONENTS = {
 # ---------------------------------------------------------------------------
 
 # Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
-BUILD_SCRIPT_VERSION = 23
+BUILD_SCRIPT_VERSION = 25
 
 
 def log(msg):
@@ -584,6 +593,47 @@ def build_openh264(tc, work):
                      "@rpath/" + os.path.basename(dylib), dylib])
 
 
+def build_cjson(tc, work):
+    """
+    Cross-build cJSON with CMake. Installs cJSONConfig.cmake + libcjson.pc,
+    which is what FreeRDP's detect_package(cJSON ...) looks for. Static on
+    iOS (no shared libraries in an app bundle), shared elsewhere.
+    """
+    src = fetch_source("cjson", work)
+    build = os.path.join(src, "build-{0}".format(tc.target))
+    if os.path.isdir(build):
+        shutil.rmtree(build)
+    cfg = ["cmake", "-S", src, "-B", build,
+           "-DCMAKE_BUILD_TYPE=Release",
+           "-DCMAKE_INSTALL_PREFIX={0}".format(tc.prefix),
+           "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
+           "-DENABLE_CJSON_TEST=OFF",
+           "-DENABLE_CJSON_UTILS=OFF",
+           "-DBUILD_SHARED_AND_STATIC_LIBS=OFF",
+           "-DBUILD_SHARED_LIBS={0}".format("ON" if tc.shared else "OFF")]
+    if tc.target == "android":
+        cfg += ["-DCMAKE_TOOLCHAIN_FILE={0}".format(
+                    os.path.join(tc.ndk, "build", "cmake",
+                                 "android.toolchain.cmake")),
+                "-DANDROID_ABI={0}".format(tc.abi),
+                "-DANDROID_PLATFORM=android-{0}".format(tc.api_level)]
+    elif tc.target == "ios":
+        # CMake has had native iOS support since 3.14 - no toolchain file
+        # needed, and it keeps the deps build independent of FreeRDP's tree.
+        sim = tc.ios_platform.startswith("SIMULATOR")
+        cfg += ["-DCMAKE_SYSTEM_NAME=iOS",
+                "-DCMAKE_OSX_ARCHITECTURES={0}".format(tc.arch),
+                "-DCMAKE_OSX_SYSROOT={0}".format(
+                    "iphonesimulator" if sim else "iphoneos"),
+                "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0"]
+    if have("ninja"):
+        cfg += ["-G", "Ninja"]
+    run(cfg, env=tc.env)
+    run(["cmake", "--build", build, "--config", "Release",
+         "--parallel", str(tc.jobs)], env=tc.env)
+    run(["cmake", "--install", build, "--config", "Release"], env=tc.env)
+
+
 def build_ffmpeg(tc, work, with_openh264=True):
     if tc.target == "ios" and tc.ios_platform.startswith("SIMULATOR"):
         raise SystemExit("FFmpeg/OpenH264 are built for the iOS device SDK only; "
@@ -867,7 +917,8 @@ def main():
                             args.edition)
         write_manifest(prefix, label, [])
         return 0
-    if args.edition == "standard":
+    cross = args.target in ("android", "ios")
+    if args.edition == "standard" and not cross:
         log("edition standard: no source dependencies to build on this "
             "platform (system OpenSSL is used); nothing to do")
         write_manifest(prefix, label, [])
@@ -876,13 +927,21 @@ def main():
     require_tools(["make", "pkg-config"])
     if args.target == "host" and platform.system() == "Linux":
         require_tools(["cc"])
-    wanted = {"ffmpeg": {"libusb", "ffmpeg"},
+    wanted = {"standard": set(),
+              "ffmpeg": {"libusb", "ffmpeg"},
               "openh264": {"libusb", "openh264"},
               "media": {"libusb", "openh264", "ffmpeg"}}[args.edition]
+    if cross:
+        # winpr needs a JSON library (FreeRDP 3.31+) and must not find the
+        # host's: build cJSON for the target in every edition.
+        wanted = wanted | {"cjson"}
     only = (set(args.only.split(",")) & wanted) if args.only else wanted
     tc = Toolchain(args.target, prefix, args.jobs, abi=args.abi,
                    api_level=args.api_level, ios_platform=args.ios_platform)
     built = []
+    if "cjson" in only:
+        build_cjson(tc, work)
+        built.append("cjson")
     # Order matters: FFmpeg links libopenh264 via pkg-config.
     if "libusb" in only:
         build_libusb(tc, work)
