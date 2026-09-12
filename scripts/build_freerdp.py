@@ -4,7 +4,7 @@ build_freerdp.py - fetch + compile FreeRDP (client + server), copy artifacts
                    into pyfreerdp/_libs/.
 
 Usage:
-    python -m pyfreerdp.scripts.build_freerdp [--ref v3.16.0]
+    python -m pyfreerdp.scripts.build_freerdp [--ref v3.31.1]
                                               [--prefix /opt/freerdp]
                                               [--target {host,android,ios}]
                                               [--abi arm64-v8a]
@@ -79,7 +79,7 @@ import sys
 import tempfile
 
 REPO_URL = "https://github.com/FreeRDP/FreeRDP.git"
-DEFAULT_REF = "3.16.0"
+DEFAULT_REF = "3.31.1"  # old version: "3.16.0"
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +172,7 @@ def fetch_source(ref, dest):
 # ---------------------------------------------------------------------------
 
 # Channel table, taken from channels/*/ChannelOptions.cmake in FreeRDP
-# 3.16.0. Keys are the CMake channel names (CHANNEL_<NAME> after upper()).
+# 3.31.1. Keys are the CMake channel names (CHANNEL_<NAME> after upper()).
 #
 #   type    : "static" (goes over the MCS/static virtual channel layer),
 #             "dynamic" (needs drdynvc), "device" (needs rdpdr).
@@ -389,11 +389,11 @@ def expected_libs(profile, host_os, windows_shadow=None):
     return libs
 
 
-# WebView backends the FreeRDP 3.16 SDL client can use for the AAD/Entra ID
+# WebView backends the FreeRDP 3.31.1 SDL client can use for the AAD/Entra ID
 # login popup (client/SDL/common/aad, option WITH_WEBVIEW). The webview
 # library itself is pulled in with FetchContent at configure time, so the
 # build host needs network access. NB: WITH_WEBVIEW_QT does not exist in
-# 3.16.0 - it is a newer upstream addition.
+# 3.31.1 - it is a newer upstream addition.
 LINUX_WEBVIEW_PC = ("webkit2gtk-4.1", "webkit2gtk-4.0", "webkitgtk-6.0")
 
 
@@ -411,7 +411,7 @@ def webview_available(host_os):
 def sdl_available(host_os, deps_prefix=None):
     """
     Which SDL the sdl-freerdp client can be built against: "sdl3", "sdl2" or
-    False. FreeRDP 3.16 prefers SDL3 and keeps a deprecated SDL2 client as a
+    False. FreeRDP 3.31.1 prefers SDL3 and keeps a deprecated SDL2 client as a
     fallback (client/SDL/CMakeLists.txt auto-detects both); distributions
     older than SDL3 - Ubuntu 24.04, for instance - only ship SDL2.
     """
@@ -805,7 +805,7 @@ def media_channels(deps_prefix, host_os, target="host"):
     if deps_has(deps_prefix, "libusb-1.0") and target != "ios":
         chans.append("urbdrc")
     # rdpecam client: needs swscale and a capture backend; only Linux has
-    # one (V4L) in FreeRDP 3.16. Server side is always on.
+    # one (V4L) in FreeRDP 3.31.1. Server side is always on.
     if host_os == "Linux" and target == "host" and deps_has_ffmpeg(deps_prefix):
         chans.append("rdpecam")
     return chans
@@ -1226,7 +1226,7 @@ def build_sample_client(src, prefix, host_os, arch, deps_prefix, jobs,
     client/CMakeLists.txt only adds it in the non-WIN32 branch (wfreerdp
     takes that slot), so we build it separately. client/Sample supports
     standalone builds via find_package(WinPR/FreeRDP/FreeRDP-Client), but
-    3.16.0 forgets to include InstallFreeRDPDesktop.cmake, which is why
+    3.31.1 forgets to include InstallFreeRDPDesktop.cmake, which is why
     CMAKE_PROJECT_sfreerdp_INCLUDE points at it.
     """
     sample_src = os.path.join(src, "client", "Sample")
@@ -2596,7 +2596,7 @@ def main():
                         "Linux, WebKit on macOS, Edge WebView2 on Windows. "
                         "The webview library is fetched at configure time, so "
                         "the host needs network access. (WITH_WEBVIEW_QT does "
-                        "not exist in FreeRDP 3.16.)")
+                        "not exist in FreeRDP 3.31.1.)")
     p.add_argument("--no-webview", dest="webview", action="store_false",
                    help="Build the SDL client without the AAD login WebView.")
     p.add_argument("--with-windows-shadow", dest="with_windows_shadow",
