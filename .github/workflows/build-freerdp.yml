@@ -217,7 +217,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 21
+            python scripts/$s.py --require-version 22
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -239,9 +239,15 @@ jobs:
               libxfixes-dev libxcursor-dev libxi-dev libxv-dev \
               libxkbfile-dev libxkbcommon-dev \
               libwayland-dev wayland-protocols libpixman-1-dev \
-              libsdl3-dev libsdl3-ttf-dev \
               libgtk-3-dev libwebkit2gtk-4.1-dev \
               nasm libudev-dev libv4l-dev xvfb
+            # Optional: the sdl-freerdp client. SDL3 where the distro has it
+            # (Ubuntu 25.04+), otherwise FreeRDP's deprecated SDL2 client.
+            # Never fail the build over these - the client is a bonus.
+            for pkg in libsdl3-dev libsdl3-ttf-dev libsdl2-dev libsdl2-ttf-dev; do
+              sudo apt-get install -y --no-install-recommends "$pkg" \
+                || echo "::notice::optional package $pkg not available on this runner"
+            done
           fi
           # Optional channel deps, only if the user asked for them.
           extra=""
@@ -568,7 +574,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 21
+            python scripts/$s.py --require-version 22
           done
 
       - name: Install host tools
@@ -858,7 +864,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 21
+            python scripts/$s.py --require-version 22
           done
 
       - name: Install host tools
