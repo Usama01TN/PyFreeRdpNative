@@ -154,7 +154,7 @@ FFMPEG_COMPONENTS = {
 # ---------------------------------------------------------------------------
 
 # Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
-BUILD_SCRIPT_VERSION = 25
+BUILD_SCRIPT_VERSION = 26
 
 
 def log(msg):
@@ -606,6 +606,11 @@ def build_cjson(tc, work):
     cfg = ["cmake", "-S", src, "-B", build,
            "-DCMAKE_BUILD_TYPE=Release",
            "-DCMAKE_INSTALL_PREFIX={0}".format(tc.prefix),
+           # cJSON still declares cmake_minimum_required(VERSION 3.0) (true
+           # as of 1.7.19); CMake 4 refuses anything below 3.5. This is the
+           # escape hatch CMake itself suggests, and it is ignored by older
+           # CMake versions.
+           "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
            "-DCMAKE_POSITION_INDEPENDENT_CODE=ON",
            "-DENABLE_CJSON_TEST=OFF",
            "-DENABLE_CJSON_UTILS=OFF",

@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 25
+BUILD_SCRIPT_VERSION = 26
 
 # ---------------------------------------------------------------------------
 # Build profiles
