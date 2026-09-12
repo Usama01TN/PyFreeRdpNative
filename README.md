@@ -38,7 +38,7 @@ pip install pyfreerdp
 PYFREERDP_BUILD_FREERDP=1 pip install pyfreerdp
 ```
 
-This clones FreeRDP at the pinned tag (3.16.0), runs CMake with **client + server + shadow + proxy** enabled (`--profile=full`), and stages every produced `.so/.dylib/.dll` into the wheel. Takes 5–15 min depending on the host.
+This clones FreeRDP at the pinned tag (3.31.1), runs CMake with **client + server + shadow + proxy** enabled (`--profile=full`), and stages every produced `.so/.dylib/.dll` into the wheel. Takes 5–15 min depending on the host.
 
 ### Option 3 — explicit pre-build with profile selection
 
@@ -214,7 +214,7 @@ ANDROID_NDK_ROOT=/path/to/ndk \
 pyfreerdp-build --target ios
 
 # Pin to a specific FreeRDP version
-pyfreerdp-build --ref 3.16.0 --target host --profile full
+pyfreerdp-build --ref 3.31.1 --target host --profile full
 ```
 
 Output goes to `pyfreerdp/_libs/`:
