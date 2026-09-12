@@ -56,7 +56,7 @@ SYS = platform.system()
 EXT = {"Windows": ".dll", "Darwin": ".dylib"}.get(SYS, ".so")
 
 # Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
-BUILD_SCRIPT_VERSION = 22
+BUILD_SCRIPT_VERSION = 23
 
 
 RESULTS = []

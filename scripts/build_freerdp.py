@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 22
+BUILD_SCRIPT_VERSION = 23
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -1394,13 +1394,24 @@ def collect_host_artifacts(prefix):
                     os.path.basename(p)))
                 continue
             candidates.append((p, ""))
-        # Modules on Windows land next to the exe or in bin/freerdp3/.
+        # Loadable modules on Windows: FREERDP_PLUGIN_PATH is "." there, so
+        # the proxy modules install to <prefix>/proxy/ (Linux uses
+        # lib/freerdp3/proxy/). Search both that and bin/freerdp<N>/.
         bindir = os.path.join(prefix, "bin")
-        for d in glob.glob(os.path.join(bindir, PLUGIN_SUBDIR_GLOB)):
-            if not os.path.isdir(d):
+        module_roots = [(d, bindir) for d in
+                        glob.glob(os.path.join(bindir, PLUGIN_SUBDIR_GLOB))]
+        module_roots += [(d, prefix) for d in
+                         (os.path.join(prefix, "proxy"),
+                          os.path.join(prefix, "extensions"))]
+        module_roots += [(d, prefix) for d in
+                         glob.glob(os.path.join(prefix, PLUGIN_SUBDIR_GLOB))]
+        seen_dirs = set()
+        for d, base in module_roots:
+            if not os.path.isdir(d) or d in seen_dirs:
                 continue
+            seen_dirs.add(d)
             for root, _dirs, files in os.walk(d):
-                rel = os.path.relpath(root, bindir)
+                rel = os.path.relpath(root, base)
                 for fn in files:
                     if fn.lower().endswith(".dll") and not _is_msvc_crt_dll(fn):
                         candidates.append((os.path.join(root, fn), rel))
@@ -2018,6 +2029,32 @@ def soname_only(artifacts):
                      if os.path.exists(os.path.join(os.path.dirname(rp), soname))
                      else rp, sub))
     return keep
+
+
+PROXY_MODULES = ("proxy-bitmap-filter-plugin", "proxy-demo-plugin",
+                 "proxy-dyn-channel-dump-plugin")
+
+
+def verify_proxy_modules(out_dir, profile, host_os):
+    """The proxy ships three loadable modules; make sure they were collected
+    (they install to different directories per platform)."""
+    if profile != "full" or not FULL_PLATFORM.get(host_os, (0, False))[1]:
+        return
+    found = {}
+    for root, _dirs, files in os.walk(out_dir):
+        for fn in files:
+            for mod in PROXY_MODULES:
+                if fn.startswith(mod) or fn.startswith("lib" + mod):
+                    found[mod] = os.path.relpath(os.path.join(root, fn), out_dir)
+    missing = [m for m in PROXY_MODULES if m not in found]
+    if missing:
+        raise SystemExit(
+            "\nproxy modules missing from the package: {0}\n"
+            "They are built with WITH_PROXY_MODULES but install to a "
+            "platform-specific directory; check collect_host_artifacts()."
+            .format(missing))
+    print("[verify] proxy modules: {0}".format(
+        ", ".join(sorted(found.values()))))
 
 
 def verify_executables(staged, out_dir, profile, host_os, windows_shadow=False):
@@ -2714,6 +2751,7 @@ def main():
             if not args.skip_verify:
                 verify_executables(staged, out, args.profile, host_os,
                                    windows_shadow=args.with_windows_shadow)
+                verify_proxy_modules(out, args.profile, host_os)
         if not args.skip_verify:
             verify_loadable(out, args.profile, arch=args.arch)
             if deps_media_available(deps_prefix):
