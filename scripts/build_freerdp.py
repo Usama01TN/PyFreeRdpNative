@@ -2362,6 +2362,13 @@ def build_ios(src, jobs, profile, enable_channels=None,
         "-DBUILD_SHARED_LIBS=OFF",          # static archives for iOS
         "-DWITH_CAIRO=OFF",                 # no cairo on iOS
         "-DWITH_CLIENT_IOS=OFF",            # native iOS client is an Xcode app
+        # FreeRDP 3.31+ builds winpr with JSON support (AAD / gateway
+        # config). Its detection is not confined to the target sysroot, so a
+        # cross build happily finds the *host* json-c/cJSON and then fails
+        # compiling winpr/utils/json/json-c.c ("json.h not found"). Mobile
+        # library builds do not need it; override with PYFREERDP_EXTRA_CMAKE
+        # if you cross-build a JSON library into the deps prefix.
+        "-DWITH_JSON_DISABLED=ON",
         "-DWITH_CLIENT_SDL=OFF",
         "-DWITH_PLATFORM_SERVER=OFF",
         "-DWITH_SAMPLE=OFF",
