@@ -73,6 +73,11 @@ on:
         default: "all"
         type: choice
         options: [all, standard, ffmpeg, openh264, media]
+      apk_abis:
+        description: "Android ABIs for the APK (comma separated, or 'all' to add riscv64)"
+        required: false
+        default: "armeabi-v7a,arm64-v8a,x86,x86_64"
+        type: string
       mobile_apps:
         description: "Also build the aFreeRDP APK and the iFreeRDP iOS app"
         required: false
@@ -223,7 +228,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 31
+            python scripts/$s.py --require-version 32
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -580,7 +585,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 31
+            python scripts/$s.py --require-version 32
           done
 
       - name: Install host tools
@@ -871,7 +876,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 31
+            python scripts/$s.py --require-version 32
           done
 
       - name: Install host tools
@@ -1026,7 +1031,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 31
+            python scripts/$s.py --require-version 32
           done
       - uses: actions/setup-java@v4
         with:
@@ -1038,6 +1043,7 @@ jobs:
       - name: Build the APK
         run: |
           python scripts/build_freerdp.py --target android-apk \
+            --apk-abis "${{ inputs.apk_abis || 'armeabi-v7a,arm64-v8a,x86,x86_64' }}" \
             --ref "$FREERDP_REF" --jobs "$(nproc)"
 
       - name: Inspect and verify the APKs
@@ -1072,6 +1078,10 @@ jobs:
             echo "| \`$name\` | ${abis:-none} | ${minsdk:-?} | $signed |" >> /tmp/apk-table.md
           done
           cat /tmp/apk-table.md
+          # A single-ABI result means the ABI list did not reach gradle.
+          count=$(ls build/android-apk/*.apk | wc -l | tr -d " ")
+          test "$count" -ge 2 || { echo "::error::only $count APK produced - expected per-ABI splits + universal"; fail=1; }
+          ls build/android-apk/ | grep -q universal || echo "::warning::no universal APK was produced"
           test "$fail" = 0
 
       - name: Upload APK
@@ -1136,7 +1146,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 31
+            python scripts/$s.py --require-version 32
           done
       - name: Show toolchain
         run: |
