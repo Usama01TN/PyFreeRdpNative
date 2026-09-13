@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 34
+BUILD_SCRIPT_VERSION = 35
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -988,32 +988,61 @@ WINDOWS_OS_TARGETS = {
 }
 
 
-def windows_os_options(win_target, arch="host"):
-    """-D switches that make a Windows build target an older OS."""
+def windows_os_options(win_target, arch="host", toolset=None):
+    """
+    -D switches that make a Windows build target an older OS.
+
+    There are exactly two routes, because FreeRDP's cmake/MSVCRuntime.cmake
+    refuses a static CRT in a shared build ("Static CRT is only supported in
+    a fully static build"):
+
+      --win-toolset v142 (or v141)
+          Keeps BUILD_SHARED_LIBS=ON and the dynamic CRT, but builds with an
+          older toolset whose redistributable still supports Windows 7/8.1.
+          This is the only route that yields ctypes-loadable DLLs, and it
+          needs those VS build tools installed - GitHub's windows-2022 image
+          ships v143 only.
+
+      no toolset
+          Static CRT, which forces BUILD_SHARED_LIBS=OFF: the result is .lib
+          archives to link into your own application, NOT DLLs. pyfreerdp
+          cannot load these.
+    """
     if not win_target or win_target == "10":
         return []
     sysver, winnt, note = WINDOWS_OS_TARGETS[win_target]
     if host_windows_arch(arch) == "arm64":
         raise SystemExit("--win-target {0} is meaningless for arm64: "
                          "Windows on ARM starts at Windows 10.".format(win_target))
-    print("\n[warn] --win-target {0}: {1}.\n"
-          "       FreeRDP declares no Windows version floor, but this "
-          "configuration is not tested by upstream or by this project, and\n"
-          "       the dependencies in the vcpkg prefix are built for modern "
-          "Windows - rebuild them with a matching toolset\n"
-          "       (VS 2019 / v142 or older) or expect load failures."
-          .format(win_target, note))
-    return [
+    opts = [
         "-DCMAKE_SYSTEM_VERSION={0}".format(sysver),
-        # Static CRT: no vcruntime140.dll dependency, which is what actually
-        # blocks Windows 7/8.1 with a current toolchain.
-        "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>",
         "-DCMAKE_C_FLAGS=/D_WIN32_WINNT={0} /DWINVER={0}".format(winnt),
         "-DCMAKE_CXX_FLAGS=/D_WIN32_WINNT={0} /DWINVER={0}".format(winnt),
-        # The SDL client and the sample/proxy servers pull in newer APIs and
-        # have not been looked at for these systems; keep the build minimal.
+        # SDL3 and the sample/proxy servers are newer code that has not been
+        # looked at for these systems; keep the build minimal.
         "-DWITH_CLIENT_SDL=OFF",
     ]
+    if toolset:
+        print("\n[warn] --win-target {0} with toolset {1}: {2}.\n"
+              "       Shared DLLs with the dynamic CRT of that toolset. "
+              "Untested by upstream and by this project;\n"
+              "       the vcpkg dependencies must be rebuilt with the same "
+              "toolset or the DLLs will still pull in a newer runtime."
+              .format(win_target, toolset, note))
+    else:
+        print("\n[warn] --win-target {0} without --win-toolset: {1}.\n"
+              "       FreeRDP only allows the static CRT in a fully static "
+              "build, so this produces STATIC LIBRARIES (.lib), not DLLs.\n"
+              "       They are usable for linking into your own application; "
+              "pyfreerdp cannot ctypes-load them.\n"
+              "       For loadable DLLs use --win-toolset v142 (VS 2019 build "
+              "tools), whose redistributable supports Windows 7/8.1."
+              .format(win_target, note))
+        opts += [
+            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>",
+            "-DBUILD_SHARED_LIBS=OFF",
+        ]
+    return opts
 
 
 # Windows target architectures: CLI name -> (Visual Studio -A value,
@@ -1249,7 +1278,8 @@ def patch_source_tree(src, host_os, profile, windows_shadow=None):
 def build_host(src, prefix, jobs, profile, enable_channels=None,
                disable_channels=None, channels_enabled=True, arch="host",
                deps_prefix=None, executables=False, with_krb5=None,
-               windows_shadow=None, webview=None, win_target="10"):
+               windows_shadow=None, webview=None, win_target="10",
+               win_toolset=None):
     require_tools(["cmake", "git"])
     host_os = platform.system()
     if host_os != "Windows" and arch not in (None, "", "host"):
@@ -1264,6 +1294,7 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
     os.makedirs(build_dir)
 
     patch_source_tree(src, host_os, profile, windows_shadow)
+    cfg_extra_toolset = []
     sdl = profile == "full" and sdl_available(host_os, deps_prefix)
     if profile == "full":
         print("[build] SDL client: {0}".format(
@@ -1285,7 +1316,9 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
     build_host.windows_shadow = windows_shadow
     opts += host_dependency_probe(host_os, arch, deps_prefix)
     if host_os == "Windows":
-        opts += windows_os_options(win_target, arch)
+        opts += windows_os_options(win_target, arch, win_toolset)
+        if win_toolset:
+            cfg_extra_toolset.append(win_toolset)
     krb_opts, krb_libdir = krb5_options(profile, host_os, "host", with_krb5)
     opts += krb_opts
     print("[build] Kerberos: {0}".format(
@@ -1308,9 +1341,13 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
         # Visual Studio generator: works without a vcvars shell, unlike
         # Ninja+cl, and cross-compiles x86 / ARM64 from an x64 host.
         vs_arch = WINDOWS_ARCHS[host_windows_arch(arch)][0]
-        print("[build] Windows target: {0} (-A {1})".format(
-            host_windows_arch(arch), vs_arch))
+        print("[build] Windows target: {0} (-A {1}){2}".format(
+            host_windows_arch(arch), vs_arch,
+            ", toolset {0}".format(cfg_extra_toolset[0])
+            if cfg_extra_toolset else ""))
         cfg += ["-A", vs_arch]
+        if cfg_extra_toolset:
+            cfg += ["-T", cfg_extra_toolset[0]]
     elif have("ninja"):
         cfg += ["-G", "Ninja"]
 
@@ -3007,6 +3044,13 @@ def main():
     p.add_argument("--apk-build-type", default="Release",
                    choices=("Release", "Debug"),
                    help="android-apk only: gradle assemble<Type>.")
+    p.add_argument("--win-toolset", metavar="VXXX",
+                   help="Windows only: MSVC toolset to build with, e.g. v142 "
+                        "(VS 2019) or v141 (VS 2017). Needed together with "
+                        "--win-target 7/8.1 to get loadable DLLs: those "
+                        "toolsets' redistributables still support those "
+                        "systems, whereas VS 2022's does not. Without it a "
+                        "legacy target falls back to a fully static build.")
     p.add_argument("--win-target", default="10",
                    choices=tuple(sorted(WINDOWS_OS_TARGETS)),
                    help="Windows only: minimum OS to target. 10 (default) is "
@@ -3212,7 +3256,8 @@ def main():
                    deps_prefix=deps_prefix, executables=args.with_executables,
                    with_krb5=args.with_krb5,
                    windows_shadow=args.with_windows_shadow,
-                   webview=args.webview, win_target=args.win_target)
+                   webview=args.webview, win_target=args.win_target,
+                   win_toolset=args.win_toolset)
         artifacts = collect_host_artifacts(prefix)
         if not artifacts:
             sys.stderr.write(
