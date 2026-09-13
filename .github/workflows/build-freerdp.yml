@@ -228,7 +228,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 32
+            python scripts/$s.py --require-version 33
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -585,7 +585,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 32
+            python scripts/$s.py --require-version 33
           done
 
       - name: Install host tools
@@ -876,7 +876,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 32
+            python scripts/$s.py --require-version 33
           done
 
       - name: Install host tools
@@ -1031,12 +1031,19 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 32
+            python scripts/$s.py --require-version 33
           done
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
+      - name: Install native build tools
+        run: |
+          # The gradle native build compiles FFmpeg/OpenSSL/OpenH264 itself;
+          # the x86_64 ABI enables FFmpeg's x86 assembly, which needs nasm.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nasm yasm
+
       - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
 
@@ -1102,6 +1109,9 @@ jobs:
             build/diagnostics/
             client/Android/Studio/**/build/reports/
             /tmp/pyfreerdp-build/FreeRDP/client/Android/Studio/**/build/reports/
+            /tmp/pyfreerdp-build/FreeRDP/client/Android/Studio/**/.cxx/**/*.log
+            /tmp/pyfreerdp-build/FreeRDP/client/Android/Studio/**/.cxx/**/*.txt
+            /tmp/pyfreerdp-build/FreeRDP/client/Android/Studio/**/.cxx/**/*.cmake
           if-no-files-found: ignore
           retention-days: 7
 
@@ -1146,7 +1156,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 32
+            python scripts/$s.py --require-version 33
           done
       - name: Show toolchain
         run: |
