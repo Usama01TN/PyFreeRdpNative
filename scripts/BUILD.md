@@ -32,8 +32,14 @@ python scripts/build_freerdp.py --target ios-app --ios-platform OS64
 #   -> build/ios-app/OS64/iFreeRDP.app
 ```
 
-Options: `--abi` narrows the APK's ABI list, `--apk-build-type Debug` builds
-the debug variant, `--ios-platform SIMULATORARM64` targets the simulator, and
+The APK is built for four ABIs by default — `armeabi-v7a`, `arm64-v8a`,
+`x86`, `x86_64` — producing one APK per ABI plus a universal APK that runs on
+any of them. `--apk-abis` narrows or extends that list (`all` adds `riscv64`);
+each ABI is a full native build of FreeRDP + OpenSSL + FFmpeg + OpenH264, so
+the list drives the build time. Note `--abi` is the *library* build's
+single-ABI switch and does not apply here.
+
+Other options: `--apk-build-type Debug` builds the debug variant, `--ios-platform SIMULATORARM64` targets the simulator, and
 `--sign-ios-app` lets Xcode sign the bundle (needs a provisioning profile).
 
 The iOS bundle is **unsigned by default** so it builds on a runner with no

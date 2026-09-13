@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 31
+BUILD_SCRIPT_VERSION = 32
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -2639,6 +2639,28 @@ def verify_media_linked(out_dir, deps_prefix=None):
 # opus, jpeg, png, webp, uriparser) from source via ExternalProject. They do
 # not consume pyfreerdp/_libs or build/deps, so they are separate targets.
 
+# ABIs the APK is built for. Upstream's gradle default is
+# "x86;x86_64;riscv64;armeabi-v7a;arm64-v8a"; riscv64 is left out here
+# because no shipping Android phone uses it and every extra ABI is a full
+# native build of FreeRDP + OpenSSL + FFmpeg + OpenH264. Override with
+# --apk-abis (comma or semicolon separated, "all" for upstream's list).
+APK_DEFAULT_ABIS = ("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+APK_ALL_ABIS = ("armeabi-v7a", "arm64-v8a", "x86", "x86_64", "riscv64")
+
+
+def parse_apk_abis(value):
+    if not value or value == "default":
+        return list(APK_DEFAULT_ABIS)
+    if value == "all":
+        return list(APK_ALL_ABIS)
+    abis = [a.strip() for a in value.replace(";", ",").split(",") if a.strip()]
+    bad = [a for a in abis if a not in APK_ALL_ABIS]
+    if bad:
+        raise SystemExit("Unknown Android ABI(s) {0}; pick from {1}".format(
+            bad, list(APK_ALL_ABIS)))
+    return abis
+
+
 def ensure_apk_keystore(store, alias, store_pw, key_pw):
     """
     Gradle's release signing config needs a keystore. Upstream defaults to
@@ -2689,6 +2711,7 @@ def build_android_apk(src, jobs, abis=None, release_props=None,
         raise SystemExit("Set ANDROID_HOME (or ANDROID_SDK_ROOT) to the "
                          "Android SDK to build the APK.")
     props = dict(release_props or {})
+    props.setdefault("BUILD_UNIVERSAL", "true")   # one APK that runs anywhere
     if build_type == "Release":
         store = ensure_apk_keystore(
             keystore or os.path.join(repo_root(), "build", "android-apk",
@@ -2698,9 +2721,11 @@ def build_android_apk(src, jobs, abis=None, release_props=None,
         props.setdefault("RELEASE_KEY_ALIAS", key_alias)
         props.setdefault("RELEASE_STORE_PASSWORD", store_password)
         props.setdefault("RELEASE_KEY_PASSWORD", key_password)
-    if abis:
-        props.setdefault("ABI_FILTERS", ";".join(abis))
-        props.setdefault("SPLIT_ARCHITECTURES", ";".join(abis))
+    abis = list(abis or APK_DEFAULT_ABIS)
+    props.setdefault("ABI_FILTERS", ";".join(abis))
+    props.setdefault("SPLIT_ARCHITECTURES", ";".join(abis))
+    print("[apk] building for {0} ABI(s): {1} (+ a universal APK)".format(
+        len(abis), ", ".join(abis)))
     if props:
         path = os.path.join(studio, "release.properties")
         with open(path, "w") as fh:
@@ -2882,6 +2907,11 @@ def main():
     p.add_argument("--apk-build-type", default="Release",
                    choices=("Release", "Debug"),
                    help="android-apk only: gradle assemble<Type>.")
+    p.add_argument("--apk-abis", default="default", metavar="LIST",
+                   help="android-apk: ABIs to build, comma separated "
+                        "(default: {0}; 'all' adds riscv64). Each one is a "
+                        "full native build, so the list drives the job "
+                        "duration.".format(", ".join(APK_DEFAULT_ABIS)))
     p.add_argument("--apk-keystore", metavar="FILE",
                    help="android-apk: keystore for the release signing "
                         "config. A self-signed one is generated when this is "
@@ -2991,8 +3021,11 @@ def main():
         if src is None:
             return 2
         if args.target == "android-apk":
+            # NB: --abi is the *library* build's single-ABI switch and
+            # defaults to arm64-v8a; the APK uses --apk-abis so it does not
+            # silently end up single-architecture.
             build_android_apk(src, args.jobs,
-                              abis=[args.abi] if args.abi else None,
+                              abis=parse_apk_abis(args.apk_abis),
                               release_props={"VERSION_NAME": args.ref},
                               build_type=args.apk_build_type,
                               keystore=args.apk_keystore,
