@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 30
+BUILD_SCRIPT_VERSION = 31
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -2770,14 +2770,23 @@ def build_ios_app(src, jobs, ios_platform="OS64", sign=False):
     install_dir = os.path.join(repo_root(), "build", "ios-app", ios_platform)
     if not os.path.isdir(install_dir):
         os.makedirs(install_dir)
-    sim = ios_platform.startswith("SIMULATOR")
     arch = "x86_64" if ios_platform == "SIMULATOR64" else "arm64"
+    # The super-build REQUIRES a toolchain file: ExternalDeps.cmake forwards
+    # it to every sub-project with
+    #   get_filename_component(_toolchain_abs "${CMAKE_TOOLCHAIN_FILE}"
+    #                          ABSOLUTE BASE_DIR "${CMAKE_BINARY_DIR}")
+    # so configuring with CMAKE_SYSTEM_NAME=iOS instead leaves it empty and
+    # that expression resolves to the *build directory*, which the
+    # sub-projects then reject ("Could not find toolchain file: <build dir>").
+    toolchain = os.path.join(src, "cmake", "ios.toolchain.cmake")
+    if not os.path.isfile(toolchain):
+        raise SystemExit("missing {0} - needed by the iOS super-build".format(
+            toolchain))
     cfg = ["cmake", "-S", ios_src, "-B", build_dir, "-G", "Xcode",
-           "-DCMAKE_SYSTEM_NAME=iOS",
-           "-DCMAKE_OSX_ARCHITECTURES={0}".format(arch),
-           "-DCMAKE_OSX_SYSROOT={0}".format(
-               "iphonesimulator" if sim else "iphoneos"),
-           "-DCMAKE_OSX_DEPLOYMENT_TARGET=13.0",
+           "-DCMAKE_TOOLCHAIN_FILE={0}".format(toolchain),
+           "-DPLATFORM={0}".format(ios_platform),
+           "-DDEPLOYMENT_TARGET=13.0",
+           "-DENABLE_BITCODE=OFF",
            "-DCMAKE_INSTALL_PREFIX={0}".format(install_dir),
            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"]
     if not sign:
