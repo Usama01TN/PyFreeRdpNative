@@ -73,6 +73,12 @@ on:
         default: "all"
         type: choice
         options: [all, standard, ffmpeg, openh264, media]
+      win_target:
+        description: "Minimum Windows version for the Windows builds (8.1/7 are UNTESTED, static CRT)"
+        required: false
+        default: "10"
+        type: choice
+        options: ["10", "8.1", "7"]
       apk_abis:
         description: "Android ABIs for the APK (comma separated, or 'all' to add riscv64)"
         required: false
@@ -228,7 +234,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 33
+            python scripts/$s.py --require-version 34
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -369,6 +375,12 @@ jobs:
           # flag to turn it OFF when the dispatch box was unticked.
           if [ "$RUNNER_OS" = "Windows" ] && [ "$WINDOWS_SHADOW" = "no" ]; then
             args="$args --no-windows-shadow"
+          fi
+          # Legacy Windows targets: arm64 has no such thing, so skip it there.
+          if [ "$RUNNER_OS" = "Windows" ] && [ -n "${{ inputs.win_target }}" ] \
+             && [ "${{ inputs.win_target }}" != "10" ] \
+             && [ "${{ matrix.win_arch }}" != "arm64" ]; then
+            args="$args --win-target ${{ inputs.win_target }}"
           fi
           python scripts/build_freerdp.py \
             --target host \
@@ -585,7 +597,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 33
+            python scripts/$s.py --require-version 34
           done
 
       - name: Install host tools
@@ -876,7 +888,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 33
+            python scripts/$s.py --require-version 34
           done
 
       - name: Install host tools
@@ -1031,7 +1043,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 33
+            python scripts/$s.py --require-version 34
           done
       - uses: actions/setup-java@v4
         with:
@@ -1156,7 +1168,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 33
+            python scripts/$s.py --require-version 34
           done
       - name: Show toolchain
         run: |
