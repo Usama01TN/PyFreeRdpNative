@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 32
+BUILD_SCRIPT_VERSION = 33
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -2661,6 +2661,46 @@ def parse_apk_abis(value):
     return abis
 
 
+def dump_android_native_logs(studio, tail=60):
+    """
+    On a native-build failure, print the ExternalProject stamp logs that
+    actually contain the error. AGP hides them under
+    <module>/.cxx/<config>/<hash>/<abi>/...-stamp/*.log.
+    """
+    roots = []
+    for module in ("freeRDPCore", "aFreeRDP"):
+        cxx = os.path.join(studio, module, ".cxx")
+        if os.path.isdir(cxx):
+            roots.append(cxx)
+    logs = []
+    for root in roots:
+        for d, _dirs, files in os.walk(root):
+            for fn in files:
+                if fn.endswith((".log", "-err.log", "-out.log")):
+                    p = os.path.join(d, fn)
+                    try:
+                        if os.path.getsize(p) > 0:
+                            logs.append(p)
+                    except OSError:
+                        pass
+    if not logs:
+        print("[apk] no .cxx logs found to dump")
+        return
+    # Newest first: the failure is almost always in the last thing written.
+    logs.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    print("\n[apk] ==== native build logs (newest {0} of {1}) ====".format(
+        min(6, len(logs)), len(logs)))
+    for p in logs[:6]:
+        print("\n----- {0}".format(p))
+        try:
+            with open(p, errors="replace") as fh:
+                lines = fh.read().splitlines()
+            for line in lines[-tail:]:
+                print("  " + line)
+        except OSError as e:
+            print("  <unreadable: {0}>".format(e))
+
+
 def ensure_apk_keystore(store, alias, store_pw, key_pw):
     """
     Gradle's release signing config needs a keystore. Upstream defaults to
@@ -2746,10 +2786,17 @@ def build_android_apk(src, jobs, abis=None, release_props=None,
     else:
         raise SystemExit("neither ./gradlew nor gradle found")
     task = "assemble{0}".format(build_type)
-    run(cmd + ["--no-daemon", "--console=plain",
-               "-Dorg.gradle.jvmargs=-Xmx4g",
-               "--parallel", "--max-workers={0}".format(jobs), task],
-        cwd=studio, env=env)
+    gradle_args = ["--no-daemon", "--console=plain",
+                   "-Dorg.gradle.jvmargs=-Xmx4g",
+                   # Without this AGP prints only the tail of the native
+                   # build, so a compile error inside the CMake/ninja step is
+                   # invisible ("ninja: build stopped: subcommand failed").
+                   "-Pandroid.native.buildOutput=verbose",
+                   "--parallel", "--max-workers={0}".format(jobs), task]
+    rc = run(cmd + gradle_args, cwd=studio, env=env, check=False)
+    if rc != 0:
+        dump_android_native_logs(studio)
+        raise SystemExit("gradle {0} failed (exit {1})".format(task, rc))
 
     out = os.path.join(repo_root(), "build", "android-apk")
     if not os.path.isdir(out):
