@@ -154,7 +154,7 @@ FFMPEG_COMPONENTS = {
 # ---------------------------------------------------------------------------
 
 # Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
-BUILD_SCRIPT_VERSION = 29
+BUILD_SCRIPT_VERSION = 30
 
 
 def log(msg):

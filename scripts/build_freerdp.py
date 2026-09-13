@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 29
+BUILD_SCRIPT_VERSION = 30
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -1107,6 +1107,50 @@ def _patch_ios_openh264_flags(src):
         as_list))
 
 
+# xiph retagged opus as v1.5.2; FreeRDP's super-build still points at the
+# old un-prefixed tag, so the download 404s. URL + hash of the tag that
+# actually exists:
+OPUS_FIXED_TAG = "v1.5.2"
+OPUS_FIXED_HASH = ("SHA256=9480e329e989f70d69886ded470c7f8cfe6c0667"
+                   "cc4196d4837ac9e668fb7404")
+
+
+def _patch_opus_download(src):
+    """
+    client/iOS/cmake/ExternalOpus.cmake downloads
+
+        https://github.com/xiph/opus/archive/refs/tags/${OPUS_VERSION}.tar.gz
+
+    with OPUS_VERSION="1.5.2" from cmake/DepVersions.cmake. xiph's tag is
+    v1.5.2 - the un-prefixed one no longer exists - so the download fails
+    with HTTP 404 ("Each download failed!"). Point it at the real tag and
+    update the pinned hash to match that tarball.
+    """
+    ext = os.path.join(src, "client", "iOS", "cmake", "ExternalOpus.cmake")
+    deps = os.path.join(src, "cmake", "DepVersions.cmake")
+    if not os.path.isfile(ext) or not os.path.isfile(deps):
+        return
+    with open(ext) as fh:
+        text = fh.read()
+    old_url = "refs/tags/${OPUS_VERSION}.tar.gz"
+    if old_url in text:
+        text = text.replace(old_url, "refs/tags/v${OPUS_VERSION}.tar.gz", 1)
+        with open(ext, "w") as fh:
+            fh.write(text)
+        print("[patch] client/iOS ExternalOpus: tag -> v${OPUS_VERSION}")
+    import re
+    with open(deps) as fh:
+        dtext = fh.read()
+    m = re.search(r'set\(OPUS_HASH "([^"]+)"\)', dtext)
+    if m and m.group(1) != OPUS_FIXED_HASH:
+        dtext = dtext.replace(m.group(0),
+                              'set(OPUS_HASH "{0}")'.format(OPUS_FIXED_HASH), 1)
+        with open(deps, "w") as fh:
+            fh.write(dtext)
+        print("[patch] cmake/DepVersions: OPUS_HASH updated for the v-tagged "
+              "tarball")
+
+
 def patch_source_tree(src, host_os, profile, windows_shadow=None):
     """
     Fix upstream bugs in the fetched FreeRDP tree that would otherwise make a
@@ -1123,6 +1167,7 @@ def patch_source_tree(src, host_os, profile, windows_shadow=None):
     """
     if host_os == "iOS-app":
         _patch_ios_openh264_flags(src)
+        _patch_opus_download(src)
         return
     if host_os != "Windows" or profile != "full" or windows_shadow is False:
         return
