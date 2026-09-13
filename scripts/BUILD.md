@@ -230,6 +230,31 @@ without krb5 returns `SEC_E_UNSUPPORTED_FUNCTION`. Configuration at runtime is
 the standard `/etc/krb5.conf` / `KRB5_CONFIG`; a ticket cache from `kinit` (or
 `/u:user@REALM /p:...`) is used by the client as usual.
 
+## Targeting older Windows (experimental)
+
+FreeRDP 3.31 declares no Windows version floor of its own — the blockers are
+in the toolchain. `--win-target {10,8.1,7}` (workflow input `win_target`)
+switches them:
+
+| | default `10` | `8.1` / `7` |
+|---|---|---|
+| `CMAKE_SYSTEM_VERSION` | host's (Windows 10) | `6.3` / `6.1` |
+| `_WIN32_WINNT` / `WINVER` | `0x0A00` | `0x0603` / `0x0601` |
+| CRT | dynamic (`vcruntime140.dll`) | **static** |
+| SDL client | as probed | off |
+| Tested | yes | **no** |
+
+The static CRT is the crucial part: the VC++ 2015-2022 redistributable
+dropped Windows 7 and 8.1 at v14.40 (VS 2022 17.10), so any DLL importing
+`vcruntime140.dll` cannot load there. Linking it statically removes that
+dependency.
+
+Two things this does **not** solve, so treat the result as an experiment:
+vcpkg's OpenSSL/zlib in the deps prefix are built for modern Windows and
+would need rebuilding with a matching toolset (VS 2019 / v142 or older), and
+nothing — upstream or here — tests these systems; there is no CI runner for
+them. arm64 rejects the option, since Windows on ARM starts at Windows 10.
+
 ## Viewing logs
 
 FreeRDP logs through WinPR's WLog. On Linux/macOS every executable prints to

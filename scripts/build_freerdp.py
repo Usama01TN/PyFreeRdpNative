@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 33
+BUILD_SCRIPT_VERSION = 34
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -965,6 +965,57 @@ def executable_options(profile, host_os):
 # Host build (Linux / macOS / Windows native)
 # ---------------------------------------------------------------------------
 
+# Windows OS targets: CLI name -> (CMAKE_SYSTEM_VERSION, _WIN32_WINNT, note)
+#
+# "10" is the default and the only configuration upstream or we test. The
+# older two exist because FreeRDP itself declares no Windows version floor -
+# the blockers are all in the *toolchain*:
+#
+#   * the VC++ 2015-2022 redistributable dropped Windows 7/8.1 at v14.40
+#     (VS 2022 17.10), so a DLL that imports vcruntime140.dll cannot load
+#     there -> these targets force the STATIC CRT, which removes the
+#     redistributable from the picture entirely;
+#   * CMake otherwise targets the build host's Windows version, letting the
+#     compiler bind Windows 10-only APIs.
+#
+# vcpkg's OpenSSL/zlib are built for modern Windows, so a 7/8.1 build also
+# needs its dependencies rebuilt with the same toolset. Both are UNTESTED:
+# no CI runner exists for those systems.
+WINDOWS_OS_TARGETS = {
+    "10":  ("10.0", "0x0A00", "Windows 10/11 (default, tested)"),
+    "8.1": ("6.3", "0x0603", "Windows 8.1 (untested, static CRT)"),
+    "7":   ("6.1", "0x0601", "Windows 7 SP1 (untested, static CRT)"),
+}
+
+
+def windows_os_options(win_target, arch="host"):
+    """-D switches that make a Windows build target an older OS."""
+    if not win_target or win_target == "10":
+        return []
+    sysver, winnt, note = WINDOWS_OS_TARGETS[win_target]
+    if host_windows_arch(arch) == "arm64":
+        raise SystemExit("--win-target {0} is meaningless for arm64: "
+                         "Windows on ARM starts at Windows 10.".format(win_target))
+    print("\n[warn] --win-target {0}: {1}.\n"
+          "       FreeRDP declares no Windows version floor, but this "
+          "configuration is not tested by upstream or by this project, and\n"
+          "       the dependencies in the vcpkg prefix are built for modern "
+          "Windows - rebuild them with a matching toolset\n"
+          "       (VS 2019 / v142 or older) or expect load failures."
+          .format(win_target, note))
+    return [
+        "-DCMAKE_SYSTEM_VERSION={0}".format(sysver),
+        # Static CRT: no vcruntime140.dll dependency, which is what actually
+        # blocks Windows 7/8.1 with a current toolchain.
+        "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>",
+        "-DCMAKE_C_FLAGS=/D_WIN32_WINNT={0} /DWINVER={0}".format(winnt),
+        "-DCMAKE_CXX_FLAGS=/D_WIN32_WINNT={0} /DWINVER={0}".format(winnt),
+        # The SDL client and the sample/proxy servers pull in newer APIs and
+        # have not been looked at for these systems; keep the build minimal.
+        "-DWITH_CLIENT_SDL=OFF",
+    ]
+
+
 # Windows target architectures: CLI name -> (Visual Studio -A value,
 # vcpkg triplet, PE machine type as reported by dumpbin / pefile).
 WINDOWS_ARCHS = {
@@ -1198,7 +1249,7 @@ def patch_source_tree(src, host_os, profile, windows_shadow=None):
 def build_host(src, prefix, jobs, profile, enable_channels=None,
                disable_channels=None, channels_enabled=True, arch="host",
                deps_prefix=None, executables=False, with_krb5=None,
-               windows_shadow=None, webview=None):
+               windows_shadow=None, webview=None, win_target="10"):
     require_tools(["cmake", "git"])
     host_os = platform.system()
     if host_os != "Windows" and arch not in (None, "", "host"):
@@ -1233,6 +1284,8 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
                              webview=webview)
     build_host.windows_shadow = windows_shadow
     opts += host_dependency_probe(host_os, arch, deps_prefix)
+    if host_os == "Windows":
+        opts += windows_os_options(win_target, arch)
     krb_opts, krb_libdir = krb5_options(profile, host_os, "host", with_krb5)
     opts += krb_opts
     print("[build] Kerberos: {0}".format(
@@ -2954,6 +3007,15 @@ def main():
     p.add_argument("--apk-build-type", default="Release",
                    choices=("Release", "Debug"),
                    help="android-apk only: gradle assemble<Type>.")
+    p.add_argument("--win-target", default="10",
+                   choices=tuple(sorted(WINDOWS_OS_TARGETS)),
+                   help="Windows only: minimum OS to target. 10 (default) is "
+                        "the tested configuration. 8.1 and 7 set "
+                        "CMAKE_SYSTEM_VERSION/_WIN32_WINNT and link the CRT "
+                        "statically so the binaries do not need the VC++ "
+                        "redistributable (which dropped those systems at "
+                        "v14.40) - both are UNTESTED and need dependencies "
+                        "rebuilt with a matching toolset.")
     p.add_argument("--apk-abis", default="default", metavar="LIST",
                    help="android-apk: ABIs to build, comma separated "
                         "(default: {0}; 'all' adds riscv64). Each one is a "
@@ -3150,7 +3212,7 @@ def main():
                    deps_prefix=deps_prefix, executables=args.with_executables,
                    with_krb5=args.with_krb5,
                    windows_shadow=args.with_windows_shadow,
-                   webview=args.webview)
+                   webview=args.webview, win_target=args.win_target)
         artifacts = collect_host_artifacts(prefix)
         if not artifacts:
             sys.stderr.write(
