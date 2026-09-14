@@ -544,9 +544,16 @@ jobs:
           } > pyfreerdp/_libs/BUILD-INFO.txt
           cp build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}/DEPS-MANIFEST.txt pyfreerdp/_libs/ 2>/dev/null || true
           if [ "$RUNNER_OS" = "Windows" ]; then
-            (cd pyfreerdp && 7z a -tzip "../out/$name.zip" _libs >/dev/null)
-            echo "file=out/$name.zip" >> "$GITHUB_OUTPUT"
+            # upload-artifact zips whatever it is given, so hand it the plain
+            # directory - pre-archiving here would put a .zip inside the .zip.
+            mkdir -p "out/$name"
+            cp -r pyfreerdp/_libs "out/$name/"
+            [ -d pyfreerdp/_bin ] && cp -r pyfreerdp/_bin "out/$name/"
+            echo "file=out/$name" >> "$GITHUB_OUTPUT"
           else
+            # tar.gz on Unix: it preserves the symlink chain
+            # (libfreerdp3.so -> .so.3) and the executable bits, which a zip
+            # would flatten. One archive inside GitHub's zip, unavoidably.
             dirs="_libs"; [ -d pyfreerdp/_bin ] && dirs="$dirs _bin"
             tar -C pyfreerdp -czf "out/$name.tar.gz" $dirs
             echo "file=out/$name.tar.gz" >> "$GITHUB_OUTPUT"
@@ -1299,7 +1306,8 @@ jobs:
               echo "| \`$plat\` | $mb | [$name.zip]($base/artifacts/$id) |"
             done < artifacts.tsv
             echo
-            echo "Artifacts expire after 30 days. GitHub wraps each file in a .zip; inside is the .tar.gz / .zip of \`pyfreerdp/_libs\`."
+            echo "Artifacts expire after 30 days. Windows artifacts unzip straight to \`_libs/\` (+ \`_bin/\`);"
+            echo "other platforms contain a .tar.gz, which preserves symlinks and executable bits."
             if [ "${{ needs.desktop.result }}" != "success" ] || [ "${{ needs.android.result }}" != "success" ] || [ "${{ needs.ios.result }}" != "success" ]; then
               echo
               echo "> ⚠️ Some build legs failed (desktop: ${{ needs.desktop.result }}, android: ${{ needs.android.result }}, ios: ${{ needs.ios.result }}). Missing platforms are absent from the table."
