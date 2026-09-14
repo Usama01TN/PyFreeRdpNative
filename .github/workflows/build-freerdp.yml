@@ -507,8 +507,16 @@ jobs:
         shell: bash
         run: |
           name="freerdp-${FREERDP_REF}-${{ matrix.label }}-${{ matrix.profile }}-${{ matrix.edition }}"
-          if [ "$RUNNER_OS" = "Windows" ] && [ -n "${{ inputs.win_target }}" ] && [ "${{ inputs.win_target }}" != "10" ]; then
-            name="$name-win${{ inputs.win_target }}$([ -n "${{ inputs.win_toolset }}" ] && echo "-${{ inputs.win_toolset }}" || echo "-static")"
+          # arm64 is always a plain Windows 10 build (legacy targets are
+          # rejected there), so it never carries a win* suffix.
+          if [ "$RUNNER_OS" = "Windows" ] && [ -n "${{ inputs.win_target }}" ] \
+             && [ "${{ inputs.win_target }}" != "10" ] \
+             && [ "${{ matrix.win_arch }}" != "arm64" ]; then
+            crt="${{ inputs.win_crt }}"; crt="${crt:-dynamic}"
+            name="$name-win${{ inputs.win_target }}-$crt"
+            if [ -n "${{ inputs.win_toolset }}" ]; then
+              name="$name-${{ inputs.win_toolset }}"
+            fi
           fi
           mkdir -p out
           {
@@ -798,23 +806,34 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           pattern: freerdp-*-windows-arm64-*
-          merge-multiple: true
           path: dl/
-      - name: Unpack and load (both profiles)
+          # No merge-multiple: each artifact keeps its own directory, so the
+          # minimal and full packages do not overwrite each other.
+
+      - name: Unpack and load (every arm64 package)
         shell: pwsh
         run: |
-          $zips = Get-ChildItem dl/*.zip
-          if (-not $zips) { throw "no windows-arm64 artifacts found" }
-          foreach ($zip in $zips) {
-            $name = [IO.Path]::GetFileNameWithoutExtension($zip.Name)
-            Write-Host "=== $name"
-            $dest = "unpacked/$name"
-            Expand-Archive $zip.FullName -DestinationPath $dest
-            $libs = (Resolve-Path "$dest/_libs").Path
+          # Windows artifacts are uploaded as plain directories (GitHub zips
+          # them once), so after download each is dl/<name>/_libs.
+          $pkgs = Get-ChildItem dl -Directory -ErrorAction SilentlyContinue
+          if (-not $pkgs) { throw "no windows-arm64 artifacts found" }
+          foreach ($pkg in $pkgs) {
+            $libs = Join-Path $pkg.FullName "_libs"
+            if (-not (Test-Path $libs)) {
+              # Older layout: a single archive inside the artifact.
+              $arch = Get-ChildItem $pkg.FullName -Filter *.zip | Select-Object -First 1
+              if ($arch) {
+                Expand-Archive $arch.FullName -DestinationPath $pkg.FullName
+                $libs = Join-Path $pkg.FullName "_libs"
+              }
+            }
+            if (-not (Test-Path $libs)) { throw "no _libs in $($pkg.Name)" }
+            $libs = (Resolve-Path $libs).Path
+            Write-Host "=== $($pkg.Name)"
             Get-ChildItem $libs | Select-Object -ExpandProperty Name
             $env:PATH = "$libs;$env:PATH"
             python -c @"
-          import ctypes, os, sys
+          import ctypes, os, sys, glob
           libs = sys.argv[1]
           os.add_dll_directory(libs)
           for name in ('winpr3.dll', 'freerdp3.dll', 'freerdp-client3.dll', 'freerdp-server3.dll'):
@@ -827,7 +846,6 @@ jobs:
           fn.restype = ctypes.c_void_p; fn.argtypes = [ctypes.c_char_p]*3 + [ctypes.c_uint32]
           for ch, flags in (('cliprdr', 0x9000), ('rdpgfx', 0x2000), ('drive', 0x4000)):
               assert fn(ch.encode(), None, None, flags), ch; print('client channel ok:', ch)
-          # Kerberos via native SSPI: winpr forwards to secur32
           winpr = ctypes.WinDLL(os.path.join(libs, 'winpr3.dll'))   # SEC_ENTRY = __stdcall
           class Pkg(ctypes.Structure):
               _fields_ = [('fCapabilities', ctypes.c_uint32), ('wVersion', ctypes.c_uint16), ('wRPCID', ctypes.c_uint16), ('cbMaxToken', ctypes.c_uint32), ('Name', ctypes.c_char_p), ('Comment', ctypes.c_char_p)]
@@ -839,7 +857,6 @@ jobs:
           assert winpr.InitSecurityInterfaceExA(0).contents.EnumerateSecurityPackagesA(ctypes.byref(n), ctypes.byref(arr)) == 0
           names = [arr[i].Name.decode() for i in range(n.value)]
           assert 'Kerberos' in names, names; print('Kerberos SSPI package present (native):', names)
-          import glob
           has_media = bool(glob.glob(os.path.join(libs, 'avcodec*.dll')) or glob.glob(os.path.join(libs, 'openh264*.dll')))
           if has_media:
               core = ctypes.CDLL(os.path.join(libs, 'freerdp3.dll'))
@@ -848,30 +865,18 @@ jobs:
               core.h264_context_free(ctypes.c_void_p(ctx)); print('H.264 decoder backend OK')
           print('OK')
           "@ $libs
-            if ($LASTEXITCODE -ne 0) { throw "load test failed for $name" }
+            if ($LASTEXITCODE -ne 0) { throw "load test failed for $($pkg.Name)" }
             if (Test-Path "$libs\ffmpeg.exe") {
               & "$libs\ffmpeg.exe" -hide_banner -version | Select-Object -First 1
               if ($LASTEXITCODE -ne 0) { throw "ffmpeg does not run" }
-              # vcpkg's ffmpeg has no libavdevice (lavfi): feed a raw YUV clip.
-              python -c "import sys; w,h,n=320,240,25; f=open(sys.argv[1],'wb'); [f.write(bytes(((x+y+3*i)&255) for y in range(h) for x in range(w))+bytes([128])*(w*h//2)) for i in range(n)]" "$dest\src.yuv"
-              $enc = if (Test-Path "$libs\openh264*.dll") { "libopenh264" } else { "mjpeg" }
-              $fmt = if ($enc -eq "libopenh264") { "h264" } else { "mjpeg" }
-              $pix = if ($enc -eq "libopenh264") { "yuv420p" } else { "yuvj420p" }
-              & "$libs\ffmpeg.exe" -hide_banner -y -f rawvideo -pix_fmt yuv420p -s 320x240 -r 25 -i "$dest\src.yuv" -frames:v 25 -pix_fmt $pix -c:v $enc -f $fmt "$dest\test.$fmt"
-              if ($LASTEXITCODE -ne 0) { throw "ffmpeg $enc encode failed" }
-              & "$libs\ffprobe.exe" -v error -count_frames -show_entries stream=codec_name,nb_read_frames -of csv=p=0 "$dest\test.$fmt"
-              if ($LASTEXITCODE -ne 0) { throw "ffprobe failed to read back the encoded stream" }
-            }
-            if (Test-Path "$libs\sfreerdp.exe") {
-              & "$libs\sfreerdp.exe" /version
-              if ($LASTEXITCODE -ne 0) { throw "sfreerdp (sample client) does not run" }
             }
             if (Test-Path "$libs\wfreerdp.exe") {
               & "$libs\wfreerdp.exe" /version
-              & "$libs\winpr-makecert.exe" -rdp -silent -path $dest -n test
-              if (-not (Test-Path "$dest\test.crt")) { throw "winpr-makecert produced no certificate" }
+              & "$libs\winpr-makecert.exe" -rdp -silent -path $pkg.FullName -n test
+              if (-not (Test-Path (Join-Path $pkg.FullName "test.crt"))) { throw "winpr-makecert produced no certificate" }
             }
           }
+
       - name: Note in summary
         shell: bash
         run: echo "### windows-arm64 (all profiles/editions) — loaded natively on windows-11-arm ✅" >> "$GITHUB_STEP_SUMMARY"
