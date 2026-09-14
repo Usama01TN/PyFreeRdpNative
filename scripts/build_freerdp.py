@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 36
+BUILD_SCRIPT_VERSION = 37
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -988,25 +988,19 @@ WINDOWS_OS_TARGETS = {
 }
 
 
-def windows_os_options(win_target, arch="host", toolset=None):
+def windows_os_options(win_target, arch="host", toolset=None, crt="auto"):
     """
     -D switches that make a Windows build target an older OS.
 
-    There are exactly two routes, because FreeRDP's cmake/MSVCRuntime.cmake
-    refuses a static CRT in a shared build ("Static CRT is only supported in
-    a fully static build"):
-
-      --win-toolset v142 (or v141)
-          Keeps BUILD_SHARED_LIBS=ON and the dynamic CRT, but builds with an
-          older toolset whose redistributable still supports Windows 7/8.1.
-          This is the only route that yields ctypes-loadable DLLs, and it
-          needs those VS build tools installed - GitHub's windows-2022 image
-          ships v143 only.
-
-      no toolset
-          Static CRT, which forces BUILD_SHARED_LIBS=OFF: the result is .lib
-          archives to link into your own application, NOT DLLs. pyfreerdp
-          cannot load these.
+    crt:
+      "dynamic"  DLLs + vcruntime140.dll. Needs --win-toolset v142/v141 for
+                 Windows 7/8.1, because VS 2022's redistributable dropped
+                 those systems at v14.40.
+      "static"   DLLs with the CRT linked in: nothing to install on the
+                 target and no version constraint from the runtime. Requires
+                 all dependencies to be /MT too (vcpkg <arch>-windows-static)
+                 and patches FreeRDP's guard against this combination.
+      "auto"     dynamic when a toolset is given, otherwise static.
     """
     if not win_target or win_target == "10":
         return []
@@ -1014,6 +1008,8 @@ def windows_os_options(win_target, arch="host", toolset=None):
     if host_windows_arch(arch) == "arm64":
         raise SystemExit("--win-target {0} is meaningless for arm64: "
                          "Windows on ARM starts at Windows 10.".format(win_target))
+    if crt == "auto":
+        crt = "dynamic" if toolset else "static"
     opts = [
         "-DCMAKE_SYSTEM_VERSION={0}".format(sysver),
         "-DCMAKE_C_FLAGS=/D_WIN32_WINNT={0} /DWINVER={0}".format(winnt),
@@ -1021,27 +1017,28 @@ def windows_os_options(win_target, arch="host", toolset=None):
         # SDL3 and the sample/proxy servers are newer code that has not been
         # looked at for these systems; keep the build minimal.
         "-DWITH_CLIENT_SDL=OFF",
+        "-DBUILD_SHARED_LIBS=ON",          # DLLs, always
     ]
-    if toolset:
-        print("\n[warn] --win-target {0} with toolset {1}: {2}.\n"
-              "       Shared DLLs with the dynamic CRT of that toolset. "
-              "Untested by upstream and by this project;\n"
-              "       the vcpkg dependencies must be rebuilt with the same "
-              "toolset or the DLLs will still pull in a newer runtime."
-              .format(win_target, toolset, note))
-    else:
-        print("\n[warn] --win-target {0} without --win-toolset: {1}.\n"
-              "       FreeRDP only allows the static CRT in a fully static "
-              "build, so this produces STATIC LIBRARIES (.lib), not DLLs.\n"
-              "       They are usable for linking into your own application; "
-              "pyfreerdp cannot ctypes-load them.\n"
-              "       For loadable DLLs use --win-toolset v142 (VS 2019 build "
-              "tools), whose redistributable supports Windows 7/8.1."
+    if crt == "static":
+        opts.append(
+            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>")
+        print("\n[warn] --win-target {0}, static CRT: {1}.\n"
+              "       Building DLLs that link the CRT statically - no "
+              "vcruntime140.dll, nothing to install on the target.\n"
+              "       EVERY dependency must use the same static CRT: build "
+              "them with\n"
+              "         scripts/build_deps.py --win-crt static\n"
+              "       (vcpkg <arch>-windows-static). Mixing /MT and /MD gives "
+              "cross-heap crashes, not link errors.\n"
+              "       Untested by upstream and by this project."
               .format(win_target, note))
-        opts += [
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded$<$<CONFIG:Debug>:Debug>",
-            "-DBUILD_SHARED_LIBS=OFF",
-        ]
+    else:
+        print("\n[warn] --win-target {0}, dynamic CRT with toolset {1}: {2}.\n"
+              "       The target needs that toolset's VC++ redistributable "
+              "(and Windows 7 needs SP1 + KB4474419).\n"
+              "       Untested by upstream and by this project."
+              .format(win_target, toolset or "<none - VS 2022 will NOT run on "
+                                            "Windows 7/8.1>", note))
     return opts
 
 
@@ -1158,6 +1155,54 @@ def deps_env(deps_prefix, cross=False):
     return env
 
 
+def _patch_msvc_static_crt_guard(src):
+    """
+    cmake/MSVCRuntime.cmake refuses a static CRT whenever BUILD_SHARED_LIBS
+    is on:
+
+        if(IS_SHARED STREQUAL "-1")
+          if(BUILD_SHARED_LIBS)
+            message(FATAL_ERROR "Static CRT is only supported in a fully static build")
+
+    That rule exists because mixing runtimes across a DLL boundary is
+    dangerous - each CRT has its own heap, so memory allocated in one and
+    freed in the other crashes. It is safe when *every* component uses the
+    same static CRT, which is exactly what --win-crt static arranges (the
+    dependencies come from a -windows-static vcpkg triplet). Downgrade the
+    fatal error to a warning so DLLs can be built without a dependency on
+    vcruntime140.dll - the only way to get loadable libraries for
+    Windows 7/8.1 out of a current toolchain.
+    """
+    path = os.path.join(src, "cmake", "MSVCRuntime.cmake")
+    if not os.path.isfile(path):
+        return
+    with open(path) as fh:
+        text = fh.read()
+    guard = ('    if(BUILD_SHARED_LIBS)\n'
+             '      message(FATAL_ERROR "Static CRT is only supported in a '
+             'fully static build")\n'
+             '    endif()')
+    if guard not in text:
+        if "pyfreerdp: static CRT in a shared build" in text:
+            return                                   # already patched
+        print("[patch] MSVCRuntime.cmake: guard not found, skipping "
+              "(upstream may have changed it)")
+        return
+    replacement = (
+        '    # pyfreerdp: static CRT in a shared build is allowed when every\n'
+        '    # dependency uses the same static CRT (see --win-crt static).\n'
+        '    if(BUILD_SHARED_LIBS)\n'
+        '      message(WARNING "Static CRT with shared libraries: every "\n'
+        '                      "dependency must also use /MT or you will get "\n'
+        '                      "cross-heap allocation crashes")\n'
+        '    endif()')
+    text = text.replace(guard, replacement, 1)
+    with open(path, "w") as fh:
+        fh.write(text)
+    print("[patch] cmake/MSVCRuntime.cmake: static CRT allowed in a shared "
+          "build")
+
+
 def _patch_ios_openh264_flags(src):
     """
     client/iOS/cmake/ExternalOpenH264.cmake builds OpenH264 with
@@ -1245,6 +1290,9 @@ def patch_source_tree(src, host_os, profile, windows_shadow=None):
        compile; named vs nameless unions have identical layout, so mixing
        the two across translation units is ABI-safe.
     """
+    if host_os == "Windows-static-crt":
+        _patch_msvc_static_crt_guard(src)
+        return
     if host_os == "iOS-app":
         _patch_ios_openh264_flags(src)
         _patch_opus_download(src)
@@ -1279,7 +1327,7 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
                disable_channels=None, channels_enabled=True, arch="host",
                deps_prefix=None, executables=False, with_krb5=None,
                windows_shadow=None, webview=None, win_target="10",
-               win_toolset=None):
+               win_toolset=None, win_crt="auto"):
     require_tools(["cmake", "git"])
     host_os = platform.system()
     if host_os != "Windows" and arch not in (None, "", "host"):
@@ -1316,7 +1364,10 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
     build_host.windows_shadow = windows_shadow
     opts += host_dependency_probe(host_os, arch, deps_prefix)
     if host_os == "Windows":
-        opts += windows_os_options(win_target, arch, win_toolset)
+        opts += windows_os_options(win_target, arch, win_toolset, win_crt)
+        if win_target != "10" and (
+                win_crt == "static" or (win_crt == "auto" and not win_toolset)):
+            patch_source_tree(src, "Windows-static-crt", profile)
         if win_toolset:
             cfg_extra_toolset.append(win_toolset)
     krb_opts, krb_libdir = krb5_options(profile, host_os, "host", with_krb5)
@@ -3059,6 +3110,14 @@ def main():
     p.add_argument("--apk-build-type", default="Release",
                    choices=("Release", "Debug"),
                    help="android-apk only: gradle assemble<Type>.")
+    p.add_argument("--win-crt", default="auto",
+                   choices=("auto", "dynamic", "static"),
+                   help="Windows only, with --win-target 7/8.1: 'static' "
+                        "builds DLLs that link the CRT in (no "
+                        "redistributable needed, all deps must be /MT); "
+                        "'dynamic' keeps vcruntime140.dll and needs "
+                        "--win-toolset. Default: static unless a toolset is "
+                        "given.")
     p.add_argument("--win-toolset", metavar="VXXX",
                    help="Windows only: MSVC toolset to build with, e.g. v142 "
                         "(VS 2019) or v141 (VS 2017). Needed together with "
@@ -3272,9 +3331,10 @@ def main():
                    with_krb5=args.with_krb5,
                    windows_shadow=args.with_windows_shadow,
                    webview=args.webview, win_target=args.win_target,
-                   win_toolset=args.win_toolset)
-        static_win = (host_os == "Windows" and args.win_target != "10"
-                      and not args.win_toolset)
+                   win_toolset=args.win_toolset, win_crt=args.win_crt)
+        # Legacy Windows targets build DLLs again (static CRT or older
+        # toolset), so the normal DLL collection applies.
+        static_win = False
         artifacts = collect_host_artifacts(prefix, static=static_win)
         if not artifacts:
             sys.stderr.write(

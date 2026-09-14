@@ -154,7 +154,7 @@ FFMPEG_COMPONENTS = {
 # ---------------------------------------------------------------------------
 
 # Must match BUILD_SCRIPT_VERSION in build_freerdp.py (workflow handshake).
-BUILD_SCRIPT_VERSION = 36
+BUILD_SCRIPT_VERSION = 37
 
 
 def log(msg):
@@ -704,7 +704,8 @@ EDITION_VCPKG_FEATURES = {
 }
 
 
-def build_windows_vcpkg(prefix, arch, jobs, profile="full", edition="media"):
+def build_windows_vcpkg(prefix, arch, jobs, profile="full", edition="media",
+                        crt="dynamic"):
     vcpkg_root = (os.environ.get("VCPKG_ROOT")
                   or os.environ.get("VCPKG_INSTALLATION_ROOT"))
     if not vcpkg_root:
@@ -712,6 +713,12 @@ def build_windows_vcpkg(prefix, arch, jobs, profile="full", edition="media"):
     exe = os.path.join(vcpkg_root, "vcpkg.exe")
     triplet = {"x64": "x64-windows", "x86": "x86-windows",
                "arm64": "arm64-windows"}[arch]
+    if crt == "static":
+        # -windows-static links both the libraries and the CRT statically,
+        # which is what a FreeRDP build with --win-crt static needs: every
+        # component must use the same /MT runtime or allocations cross heaps.
+        triplet += "-static"
+        log("static CRT requested: using the {0} triplet".format(triplet))
     src_manifest = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "vcpkg.json")
     if not os.path.isfile(src_manifest):
@@ -875,6 +882,11 @@ def main():
     p.add_argument("--work", help="download/extract dir (default: temp)")
     p.add_argument("--jobs", type=int, default=ncpu())
     p.add_argument("--only", help="comma list of components: libusb,openh264,ffmpeg")
+    p.add_argument("--win-crt", default="dynamic",
+                   choices=("dynamic", "static"),
+                   help="Windows only: 'static' uses the <arch>-windows-static "
+                        "vcpkg triplet, required when FreeRDP is built with "
+                        "--win-crt static (legacy Windows targets).")
     p.add_argument("--edition", choices=("standard", "ffmpeg", "openh264", "media"),
                    default="media",
                    help="standard: no media/USB deps (Windows: only "
@@ -902,6 +914,9 @@ def main():
 
     label = label_for(args.target, args.arch, args.abi, args.ios_platform,
                       args.edition)
+    if args.target == "host" and platform.system() == "Windows" \
+            and args.win_crt == "static":
+        label += "-staticcrt"          # keep it separate from the /MD prefix
     prefix = os.path.abspath(args.prefix or os.path.join(
         repo_root(), "build", "deps", label))
     work = os.path.abspath(args.work or os.path.join(
@@ -919,7 +934,7 @@ def main():
 
     if args.target == "host" and platform.system() == "Windows":
         build_windows_vcpkg(prefix, args.arch, args.jobs, args.profile,
-                            args.edition)
+                            args.edition, args.win_crt)
         write_manifest(prefix, label, [])
         return 0
     cross = args.target in ("android", "ios")

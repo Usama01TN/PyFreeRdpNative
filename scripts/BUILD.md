@@ -236,28 +236,37 @@ FreeRDP 3.31 declares no Windows version floor of its own — the blockers are
 in the toolchain. `--win-target {10,8.1,7}` (workflow input `win_target`)
 switches them:
 
-FreeRDP refuses a static CRT in a shared build (`cmake/MSVCRuntime.cmake`:
-"Static CRT is only supported in a fully static build"), so there are two
-mutually exclusive routes:
+Legacy targets always build **DLLs** (`BUILD_SHARED_LIBS=ON`); what changes
+is where the C runtime comes from (`--win-crt`, workflow input `win_crt`):
 
-| | default `10` | `7`/`8.1` **with** `--win-toolset v142` | `7`/`8.1` **without** |
+| | default `10` | `7`/`8.1` + `--win-crt static` (default) | `7`/`8.1` + `--win-crt dynamic` |
 |---|---|---|---|
 | `CMAKE_SYSTEM_VERSION` | host's | `6.1` / `6.3` | `6.1` / `6.3` |
 | `_WIN32_WINNT` | `0x0A00` | `0x0601` / `0x0603` | `0x0601` / `0x0603` |
-| CRT | dynamic | dynamic (of that toolset) | **static** |
-| Output | DLLs | **DLLs** | **`.lib` only** |
-| ctypes-loadable | yes | yes | **no** |
+| CRT | dynamic | **static, linked in** | dynamic |
+| Output | DLLs | DLLs | DLLs |
+| Needs redistributable | yes (already present) | **no** | yes — and `--win-toolset v142` |
+| Dependencies | `<arch>-windows` | **`<arch>-windows-static`** | `<arch>-windows` (v142-built) |
 | Tested | yes | no | no |
 
-Why the toolset matters: the VC++ 2015-2022 redistributable dropped Windows
-7 and 8.1 at v14.40 (VS 2022 17.10), so a DLL importing `vcruntime140.dll`
-from a current toolchain cannot load there. Building with **v142** (VS 2019)
-or v141 (VS 2017) uses a redistributable that still supports them — that is
-the only route to a loadable DLL. GitHub's `windows-2022` image ships v143
-only, so this needs a self-hosted runner or an extra VS-installer step.
+**Why static is the default for legacy targets.** VS 2022's redistributable
+dropped Windows 7/8.1 at v14.40, so a DLL importing `vcruntime140.dll` cannot
+load there. Linking the CRT statically removes that dependency entirely and
+works with the toolchain GitHub runners already have.
 
-Without a toolset the build falls back to a fully static one: useful if you
-link FreeRDP into your own executable, useless for pyfreerdp.
+FreeRDP normally forbids this combination (`cmake/MSVCRuntime.cmake`: "Static
+CRT is only supported in a fully static build"). The build patches that guard
+down to a warning, because the rule exists to prevent *mixing* runtimes — it
+is safe when every component uses the same static CRT, which is what the
+`-windows-static` vcpkg triplet arranges. Get that wrong and the symptom is
+random crashes when memory is freed across a DLL boundary, not a link error,
+so build the dependencies with `build_deps.py --win-crt static` (the workflow
+does this automatically).
+
+The `dynamic` route is the alternative: keep `vcruntime140.dll` but build
+with `--win-toolset v142` (VS 2019), whose redistributable still supports
+those systems. It needs those build tools installed — GitHub's `windows-2022`
+image ships v143 only.
 
 Two things this does **not** solve, so treat the result as an experiment:
 vcpkg's OpenSSL/zlib in the deps prefix are built for modern Windows and
