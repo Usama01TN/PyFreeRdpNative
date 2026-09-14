@@ -80,11 +80,11 @@ on:
         type: choice
         options: ["10", "8.1", "7"]
       win_crt:
-        description: "CRT for legacy win_target: static = DLLs with no redistributable (deps must match)"
+        description: "CRT for legacy win_target: dynamic = needs the VC++ redistributable (pair with win_toolset v142); static = self-contained DLLs, deps must match"
         required: false
-        default: "static"
+        default: "dynamic"
         type: choice
-        options: ["static", "dynamic"]
+        options: ["dynamic", "static"]
       win_toolset:
         description: "MSVC toolset for legacy win_target (v142 = VS2019, needed for loadable DLLs; blank = static .lib build)"
         required: false
@@ -140,8 +140,8 @@ env:
   PROFILES: ${{ inputs.profiles || 'both' }}
   EDITIONS: ${{ inputs.editions || 'all' }}
   # Default (non-dispatch triggers, and the ticked box) is to build it.
-  WINDOWS_SHADOW: ${{ (inputs.windows_shadow == null || inputs.windows_shadow) && 'yes' || 'no' }}
-  MOBILE_APPS: ${{ (inputs.mobile_apps == null || inputs.mobile_apps) && 'yes' || 'no' }}
+  WINDOWS_SHADOW: ${{ (github.event_name != 'workflow_dispatch' || inputs.windows_shadow) && 'yes' || 'no' }}
+  MOBILE_APPS: ${{ (github.event_name != 'workflow_dispatch' || inputs.mobile_apps) && 'yes' || 'no' }}
   ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
 
 jobs:
@@ -355,7 +355,7 @@ jobs:
           if [ -n "${{ matrix.win_arch }}" ]; then args="--arch ${{ matrix.win_arch }}"; fi
           if [ "$RUNNER_OS" = "Windows" ] && [ -n "${{ inputs.win_target }}" ] \
              && [ "${{ inputs.win_target }}" != "10" ] \
-             && [ "${{ inputs.win_crt }}" != "dynamic" ]; then
+             && [ "${{ inputs.win_crt }}" = "static" ]; then
             args="$args --win-crt static"
           fi
           python scripts/build_deps.py --target host --edition ${{ matrix.edition }} \
@@ -1066,7 +1066,9 @@ jobs:
   # ---------------------------------------------------------------------------
   android-apk:
     name: aFreeRDP APK
-    if: ${{ (inputs.mobile_apps == null || inputs.mobile_apps) }}
+    # NB: `inputs.x == null` is true when x is *false* (GitHub coerces
+    # null to false), so gate on the event type instead.
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.mobile_apps }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -1184,7 +1186,9 @@ jobs:
   # ---------------------------------------------------------------------------
   ios-app:
     name: iFreeRDP app (${{ matrix.platform }})
-    if: ${{ (inputs.mobile_apps == null || inputs.mobile_apps) }}
+    # NB: `inputs.x == null` is true when x is *false* (GitHub coerces
+    # null to false), so gate on the event type instead.
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.mobile_apps }}
     runs-on: macos-15
     timeout-minutes: 120
     strategy:
