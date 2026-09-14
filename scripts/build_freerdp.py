@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 35
+BUILD_SCRIPT_VERSION = 36
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -1567,7 +1567,7 @@ def _is_msvc_crt_dll(filename):
     return filename.lower().startswith(_MSVC_CRT_PREFIXES)
 
 
-def collect_host_artifacts(prefix):
+def collect_host_artifacts(prefix, static=False):
     """
     Return a list of (path, relative_subdir) tuples.
 
@@ -1578,6 +1578,16 @@ def collect_host_artifacts(prefix):
     sysname = platform.system()
     ext = _shared_lib_ext(sysname)
     candidates = []
+
+    if sysname == "Windows" and static:
+        # Fully static build (--win-target 7/8.1 without --win-toolset):
+        # there are no DLLs, only .lib archives under lib/.
+        for sub in ("lib", "lib64"):
+            d = os.path.join(prefix, sub)
+            if os.path.isdir(d):
+                for p in glob.glob(os.path.join(d, "*.lib")):
+                    candidates.append((p, ""))
+        return candidates
 
     if sysname == "Windows":
         for p in glob.glob(os.path.join(prefix, "bin", "*.dll")):
@@ -1628,7 +1638,8 @@ def collect_host_artifacts(prefix):
     return candidates
 
 
-def verify_artifacts(artifacts, profile, host_os=None, windows_shadow=False):
+def verify_artifacts(artifacts, profile, host_os=None, windows_shadow=False,
+                     static=False):
     """
     Assert that every library family the profile promised actually exists.
     Prevents shipping a wheel where CMake silently dropped server support
@@ -1655,6 +1666,10 @@ def verify_artifacts(artifacts, profile, host_os=None, windows_shadow=False):
                 profile, missing, sorted(set(core_names))))
     print("[verify] core libraries present: {0}".format(want))
 
+    if platform.system() == "Windows" and static:
+        print("[verify] static archives: {0}".format(
+            ", ".join(sorted(core_names))))
+        return
     if platform.system() == "Windows":
         machines = {}
         for p, _sub in artifacts:
@@ -3258,14 +3273,20 @@ def main():
                    windows_shadow=args.with_windows_shadow,
                    webview=args.webview, win_target=args.win_target,
                    win_toolset=args.win_toolset)
-        artifacts = collect_host_artifacts(prefix)
+        static_win = (host_os == "Windows" and args.win_target != "10"
+                      and not args.win_toolset)
+        artifacts = collect_host_artifacts(prefix, static=static_win)
         if not artifacts:
             sys.stderr.write(
-                "No artifacts found after build - something went wrong.\n")
+                "No artifacts found in {0} after the build.\n"
+                "Expected {1} there; a fully static Windows build installs "
+                ".lib archives under lib/.\n".format(
+                    prefix, "*.lib" if static_win else "shared libraries"))
             return 3
         if not args.skip_verify:
             verify_artifacts(artifacts, args.profile, host_os,
-                             windows_shadow=args.with_windows_shadow)
+                             windows_shadow=args.with_windows_shadow,
+                             static=static_win)
         out = install_into_package(
             artifacts, arch=args.arch, deps_prefix=deps_prefix,
             compact=(args.profile != "full"),
@@ -3278,7 +3299,12 @@ def main():
                 verify_executables(staged, out, args.profile, host_os,
                                    windows_shadow=args.with_windows_shadow)
                 verify_proxy_modules(out, args.profile, host_os)
-        if not args.skip_verify:
+        if static_win:
+            print("\n[verify] static build: {0} .lib archive(s) staged - for "
+                  "linking into your own application.\n"
+                  "         They are not loadable by ctypes, so the runtime "
+                  "checks are skipped.".format(len(artifacts)))
+        elif not args.skip_verify:
             verify_loadable(out, args.profile, arch=args.arch)
             if deps_media_available(deps_prefix):
                 verify_media_linked(out, deps_prefix)
