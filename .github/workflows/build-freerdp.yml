@@ -239,7 +239,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 35
+            python scripts/$s.py --require-version 36
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -400,7 +400,9 @@ jobs:
       # ---- verify ---------------------------------------------------------
 
       - name: Verify PE machine type (Windows)
-        if: runner.os == 'Windows'
+        # A legacy win_target without a toolset is a static .lib build: no
+        # DLLs to inspect or load.
+        if: runner.os == 'Windows' && (inputs.win_target == null || inputs.win_target == '10' || inputs.win_toolset != '')
         shell: bash
         run: |
           python - <<'PY'
@@ -424,7 +426,8 @@ jobs:
       - name: Verify libraries load and channels are present
         # The arm64 Windows DLLs are cross-compiled and can't be loaded on
         # this x64 runner; a separate job loads them on windows-11-arm.
-        if: matrix.win_arch != 'arm64'
+        # Static (legacy win_target) builds have no loadable libraries.
+        if: matrix.win_arch != 'arm64' && (runner.os != 'Windows' || inputs.win_target == null || inputs.win_target == '10' || inputs.win_toolset != '')
         shell: bash
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/pyfreerdp/_libs
@@ -459,9 +462,10 @@ jobs:
           PY
 
       - name: Validate (media, executables, loopback)
+        # Skipped for static .lib builds (nothing to load at runtime).
         # Cross-compiled Windows arm64 can't run here; verify-windows-arm64
         # loads it natively instead.
-        if: matrix.win_arch != 'arm64'
+        if: matrix.win_arch != 'arm64' && (runner.os != 'Windows' || inputs.win_target == null || inputs.win_target == '10' || inputs.win_toolset != '')
         shell: bash
         run: |
           extra="--edition ${{ matrix.edition }}"
@@ -489,6 +493,9 @@ jobs:
         shell: bash
         run: |
           name="freerdp-${FREERDP_REF}-${{ matrix.label }}-${{ matrix.profile }}-${{ matrix.edition }}"
+          if [ "$RUNNER_OS" = "Windows" ] && [ -n "${{ inputs.win_target }}" ] && [ "${{ inputs.win_target }}" != "10" ]; then
+            name="$name-win${{ inputs.win_target }}$([ -n "${{ inputs.win_toolset }}" ] && echo "-${{ inputs.win_toolset }}" || echo "-static")"
+          fi
           mkdir -p out
           {
             echo "FreeRDP ref:  $FREERDP_REF"
@@ -605,7 +612,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 35
+            python scripts/$s.py --require-version 36
           done
 
       - name: Install host tools
@@ -896,7 +903,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 35
+            python scripts/$s.py --require-version 36
           done
 
       - name: Install host tools
@@ -1051,7 +1058,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 35
+            python scripts/$s.py --require-version 36
           done
       - uses: actions/setup-java@v4
         with:
@@ -1176,7 +1183,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 35
+            python scripts/$s.py --require-version 36
           done
       - name: Show toolchain
         run: |
