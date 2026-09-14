@@ -79,6 +79,12 @@ on:
         default: "10"
         type: choice
         options: ["10", "8.1", "7"]
+      win_crt:
+        description: "CRT for legacy win_target: static = DLLs with no redistributable (deps must match)"
+        required: false
+        default: "static"
+        type: choice
+        options: ["static", "dynamic"]
       win_toolset:
         description: "MSVC toolset for legacy win_target (v142 = VS2019, needed for loadable DLLs; blank = static .lib build)"
         required: false
@@ -239,7 +245,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 36
+            python scripts/$s.py --require-version 37
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -347,6 +353,11 @@ jobs:
           else jobs=$(nproc); fi
           args=""
           if [ -n "${{ matrix.win_arch }}" ]; then args="--arch ${{ matrix.win_arch }}"; fi
+          if [ "$RUNNER_OS" = "Windows" ] && [ -n "${{ inputs.win_target }}" ] \
+             && [ "${{ inputs.win_target }}" != "10" ] \
+             && [ "${{ inputs.win_crt }}" != "dynamic" ]; then
+            args="$args --win-crt static"
+          fi
           python scripts/build_deps.py --target host --edition ${{ matrix.edition }} \
             --profile ${{ matrix.profile }} --jobs "$jobs" $args
           cat build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}/DEPS-MANIFEST.txt
@@ -388,6 +399,9 @@ jobs:
             args="$args --win-target ${{ inputs.win_target }}"
             if [ -n "${{ inputs.win_toolset }}" ]; then
               args="$args --win-toolset ${{ inputs.win_toolset }}"
+            fi
+            if [ -n "${{ inputs.win_crt }}" ]; then
+              args="$args --win-crt ${{ inputs.win_crt }}"
             fi
           fi
           python scripts/build_freerdp.py \
@@ -612,7 +626,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 36
+            python scripts/$s.py --require-version 37
           done
 
       - name: Install host tools
@@ -903,7 +917,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 36
+            python scripts/$s.py --require-version 37
           done
 
       - name: Install host tools
@@ -1058,7 +1072,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 36
+            python scripts/$s.py --require-version 37
           done
       - uses: actions/setup-java@v4
         with:
@@ -1183,7 +1197,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 36
+            python scripts/$s.py --require-version 37
           done
       - name: Show toolchain
         run: |
