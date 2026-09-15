@@ -95,6 +95,11 @@ on:
         required: false
         default: "armeabi-v7a,arm64-v8a,x86,x86_64"
         type: string
+      wheels:
+        description: "Package the built libraries into Python wheels"
+        required: false
+        default: true
+        type: boolean
       mobile_apps:
         description: "Also build the aFreeRDP APK and the iFreeRDP iOS app"
         required: false
@@ -142,6 +147,7 @@ env:
   # Default (non-dispatch triggers, and the ticked box) is to build it.
   WINDOWS_SHADOW: ${{ (github.event_name != 'workflow_dispatch' || inputs.windows_shadow) && 'yes' || 'no' }}
   MOBILE_APPS: ${{ (github.event_name != 'workflow_dispatch' || inputs.mobile_apps) && 'yes' || 'no' }}
+  WHEELS: ${{ (github.event_name != 'workflow_dispatch' || inputs.wheels) && 'yes' || 'no' }}
   ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
 
 jobs:
@@ -1273,12 +1279,115 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
+  # Package the library artifacts into wheels: one per platform, tagged
+  # py3-none-<platform>. pyfreerdp loads its libraries with ctypes and never
+  # links libpython, so a single wheel serves every Python version - no
+  # per-interpreter matrix needed. Android/iOS get PEP 738 / PEP 730 tags.
+  # ---------------------------------------------------------------------------
+  wheels:
+    name: wheels
+    needs: [desktop, android, ios]
+    if: |
+      always()
+      && (github.event_name != 'workflow_dispatch' || inputs.wheels)
+      && needs.desktop.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check build scripts are the expected version
+        shell: bash
+        run: |
+          for s in build_freerdp build_deps validate_build; do
+            python scripts/$s.py --require-version 37
+          done
+
+      - name: Install packaging tools
+        run: python -m pip install --upgrade build wheel
+
+      - name: Download the library artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: freerdp-*
+          path: artifacts/
+          # Each artifact keeps its own directory; the packager reads the
+          # platform out of the directory name.
+
+      - name: Show what was downloaded
+        run: ls -1 artifacts/
+
+      - name: Build the wheels
+        run: |
+          # --android-api must match the API_LEVEL the libraries were built
+          # with, otherwise the tag over-promises compatibility.
+          python scripts/package_wheels.py artifacts/ -o dist/ \
+            --android-api 24 --ios-version 13.0
+
+      - name: Verify each wheel installs and loads
+        run: |
+          set -e
+          ls -lh dist/
+          # Only the Linux wheel can be installed on this runner; the rest are
+          # checked for structure (correct tag, libraries present).
+          for whl in dist/*.whl; do
+            name=$(basename "$whl")
+            tag=$(unzip -p "$whl" "*/WHEEL" | sed -n 's/^Tag: //p' | tr -d '\r')
+            files=$(unzip -l "$whl" | grep -c "pyfreerdp/_libs/" || true)
+            echo "$name  tag=$tag  libs=$files"
+            [ "$files" -gt 0 ] || { echo "::error::$name ships no libraries"; exit 1; }
+            case "$name" in
+              *manylinux*x86_64*)
+                python -m venv /tmp/wv && /tmp/wv/bin/pip install -q "$whl"
+                /tmp/wv/bin/python -c "
+          import ctypes, glob, os, pyfreerdp
+          d = os.path.join(os.path.dirname(pyfreerdp.__file__), '_libs')
+          lib = sorted(glob.glob(os.path.join(d, '*freerdp3.so*')))[0]
+          f = ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+          f.freerdp_get_version_string.restype = ctypes.c_char_p
+          print('installed wheel loads FreeRDP', f.freerdp_get_version_string().decode())
+          "
+                rm -rf /tmp/wv
+                ;;
+            esac
+          done
+
+      - name: Upload wheels
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ env.FREERDP_REF }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish links to the job summary
+        run: |
+          {
+            echo "### Python wheels — FreeRDP $FREERDP_REF"
+            echo
+            echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+            echo
+            echo "| File | Size |"
+            echo "|---|---|"
+            for f in dist/*; do
+              printf "| \`%s\` | %s |\n" "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+            done
+            echo
+            echo "One wheel per platform, valid for every Python version (ctypes, no libpython link)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
   # Collect every artifact link into one table, and optionally attach the
   # files to a GitHub release so the URLs outlive the 30-day artifact TTL.
   # ---------------------------------------------------------------------------
   links:
     name: artifact links
-    needs: [desktop, android, ios, android-apk, ios-app]
+    needs: [desktop, android, ios, android-apk, ios-app, wheels]
     if: always() && (needs.desktop.result != 'cancelled')
     runs-on: ubuntu-24.04
     permissions:
@@ -1330,7 +1439,7 @@ jobs:
           (github.event_name == 'push' && github.ref == 'refs/heads/main')
         uses: actions/download-artifact@v4
         with:
-          pattern: freerdp-*
+          pattern: "{freerdp-*,wheels-*}"
           merge-multiple: true
           path: release/
 
