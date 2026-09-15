@@ -1097,7 +1097,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends nasm yasm
 
-      - uses: android-actions/setup-android@v3
+      # NB: no android-actions/setup-android here. Its default package list
+      # includes the obsolete "tools" package, which Google removed from the
+      # repository - the action then fails with "Failed to find package
+      # 'tools'". The runner image already ships the SDK; all that is needed
+      # is accepting the licences so Gradle can fetch the NDK/CMake it wants.
+      - name: Prepare the Android SDK
+        run: |
+          set -e
+          test -n "$ANDROID_HOME" || { echo "::error::ANDROID_HOME is not set"; exit 1; }
+          echo "SDK: $ANDROID_HOME"
+          sdkmanager="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)"
+          yes | "$sdkmanager" --licenses >/dev/null 2>&1 || true
+          "$sdkmanager" --list_installed | head -20
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Build the APK
