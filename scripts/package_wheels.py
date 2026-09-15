@@ -78,16 +78,27 @@ def run(cmd, cwd=None):
 
 
 def unpack(src, dest):
-    """Return a directory holding _libs/ for this artifact."""
+    """
+    Return a directory holding _libs/ for this artifact, or None if there is
+    none (a stray artifact, or a layout this version does not produce).
+    Skipping is better than aborting: one odd directory should not stop the
+    rest of the platforms from being packaged.
+    """
     if os.path.isdir(src):
-        # Either <dir>/_libs or <dir>/<archive>
         if os.path.isdir(os.path.join(src, "_libs")):
             return src
-        for pattern in ("*.tar.gz", "*.zip"):
+        # Older layout: an archive inside the artifact directory.
+        for pattern in ("*.tar.gz", "*.tgz", "*.zip"):
             hits = glob.glob(os.path.join(src, pattern))
             if hits:
                 return unpack(hits[0], dest)
-        raise SystemExit("no _libs or archive in {0}".format(src))
+        # Or _libs one level deeper.
+        for sub in sorted(os.listdir(src)):
+            deeper = os.path.join(src, sub, "_libs")
+            if os.path.isdir(deeper):
+                return os.path.join(src, sub)
+        log("skipping {0}: no _libs directory".format(os.path.basename(src)))
+        return None
     os.makedirs(dest)
     if src.endswith((".tar.gz", ".tgz")):
         with tarfile.open(src) as tf:
@@ -96,14 +107,16 @@ def unpack(src, dest):
         with zipfile.ZipFile(src) as zf:
             zf.extractall(dest)
     else:
-        raise SystemExit("unknown archive type: {0}".format(src))
+        log("skipping {0}: unknown archive type".format(os.path.basename(src)))
+        return None
     if os.path.isdir(os.path.join(dest, "_libs")):
         return dest
     inner = [os.path.join(dest, d) for d in os.listdir(dest)
              if os.path.isdir(os.path.join(dest, d, "_libs"))]
     if inner:
         return inner[0]
-    raise SystemExit("no _libs inside {0}".format(src))
+    log("skipping {0}: no _libs inside".format(os.path.basename(src)))
+    return None
 
 
 def restore_exec_bits(directory):
@@ -283,6 +296,9 @@ def main():
                 skipped.append(name)
             if args.mobile in ("wheel", "both"):
                 root = unpack(entry, os.path.join(work, name + ".m"))
+                if root is None:
+                    continue
+                restore_exec_bits(os.path.join(root, "_libs"))
                 whl = wheel_with_libs(base, os.path.join(root, "_libs"),
                                       None, mtag, outdir)
                 log("{0} -> {1}".format(name, os.path.basename(whl)))
@@ -293,6 +309,8 @@ def main():
             log("skipping {0} (unknown platform)".format(name))
             continue
         root = unpack(entry, os.path.join(work, name + ".x"))
+        if root is None:
+            continue
         libs = os.path.join(root, "_libs")
         restore_exec_bits(libs)
         bins = os.path.join(root, "_bin") if args.with_executables else None
@@ -304,6 +322,11 @@ def main():
     run([sys.executable, "-m", "build", "--sdist", "--outdir", outdir],
         cwd=args.repo)
 
+    if not made:
+        raise SystemExit(
+            "no wheels were produced - check that the artifact directories "
+            "are named like freerdp-<ref>-<platform>-<profile>-<edition> and "
+            "contain a _libs directory")
     print("\n=== wheels")
     for w in made:
         print("  {0}  ({1:.1f} MB)".format(os.path.basename(w),
