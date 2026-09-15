@@ -64,6 +64,44 @@ IOS_SDKS = {
 }
 
 
+# A build run produces one artifact per (platform, profile, edition) - up to
+# eight per platform - but a wheel filename only encodes the platform. Pick
+# deliberately instead of letting the last one win.
+PROFILE_RANK = {"full": 0, "minimal": 1}
+EDITION_RANK = {"media": 0, "ffmpeg": 1, "openh264": 2, "standard": 3}
+
+
+def variant_of(name):
+    """(profile, edition) parsed out of an artifact directory name."""
+    profile = next((p for p in PROFILE_RANK if "-" + p + "-" in name), None)
+    edition = next((e for e in EDITION_RANK if name.endswith("-" + e)
+                    or ("-" + e + "-") in name), None)
+    return profile, edition
+
+
+def choose_variants(entries, want_profile, want_edition, key_of):
+    """
+    Keep one artifact per wheel tag. An exact --profile/--edition match wins;
+    otherwise the ranking above decides, so the result does not depend on
+    directory order.
+    """
+    best = {}
+    for entry, key in entries:
+        profile, edition = variant_of(os.path.basename(entry))
+        exact = ((want_profile is None or profile == want_profile)
+                 and (want_edition is None or edition == want_edition))
+        rank = (0 if exact else 1,
+                PROFILE_RANK.get(profile, 9), EDITION_RANK.get(edition, 9))
+        if key not in best or rank < best[key][0]:
+            best[key] = (rank, entry, profile, edition)
+    chosen = {}
+    for key, (_rank, entry, profile, edition) in best.items():
+        chosen[key] = entry
+        log("{0}: using {1} ({2}/{3})".format(
+            key, os.path.basename(entry), profile or "?", edition or "?"))
+    return chosen
+
+
 def log(msg):
     print("[package] {0}".format(msg))
     sys.stdout.flush()
@@ -255,6 +293,12 @@ def main():
                         "has one. Current builds put the executables in "
                         "_libs alongside the libraries, so they are included "
                         "either way.")
+    p.add_argument("--profile", choices=("full", "minimal"), default="full",
+                   help="which build profile to publish when a platform has "
+                        "several artifacts (default: full).")
+    p.add_argument("--edition", choices=("standard", "ffmpeg", "openh264",
+                                         "media"), default="media",
+                   help="which media edition to publish (default: media).")
     p.add_argument("--mobile", choices=("wheel", "archive", "both"),
                    default="both",
                    help="how to emit Android/iOS artifacts: PEP 738/730 "
@@ -280,11 +324,29 @@ def main():
     base = build_base_wheel(args.repo, work)
     log("base wheel: {0}".format(os.path.basename(base)))
 
+    # Decide which artifact represents each wheel tag before building any.
+    candidates = []
+    for entry in entries:
+        name = os.path.basename(entry)
+        if name.endswith(".whl"):
+            continue
+        tag = mobile_tag(name, args.android_api, args.ios_version)
+        if not tag:
+            plat = platform_of(name)
+            tag = PLATFORM_TAGS[plat] if plat else None
+        if tag:
+            candidates.append((entry, tag))
+    chosen = set(choose_variants(candidates, args.profile, args.edition,
+                                 None).values())
+
     made, skipped = [], []
     for entry in entries:
         name = os.path.basename(entry)
         if name.endswith(".whl"):
             continue
+        if candidates and entry not in chosen and any(
+                e == entry for e, _t in candidates):
+            continue                      # a different variant won this tag
         mtag = mobile_tag(name, args.android_api, args.ios_version)
         if mtag:
             if args.mobile in ("archive", "both"):
