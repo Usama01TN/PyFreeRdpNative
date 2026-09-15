@@ -31,6 +31,12 @@ import tempfile
 import zipfile
 
 
+# Bumped whenever the CLI changes; the workflow asks for the version it was
+# written against so a stale copy fails with an explanation rather than
+# "unrecognized arguments".
+PACKAGE_SCRIPT_VERSION = 2
+
+
 # Artifact platform name -> wheel platform tag.
 #
 # manylinux_2_28 matches the Ubuntu 24.04 runners' glibc floor loosely; if you
@@ -284,7 +290,11 @@ def wheel_with_libs(base_wheel, libs_dir, bin_dir, tag, outdir):
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("artifacts", help="directory of unpacked/downloaded artifacts")
+    p.add_argument("artifacts", nargs="?",
+                   help="directory of unpacked/downloaded artifacts")
+    p.add_argument("--require-version", type=int, metavar="N",
+                   help="exit 0 if this script is version N, else explain "
+                        "that scripts/package_wheels.py is stale")
     p.add_argument("-o", "--outdir", default="dist")
     p.add_argument("--repo", default=os.path.dirname(
         os.path.dirname(os.path.abspath(__file__))))
@@ -311,6 +321,20 @@ def main():
                    help="minimum iOS version in the ios_<ver>_<arch>_<sdk> "
                         "tag (default 13.0).")
     args = p.parse_args()
+
+    if args.require_version is not None:
+        if args.require_version == PACKAGE_SCRIPT_VERSION:
+            print("[package_wheels.py] version {0} OK".format(
+                PACKAGE_SCRIPT_VERSION))
+            return 0
+        sys.stderr.write(
+            "scripts/package_wheels.py is version {0} but the workflow expects "
+            "version {1}.\nThe repository has a stale copy: commit the "
+            "package_wheels.py that came with this workflow.\n".format(
+                PACKAGE_SCRIPT_VERSION, args.require_version))
+        return 1
+    if not args.artifacts:
+        p.error("the artifacts directory is required")
 
     outdir = os.path.abspath(args.outdir)
     if not os.path.isdir(outdir):
@@ -401,4 +425,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
