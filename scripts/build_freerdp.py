@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 38
+BUILD_SCRIPT_VERSION = 39
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -1803,6 +1803,80 @@ def _macho_add_rpath(path, want, replace_prefix=None):
     return False
 
 
+# Libraries every Linux system provides (the manylinux policy's allow-list,
+# essentially): anything a staged library needs that is NOT in this set is
+# copied into _libs so the package works on machines that lack it - libcjson
+# and ICU (winpr, FreeRDP 3.31+), OpenSSL, ALSA, udev, xkbcommon, libffi...
+LINUX_BASELINE_LIBS = (
+    "libc.so", "libm.so", "libdl.so", "libpthread.so", "librt.so",
+    "libutil.so", "libresolv.so", "libnsl.so", "libcrypt.so",
+    "ld-linux", "linux-vdso", "libgcc_s.so", "libstdc++.so",
+    "libX11.so", "libXext.so", "libXrender.so", "libXfixes.so",
+    "libXcursor.so", "libXinerama.so", "libXrandr.so", "libXi.so",
+    "libXv.so", "libxcb.so", "libXau.so", "libXdmcp.so", "libICE.so",
+    "libSM.so", "libGL.so", "libEGL.so", "libgobject-2.0.so",
+    "libgthread-2.0.so", "libglib-2.0.so",
+)
+
+
+def vendor_linux_system_libs(out_dir):
+    """
+    Make a Linux package self-contained: for every ELF in out_dir, resolve
+    its NEEDED libraries with ldd and copy in the ones that are not part of
+    the baseline system and not already staged. Repeats until nothing new
+    appears (a vendored lib can itself need vendoring). Runs on the native
+    runner, so the copied libraries are the right architecture - unlike an
+    after-the-fact repair on a different machine.
+    """
+    def is_baseline(name):
+        return any(name.startswith(b) for b in LINUX_BASELINE_LIBS)
+
+    def elf_files():
+        for fn in os.listdir(out_dir):
+            p = os.path.join(out_dir, fn)
+            if os.path.isfile(p) and not os.path.islink(p):
+                try:
+                    with open(p, "rb") as fh:
+                        if fh.read(4) == b"\x7fELF":
+                            yield p
+                except OSError:
+                    pass
+
+    copied = []
+    for _round in range(6):
+        added = 0
+        have = set(os.listdir(out_dir))
+        for p in list(elf_files()):
+            try:
+                out = subprocess.check_output(["ldd", p], stderr=subprocess.STDOUT
+                                              ).decode(errors="replace")
+            except subprocess.CalledProcessError:
+                continue
+            for line in out.splitlines():
+                if "=>" not in line:
+                    continue
+                name, _, rest = line.strip().partition(" => ")
+                path = rest.split(" (")[0].strip()
+                if not path.startswith("/") or not os.path.exists(path):
+                    continue
+                if name in have or is_baseline(name):
+                    continue
+                if os.path.dirname(os.path.realpath(path)) == os.path.realpath(out_dir):
+                    continue
+                shutil.copy2(os.path.realpath(path), os.path.join(out_dir, name))
+                os.chmod(os.path.join(out_dir, name), 0o755)
+                have.add(name)
+                copied.append(name)
+                added += 1
+        if not added:
+            break
+    if copied:
+        print("[vendor] copied {0} system librar{1} into the package: {2}".format(
+            len(copied), "y" if len(copied) == 1 else "ies",
+            ", ".join(sorted(copied))))
+    return copied
+
+
 def _fix_rpath(out_dir):
     """
     FreeRDP installs its libraries with RUNPATH '$ORIGIN/../lib:$ORIGIN/..'
@@ -2386,6 +2460,8 @@ def install_into_package(artifacts, arch="host", deps_prefix=None,
         bundle_unix_runtime_deps(out, deps_prefix,
                                  extra_libdirs=extra_dirs or None,
                                  extra_allow=tuple(extra_allow) or None)
+        if platform.system() == "Linux":
+            vendor_linux_system_libs(out)
     _fix_rpath(out)
     return out
 

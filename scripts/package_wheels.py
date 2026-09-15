@@ -34,17 +34,20 @@ import zipfile
 # Bumped whenever the CLI changes; the workflow asks for the version it was
 # written against so a stale copy fails with an explanation rather than
 # "unrecognized arguments".
-PACKAGE_SCRIPT_VERSION = 2
+PACKAGE_SCRIPT_VERSION = 3
 
 
 # Artifact platform name -> wheel platform tag.
 #
-# manylinux_2_28 matches the Ubuntu 24.04 runners' glibc floor loosely; if you
-# build on a different image, check with `auditwheel show` and adjust. macOS
-# tags carry the deployment target the libraries were built with (11.0).
+# The Linux libraries are built on Ubuntu 24.04 (glibc 2.39), so that is the
+# honest floor - `auditwheel show` confirms it. A lower tag would need the
+# build to move into a manylinux container. Non-baseline system libraries
+# (cJSON, ICU, OpenSSL, krb5, ...) are vendored into _libs at build time, so
+# the wheel depends on nothing but glibc and X11. macOS tags carry the
+# deployment target the libraries were built with (11.0).
 PLATFORM_TAGS = {
-    "linux-x86_64": "manylinux_2_28_x86_64",
-    "linux-aarch64": "manylinux_2_28_aarch64",
+    "linux-x86_64": "manylinux_2_39_x86_64",
+    "linux-aarch64": "manylinux_2_39_aarch64",
     "macos-arm64": "macosx_11_0_arm64",
     "macos-x86_64": "macosx_11_0_x86_64",
     "windows-x64": "win_amd64",
