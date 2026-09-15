@@ -251,7 +251,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 37
+            python scripts/$s.py --require-version 38
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -552,26 +552,19 @@ jobs:
               macOS)   echo "Kerberos:     not built (upstream: unsupported on macOS; opt-in with --with-krb5 + Homebrew krb5)" ;;
             esac
             echo
-            echo "Files:"
+            echo "Files (libraries and executables together):"
             ls -l pyfreerdp/_libs
-            if [ -d pyfreerdp/_bin ]; then echo; echo "Executables:"; ls -l pyfreerdp/_bin; fi
           } > pyfreerdp/_libs/BUILD-INFO.txt
           cp build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}/DEPS-MANIFEST.txt pyfreerdp/_libs/ 2>/dev/null || true
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            # upload-artifact zips whatever it is given, so hand it the plain
-            # directory - pre-archiving here would put a .zip inside the .zip.
-            mkdir -p "out/$name"
-            cp -r pyfreerdp/_libs "out/$name/"
-            [ -d pyfreerdp/_bin ] && cp -r pyfreerdp/_bin "out/$name/"
-            echo "file=out/$name" >> "$GITHUB_OUTPUT"
-          else
-            # tar.gz on Unix: it preserves the symlink chain
-            # (libfreerdp3.so -> .so.3) and the executable bits, which a zip
-            # would flatten. One archive inside GitHub's zip, unavoidably.
-            dirs="_libs"; [ -d pyfreerdp/_bin ] && dirs="$dirs _bin"
-            tar -C pyfreerdp -czf "out/$name.tar.gz" $dirs
-            echo "file=out/$name.tar.gz" >> "$GITHUB_OUTPUT"
-          fi
+          # upload-artifact zips whatever it is given, so hand it the plain
+          # directory: pre-archiving would nest an archive inside the .zip.
+          # Staging already resolved every symlink into a real file, so the
+          # only thing a zip loses is the executable bit - scripts/
+          # package_wheels.py restores it, and `chmod +x _libs/*` does the
+          # same by hand.
+          mkdir -p "out/$name"
+          cp -r pyfreerdp/_libs "out/$name/"
+          echo "file=out/$name" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
           ls -lh out/
 
@@ -583,7 +576,6 @@ jobs:
           path: ${{ steps.pkg.outputs.file }}
           if-no-files-found: error
           retention-days: 30
-          compression-level: 0   # already compressed
 
       - name: Upload diagnostics on failure
         if: failure()
@@ -647,7 +639,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 37
+            python scripts/$s.py --require-version 38
           done
 
       - name: Install host tools
@@ -762,9 +754,10 @@ jobs:
             echo "Repo commit:  $GITHUB_SHA"
             echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } > pyfreerdp/_libs/android/${{ matrix.abi }}/BUILD-INFO.txt
-          tar -C pyfreerdp/_libs/android -czf "out/$name.tar.gz" ${{ matrix.abi }}
+          mkdir -p "out/$name"
+          cp -r pyfreerdp/_libs/android/${{ matrix.abi }} "out/$name/_libs"
           echo "name=$name" >> "$GITHUB_OUTPUT"
-          echo "file=out/$name.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "file=out/$name" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         id: upload
@@ -774,7 +767,6 @@ jobs:
           path: ${{ steps.pkg.outputs.file }}
           if-no-files-found: error
           retention-days: 30
-          compression-level: 0
 
       - name: Upload diagnostics on failure
         if: failure()
@@ -935,7 +927,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 37
+            python scripts/$s.py --require-version 38
           done
 
       - name: Install host tools
@@ -1036,9 +1028,10 @@ jobs:
             echo "Link order: freerdp-client3 / freerdp-server3, freerdp3, winpr3, openh264, avcodec, avformat, swscale, swresample, avutil, ssl, crypto, (libc++)"
             echo "Frameworks: Foundation, Security, CoreFoundation, SystemConfiguration"
           } > pyfreerdp/_libs/ios/${{ matrix.platform }}/BUILD-INFO.txt
-          tar -C pyfreerdp/_libs/ios -czf "out/$name.tar.gz" ${{ matrix.platform }}
+          mkdir -p "out/$name"
+          cp -r pyfreerdp/_libs/ios/${{ matrix.platform }} "out/$name/_libs"
           echo "name=$name" >> "$GITHUB_OUTPUT"
-          echo "file=out/$name.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "file=out/$name" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         id: upload
@@ -1048,7 +1041,6 @@ jobs:
           path: ${{ steps.pkg.outputs.file }}
           if-no-files-found: error
           retention-days: 30
-          compression-level: 0
 
       - name: Upload diagnostics on failure
         if: failure()
@@ -1092,7 +1084,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 37
+            python scripts/$s.py --require-version 38
           done
       - uses: actions/setup-java@v4
         with:
@@ -1219,7 +1211,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 37
+            python scripts/$s.py --require-version 38
           done
       - name: Show toolchain
         run: |
@@ -1246,7 +1238,8 @@ jobs:
         run: |
           name="ifreerdp-${FREERDP_REF}-${{ matrix.platform }}"
           mkdir -p out
-          tar -C build/ios-app/${{ matrix.platform }} -czf "out/$name.tar.gz" .
+          mkdir -p "out/$name"
+          cp -r build/ios-app/${{ matrix.platform }}/. "out/$name/"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
       - name: Upload app
@@ -1254,10 +1247,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pkg.outputs.name }}
-          path: out/*.tar.gz
+          path: out/${{ steps.pkg.outputs.name }}
           if-no-files-found: error
           retention-days: 30
-          compression-level: 0
 
       - name: Upload diagnostics on failure
         if: failure()
@@ -1302,7 +1294,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 37
+            python scripts/$s.py --require-version 38
           done
 
       - name: Install packaging tools
@@ -1424,7 +1416,7 @@ jobs:
               echo "| \`$plat\` | $mb | [$name.zip]($base/artifacts/$id) |"
             done < artifacts.tsv
             echo
-            echo "Artifacts expire after 30 days. Windows artifacts unzip straight to \`_libs/\` (+ \`_bin/\`);"
+            echo "Artifacts expire after 30 days. Windows artifacts unzip straight to \`_libs/\`;"
             echo "other platforms contain a .tar.gz, which preserves symlinks and executable bits."
             if [ "${{ needs.desktop.result }}" != "success" ] || [ "${{ needs.android.result }}" != "success" ] || [ "${{ needs.ios.result }}" != "success" ]; then
               echo
