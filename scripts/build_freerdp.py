@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 37
+BUILD_SCRIPT_VERSION = 38
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -2182,11 +2182,12 @@ def stage_executables(prefixes, libs_dir, deps_prefix=None, arch="host"):
     resolves imports from the executable's own directory) and point their
     rpath at ../_libs. Returns the list of staged paths.
     """
+    # Everything - libraries and executables - goes into _libs on every
+    # platform. One directory is simpler to package (the wheels just copy
+    # it) and it means an executable finds its libraries next to itself,
+    # so the rpath is $ORIGIN rather than $ORIGIN/../_bin.
     sysname = platform.system()
-    if sysname == "Windows":
-        out = libs_dir
-    else:
-        out = os.path.join(os.path.dirname(libs_dir), "_bin")
+    out = libs_dir
     if not os.path.isdir(out):
         os.makedirs(out)
     staged = []
@@ -2215,13 +2216,13 @@ def stage_executables(prefixes, libs_dir, deps_prefix=None, arch="host"):
         pe = _ensure_patchelf()
         for p in staged:
             try:
-                subprocess.check_call([pe, "--set-rpath", "$ORIGIN/../_libs", p])
+                subprocess.check_call([pe, "--set-rpath", "$ORIGIN", p])
             except subprocess.CalledProcessError:
                 print("[bin] warning: could not set rpath on {0}".format(p))
     elif sysname == "Darwin" and staged:
         for p in staged:
-            _macho_add_rpath(p, "@executable_path/../_libs",
-                             replace_prefix="@executable_path/")
+            _macho_add_rpath(p, "@executable_path",
+                             replace_prefix="@executable_path")
     # The executables pull in libraries the core libs don't (ffmpeg ->
     # libavformat/avfilter/avdevice, xfreerdp -> libfreerdp-client ...).
     # Walk their imports too, then make the newly copied libs relocatable.
@@ -2240,7 +2241,8 @@ def stage_executables(prefixes, libs_dir, deps_prefix=None, arch="host"):
             if os.path.isdir(dst):
                 shutil.rmtree(dst)
             shutil.copytree(share, dst)
-    print("[bin] {0} executables staged into {1}".format(len(staged), out))
+    print("[bin] {0} executables staged into {1} (alongside the libraries)"
+          .format(len(staged), out))
     return staged
 
 
@@ -2322,7 +2324,7 @@ def verify_executables(staged, out_dir, profile, host_os, windows_shadow=False):
         return
     exts = (".exe",) if host_os == "Windows" else ("",)
     have = set()
-    search = [os.path.dirname(out_dir)]  # _bin sits next to _libs
+    search = [out_dir]
     for d in (os.path.join(os.path.dirname(out_dir), "_bin"), out_dir):
         if os.path.isdir(d):
             have |= set(os.path.splitext(f)[0] for f in os.listdir(d))

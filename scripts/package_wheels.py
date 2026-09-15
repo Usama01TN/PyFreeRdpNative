@@ -106,6 +106,36 @@ def unpack(src, dest):
     raise SystemExit("no _libs inside {0}".format(src))
 
 
+def restore_exec_bits(directory):
+    """
+    GitHub's artifact zip does not carry unix permissions, so executables
+    arrive as plain files. Put the bit back by looking at the magic number:
+    ELF and Mach-O files that are not shared libraries are programs.
+    """
+    fixed = 0
+    for root, _dirs, files in os.walk(directory):
+        for fn in files:
+            path = os.path.join(root, fn)
+            if ".so" in fn or fn.endswith((".dylib", ".dll", ".lib", ".a",
+                                           ".pc", ".txt", ".cfg", ".h")):
+                continue
+            try:
+                with open(path, "rb") as fh:
+                    magic = fh.read(4)
+            except OSError:
+                continue
+            is_elf = magic == b"\x7fELF"
+            is_macho = magic in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe",
+                                 b"\xca\xfe\xba\xbe")
+            if is_elf or is_macho:
+                mode = os.stat(path).st_mode
+                if not mode & 0o111:
+                    os.chmod(path, mode | 0o755)
+                    fixed += 1
+    if fixed:
+        log("restored the executable bit on {0} file(s)".format(fixed))
+
+
 def platform_of(name):
     """Longest matching platform key in an artifact name."""
     best = None
@@ -208,7 +238,10 @@ def main():
     p.add_argument("--repo", default=os.path.dirname(
         os.path.dirname(os.path.abspath(__file__))))
     p.add_argument("--with-executables", action="store_true",
-                   help="also ship _bin/ inside the wheels (much larger)")
+                   help="also ship a legacy _bin/ directory if the artifact "
+                        "has one. Current builds put the executables in "
+                        "_libs alongside the libraries, so they are included "
+                        "either way.")
     p.add_argument("--mobile", choices=("wheel", "archive", "both"),
                    default="both",
                    help="how to emit Android/iOS artifacts: PEP 738/730 "
@@ -261,6 +294,7 @@ def main():
             continue
         root = unpack(entry, os.path.join(work, name + ".x"))
         libs = os.path.join(root, "_libs")
+        restore_exec_bits(libs)
         bins = os.path.join(root, "_bin") if args.with_executables else None
         whl = wheel_with_libs(base, libs, bins, PLATFORM_TAGS[plat], outdir)
         log("{0} -> {1}".format(name, os.path.basename(whl)))
