@@ -1321,6 +1321,9 @@ jobs:
             python scripts/$s.py --require-version 38
           done
 
+      - name: Check the packaging script is the expected version
+        run: python scripts/package_wheels.py --require-version 2
+
       - name: Install packaging tools
         run: python -m pip install --upgrade build wheel
 
