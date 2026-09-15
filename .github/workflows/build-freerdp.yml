@@ -100,6 +100,18 @@ on:
         required: false
         default: true
         type: boolean
+      wheel_profile:
+        description: "Which profile the published wheels use"
+        required: false
+        default: "full"
+        type: choice
+        options: [full, minimal]
+      wheel_edition:
+        description: "Which media edition the published wheels use"
+        required: false
+        default: "media"
+        type: choice
+        options: [media, ffmpeg, openh264, standard]
       mobile_apps:
         description: "Also build the aFreeRDP APK and the iFreeRDP iOS app"
         required: false
@@ -1325,9 +1337,14 @@ jobs:
 
       - name: Build the wheels
         run: |
+          # A run produces up to eight artifacts per platform (profiles x
+          # editions) but a wheel filename only encodes the platform, so say
+          # which variant to publish instead of letting the last one win.
           # --android-api must match the API_LEVEL the libraries were built
           # with, otherwise the tag over-promises compatibility.
           python scripts/package_wheels.py artifacts/ -o dist/ \
+            --profile "${{ inputs.wheel_profile || 'full' }}" \
+            --edition "${{ inputs.wheel_edition || 'media' }}" \
             --android-api 24 --ios-version 13.0
 
       - name: Verify each wheel installs and loads
@@ -1345,14 +1362,21 @@ jobs:
             case "$name" in
               *manylinux*x86_64*)
                 python -m venv /tmp/wv && /tmp/wv/bin/pip install -q "$whl"
-                /tmp/wv/bin/python -c "
+                # Run from /tmp, not the repo: the checkout has a pyfreerdp/
+                # source directory that would shadow the installed package
+                # (cwd is first on sys.path) and the check would inspect the
+                # wrong thing.
+                (cd /tmp && /tmp/wv/bin/python -c "
           import ctypes, glob, os, pyfreerdp
-          d = os.path.join(os.path.dirname(pyfreerdp.__file__), '_libs')
-          lib = sorted(glob.glob(os.path.join(d, '*freerdp3.so*')))[0]
-          f = ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+          pkg = os.path.dirname(pyfreerdp.__file__)
+          assert 'site-packages' in pkg, 'imported the source tree, not the wheel: ' + pkg
+          d = os.path.join(pkg, '_libs')
+          hits = sorted(glob.glob(os.path.join(d, '*freerdp3.so*')))
+          assert hits, 'no libfreerdp3 in ' + d + ': ' + repr(sorted(os.listdir(d))[:10])
+          f = ctypes.CDLL(hits[0], mode=ctypes.RTLD_GLOBAL)
           f.freerdp_get_version_string.restype = ctypes.c_char_p
           print('installed wheel loads FreeRDP', f.freerdp_get_version_string().decode())
-          "
+          ")
                 rm -rf /tmp/wv
                 ;;
             esac
@@ -1383,6 +1407,7 @@ jobs:
             done
             echo
             echo "One wheel per platform, valid for every Python version (ctypes, no libpython link)."
+            echo "Built from the \`${{ inputs.wheel_profile || 'full' }}\` profile, \`${{ inputs.wheel_edition || 'media' }}\` edition."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
