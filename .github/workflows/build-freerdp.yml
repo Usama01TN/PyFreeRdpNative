@@ -112,6 +112,12 @@ on:
         default: "media"
         type: choice
         options: [media, ffmpeg, openh264, standard]
+      ios_linkage:
+        description: "iOS library type: dynamic (.dylib, embed in a signed app / framework) or static (.a archives)"
+        required: false
+        default: "dynamic"
+        type: choice
+        options: ["dynamic", "static"]
       mobile_apps:
         description: "Also build the aFreeRDP APK and the iFreeRDP iOS app"
         required: false
@@ -160,6 +166,7 @@ env:
   WINDOWS_SHADOW: ${{ (github.event_name != 'workflow_dispatch' || inputs.windows_shadow) && 'yes' || 'no' }}
   MOBILE_APPS: ${{ (github.event_name != 'workflow_dispatch' || inputs.mobile_apps) && 'yes' || 'no' }}
   WHEELS: ${{ (github.event_name != 'workflow_dispatch' || inputs.wheels) && 'yes' || 'no' }}
+  IOS_LINKAGE: ${{ inputs.ios_linkage || 'dynamic' }}
   ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
 
 jobs:
@@ -263,7 +270,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 41
+            python scripts/$s.py --require-version 42
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -651,7 +658,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 41
+            python scripts/$s.py --require-version 42
           done
 
       - name: Install host tools
@@ -939,7 +946,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 41
+            python scripts/$s.py --require-version 42
           done
 
       - name: Install host tools
@@ -997,47 +1004,73 @@ jobs:
             -DCMAKE_PREFIX_PATH=${{ github.workspace }}/openssl-ios-${{ matrix.platform }}
         run: |
           args="--edition ${{ matrix.edition }} --deps-prefix build/deps/ios-${{ matrix.platform }}-${{ matrix.edition }}"
+          if [ "$IOS_LINKAGE" = "static" ]; then args="$args --ios-static"; fi
           python scripts/build_freerdp.py \
             --target ios --ios-platform ${{ matrix.platform }} \
             --ref "$FREERDP_REF" --profile ${{ matrix.profile }} --jobs "$(sysctl -n hw.ncpu)" $args
-          # Ship OpenSSL's static libs too - consumers must link them.
-          cp openssl-ios-${{ matrix.platform }}/lib/libssl.a \
-             openssl-ios-${{ matrix.platform }}/lib/libcrypto.a \
-             pyfreerdp/_libs/ios/${{ matrix.platform }}/
+          if [ "$IOS_LINKAGE" = "static" ]; then
+            # Static archives: consumers link OpenSSL themselves, so ship it.
+            # (In the dynamic build OpenSSL is already inside the dylibs.)
+            cp openssl-ios-${{ matrix.platform }}/lib/libssl.a \
+               openssl-ios-${{ matrix.platform }}/lib/libcrypto.a \
+               pyfreerdp/_libs/ios/${{ matrix.platform }}/
+          fi
           ls -la pyfreerdp/_libs/ios/${{ matrix.platform }}/
 
       - name: Verify architecture and channel symbols
         run: |
           set -e
           d=pyfreerdp/_libs/ios/${{ matrix.platform }}
-          for a in $d/*.a; do
-            lipo -info "$a" | grep -q arm64 || { echo "::error::$a is not arm64"; exit 1; }
-          done
-          nm "$d/libfreerdp-server3.a" | grep -q " T _cliprdr_server_context_new"
-          nm "$d/libfreerdp-server3.a" | grep -q " T _rdpgfx_server_context_new"
-          nm "$d/libfreerdp-client3.a" | grep -q "_cliprdr_VirtualChannelEntryEx"
           case "${{ matrix.edition }}" in
             ffmpeg)   need="libavcodec libavutil libswscale libswresample"; sym="_avcodec_send_packet" ;;
             openh264) need="libopenh264"; sym="_WelsCreateDecoder" ;;
             media)    need="libavcodec libavutil libswscale libswresample libopenh264"; sym="_WelsCreateDecoder" ;;
             *)        need=""; sym="" ;;
           esac
-          # Shared build: the media dependencies are linked INTO the dylibs
-          # rather than shipped as separate archives, so check the symbols
-          # inside libfreerdp3 instead of looking for separate files.
-          for lib in libwinpr3 libfreerdp3 libfreerdp-client3 libfreerdp-server3; do
-            ls $d/$lib*.dylib >/dev/null 2>&1 || { echo "::error::$lib.dylib missing from $d"; exit 1; }
-          done
-          core=$(ls $d/libfreerdp3.*.dylib | head -1)
-          file "$core" | grep -q "arm64" || { echo "::error::$core is not arm64"; exit 1; }
-          if [ -n "$sym" ]; then nm "$core" | grep -q "$sym" || { echo "::error::libfreerdp3 has no $sym reference"; exit 1; }; fi
-          otool -L "$core" | head -12
-          echo "arm64 dylibs with client + server channels present (${{ matrix.profile }}, ${{ matrix.edition }})"
+          if [ "$IOS_LINKAGE" = "static" ]; then
+            # .a archives: every library is a separate file, media deps too.
+            for a in $d/*.a; do
+              lipo -info "$a" | grep -q arm64 || { echo "::error::$a is not arm64"; exit 1; }
+            done
+            for lib in libwinpr3 libfreerdp3 libfreerdp-client3 libfreerdp-server3; do
+              test -f "$d/$lib.a" || { echo "::error::$lib.a missing from $d"; exit 1; }
+            done
+            nm "$d/libfreerdp-server3.a" | grep -q " T _cliprdr_server_context_new"
+            nm "$d/libfreerdp-client3.a" | grep -q "_cliprdr_VirtualChannelEntryEx"
+            for f in $need; do ls $d/$f*.a >/dev/null 2>&1 || { echo "::error::$f.a missing from $d"; exit 1; }; done
+            if [ -n "$sym" ]; then nm "$d/libfreerdp3.a" | grep -q "$sym" || { echo "::error::libfreerdp3 has no $sym reference"; exit 1; }; fi
+            echo "arm64 static archives with client + server channels present (${{ matrix.profile }}, ${{ matrix.edition }})"
+          else
+            # .dylib: the media deps (static archives) are linked INTO the
+            # FreeRDP dylibs, so check for their symbols inside libfreerdp3
+            # rather than for separate files.
+            for lib in libwinpr3 libfreerdp3 libfreerdp-client3 libfreerdp-server3; do
+              ls $d/$lib*.dylib >/dev/null 2>&1 || { echo "::error::$lib.dylib missing from $d"; exit 1; }
+            done
+            for dy in $d/*.dylib; do
+              lipo -info "$dy" | grep -q arm64 || { echo "::error::$dy is not arm64"; exit 1; }
+            done
+            core=$(ls $d/libfreerdp3*.dylib | head -1)
+            server=$(ls $d/libfreerdp-server3*.dylib | head -1)
+            client=$(ls $d/libfreerdp-client3*.dylib | head -1)
+            nm "$server" | grep -q " T _cliprdr_server_context_new" || { echo "::error::server channels missing"; exit 1; }
+            nm "$client" | grep -q "_cliprdr_VirtualChannelEntryEx" || { echo "::error::client channels missing"; exit 1; }
+            if [ -n "$sym" ]; then nm "$core" | grep -q "$sym" || { echo "::error::libfreerdp3 has no $sym reference (media deps not linked in)"; exit 1; }; fi
+            echo "--- install names / dependencies of $core:"
+            otool -L "$core" | head -12
+            # Nothing may point at the build machine: every non-system
+            # dependency must be @rpath-relative.
+            if otool -L "$core" | tail -n +2 | grep -vE "@rpath|/usr/lib/|/System/Library/"; then
+              echo "::error::libfreerdp3 references an absolute path from the build host"; exit 1
+            fi
+            echo "arm64 dylibs with client + server channels present (${{ matrix.profile }}, ${{ matrix.edition }})"
+          fi
 
       - name: Package
         id: pkg
         run: |
           name="freerdp-${FREERDP_REF}-ios-${{ matrix.label }}-${{ matrix.profile }}-${{ matrix.edition }}"
+          [ "$IOS_LINKAGE" = "static" ] && name="$name-static"
           mkdir -p out
           {
             echo "FreeRDP ref:  $FREERDP_REF"
@@ -1076,7 +1109,7 @@ jobs:
       - name: Publish artifact link to job summary
         run: |
           {
-            echo "### ios-${{ matrix.label }} — FreeRDP $FREERDP_REF (${{ matrix.profile }}, ${{ matrix.edition }}, dylib)"
+            echo "### ios-${{ matrix.label }} — FreeRDP $FREERDP_REF (${{ matrix.profile }}, ${{ matrix.edition }}, ${IOS_LINKAGE})"
             echo
             echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -1104,7 +1137,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 41
+            python scripts/$s.py --require-version 42
           done
       - uses: actions/setup-java@v4
         with:
@@ -1243,7 +1276,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 41
+            python scripts/$s.py --require-version 42
           done
       - name: Show toolchain
         run: |
@@ -1328,7 +1361,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 41
+            python scripts/$s.py --require-version 42
           done
 
       - name: Check the packaging script is the expected version
