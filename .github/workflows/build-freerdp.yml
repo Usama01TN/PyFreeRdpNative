@@ -101,13 +101,13 @@ on:
         default: true
         type: boolean
       wheel_profile:
-        description: "Which profile the published wheels use"
+        description: "(unused since every variant is packaged under its own name; kept for compatibility)"
         required: false
         default: "full"
         type: choice
         options: [full, minimal]
       wheel_edition:
-        description: "Which media edition the published wheels use"
+        description: "(unused since every variant is packaged under its own name; kept for compatibility)"
         required: false
         default: "media"
         type: choice
@@ -1303,6 +1303,8 @@ jobs:
   wheels:
     name: wheels
     needs: [desktop, android, ios]
+    outputs:
+      files: ${{ steps.list.outputs.files }}
     if: |
       always()
       && (github.event_name != 'workflow_dispatch' || inputs.wheels)
@@ -1322,7 +1324,7 @@ jobs:
           done
 
       - name: Check the packaging script is the expected version
-        run: python scripts/package_wheels.py --require-version 3
+        run: python scripts/package_wheels.py --require-version 4
 
       - name: Install packaging tools
         run: python -m pip install --upgrade build wheel auditwheel
@@ -1340,14 +1342,17 @@ jobs:
 
       - name: Build the wheels
         run: |
-          # A run produces up to eight artifacts per platform (profiles x
-          # editions) but a wheel filename only encodes the platform, so say
-          # which variant to publish instead of letting the last one win.
+          # Every (profile, edition) build becomes its own pip package:
+          #   pyfreerdpnative            full/media     (default)
+          #   pyfreerdpnative-minimal    minimal/standard
+          #   pyfreerdpnative-<edition>  full/<edition>
+          #   pyfreerdpnative-minimal-<edition>
+          # A wheel filename has no slot for the variant, so distinct names
+          # are the only way pip can offer more than one.
           # --android-api must match the API_LEVEL the libraries were built
           # with, otherwise the tag over-promises compatibility.
           python scripts/package_wheels.py artifacts/ -o dist/ \
-            --profile "${{ inputs.wheel_profile || 'full' }}" \
-            --edition "${{ inputs.wheel_edition || 'media' }}" \
+            --all-variants \
             --android-api 24 --ios-version 13.0
 
       - name: Verify each wheel installs and loads
@@ -1416,23 +1421,32 @@ jobs:
             esac
           done
 
-      - name: Upload wheels
+      - name: List the wheels for the per-file upload job
+        id: list
+        run: |
+          files=$(cd dist && ls *.whl *.tar.gz | jq -R . | jq -s -c .)
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+          echo "$files"
+
+      # Staging only: the wheel-artifacts job re-publishes every file as its
+      # own artifact so each wheel can be downloaded on its own.
+      - name: Upload wheels (staging)
         id: upload
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ env.FREERDP_REF }}
+          name: wheels-staging-${{ env.FREERDP_REF }}
           path: |
             dist/*.whl
             dist/*.tar.gz
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 1
 
       - name: Publish links to the job summary
         run: |
           {
             echo "### Python wheels — FreeRDP $FREERDP_REF"
             echo
-            echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+            echo "Each wheel is published as its own artifact (see the run's Artifacts list) and attached to the release individually."
             echo
             echo "| File | Size |"
             echo "|---|---|"
@@ -1441,8 +1455,37 @@ jobs:
             done
             echo
             echo "One wheel per platform, valid for every Python version (ctypes, no libpython link)."
-            echo "Built from the \`${{ inputs.wheel_profile || 'full' }}\` profile, \`${{ inputs.wheel_edition || 'media' }}\` edition."
+            echo "One pip package per build variant: \`pyfreerdpnative\` (full/media), \`pyfreerdpnative-minimal\` (minimal/standard),"
+            echo "\`pyfreerdpnative-<edition>\`, \`pyfreerdpnative-minimal-<edition>\`. Install only one - they all provide the \`pyfreerdp\` module."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # One artifact per wheel, named after the file, so a single platform's
+  # wheel can be downloaded without the others.
+  # ---------------------------------------------------------------------------
+  wheel-artifacts:
+    name: ${{ matrix.file }}
+    needs: wheels
+    if: always() && needs.wheels.result == 'success'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        file: ${{ fromJSON(needs.wheels.outputs.files) }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheels-staging-${{ env.FREERDP_REF }}
+          path: dist/
+      - name: Upload ${{ matrix.file }}
+        uses: actions/upload-artifact@v4
+        with:
+          # Artifact names may not contain / \ : * ? " < > | - wheel
+          # filenames are fine as they are.
+          name: ${{ matrix.file }}
+          path: dist/${{ matrix.file }}
+          if-no-files-found: error
+          retention-days: 30
 
   # ---------------------------------------------------------------------------
   # Collect every artifact link into one table, and optionally attach the
@@ -1450,7 +1493,7 @@ jobs:
   # ---------------------------------------------------------------------------
   links:
     name: artifact links
-    needs: [desktop, android, ios, android-apk, ios-app, wheels]
+    needs: [desktop, android, ios, android-apk, ios-app, wheels, wheel-artifacts]
     if: always() && (needs.desktop.result != 'cancelled')
     runs-on: ubuntu-24.04
     permissions:
@@ -1502,9 +1545,31 @@ jobs:
           (github.event_name == 'push' && github.ref == 'refs/heads/main')
         uses: actions/download-artifact@v4
         with:
-          pattern: "{freerdp-*,wheels-*}"
-          merge-multiple: true
-          path: release/
+          # Library artifacts are plain _libs directories, so they must NOT be
+          # merged (every platform would collapse into one _libs). Each
+          # artifact lands in its own folder and is zipped below. Wheels come
+          # from the per-file artifacts, one file each.
+          pattern: "{freerdp-*,pyfreerdpnative-*,pyfreerdpnative_*}"
+          path: staging/
+
+      - name: Turn artifacts into release files
+        shell: bash
+        run: |
+          set -e
+          mkdir -p release
+          for d in staging/*/; do
+            name=$(basename "$d")
+            if [ -d "$d/_libs" ] || [ -d "$d/_bin" ]; then
+              # a library package: zip the directory, named after the artifact
+              (cd "$d" && zip -qr "../../release/$name.zip" .)
+            else
+              # a wheel / sdist / app bundle artifact: already files
+              find "$d" -maxdepth 1 -type f -exec mv {} release/ \;
+            fi
+          done
+          # Nothing but regular files may be uploaded as a release asset.
+          find release -mindepth 1 -maxdepth 1 ! -type f -exec rm -rf {} +
+          ls -lh release/
 
       - name: Attach to GitHub release
         if: |
