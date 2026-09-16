@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 39
+BUILD_SCRIPT_VERSION = 40
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -1832,15 +1832,21 @@ def vendor_linux_system_libs(out_dir):
         return any(name.startswith(b) for b in LINUX_BASELINE_LIBS)
 
     def elf_files():
+        # Shared libraries only. Executables such as sdl-freerdp (WebKitGTK
+        # -> GTK -> pango -> libthai ...) or xfreerdp pull in the desktop
+        # stack, which cannot sensibly be vendored and must come from the
+        # system the program runs on. The libraries - what Python actually
+        # loads - are what must be self-contained.
         for fn in os.listdir(out_dir):
             p = os.path.join(out_dir, fn)
-            if os.path.isfile(p) and not os.path.islink(p):
-                try:
-                    with open(p, "rb") as fh:
-                        if fh.read(4) == b"\x7fELF":
-                            yield p
-                except OSError:
-                    pass
+            if ".so" not in fn or not os.path.isfile(p) or os.path.islink(p):
+                continue
+            try:
+                with open(p, "rb") as fh:
+                    if fh.read(4) == b"\x7fELF":
+                        yield p
+            except OSError:
+                pass
 
     copied = []
     for _round in range(6):
