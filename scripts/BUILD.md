@@ -178,7 +178,7 @@ including telemetry, rdpemsc and rdpecam. `--list-channels` prints the table;
 | macOS arm64 / x86_64 | source; `@rpath` install names; SDL3 via Homebrew | shared |
 | Windows x64 / x86 / arm64 | vcpkg manifest (`scripts/vcpkg.json`: core + `media` + `sdl` features, pinned baseline); x86 + arm64 cross-compiled with `-A Win32` / `-A ARM64` | shared |
 | Android arm64-v8a / armeabi-v7a / x86_64 / x86 | NDK cross; OpenSSL cross-built in the workflow; LTO off (NDK `--fatal-warnings`); OpenH264 x86 built with `ENABLEPIC=Yes` | shared |
-| iOS OS64 (device, both profiles) / SIMULATORARM64 (minimal only) | static; libusb skipped (no USB host API); OpenH264/FFmpeg build for the device SDK only | static |
+| iOS OS64 (device, both profiles) / SIMULATORARM64 (minimal only) | **shared `.dylib` by default** (embed in a signed app bundle / framework, loadable with dlopen or ctypes); `--ios-static` for `.a` archives; media deps are linked into the dylibs; libusb skipped (no USB host API); OpenH264/FFmpeg build for the device SDK only | shared |
 
 `build_freerdp.py --arch {x64,x86,arm64}` selects the Windows target;
 `--ios-platform` and `--abi` select mobile targets. `--deps-prefix auto`

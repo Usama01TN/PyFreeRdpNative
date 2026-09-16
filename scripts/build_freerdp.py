@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 40
+BUILD_SCRIPT_VERSION = 41
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -1808,14 +1808,18 @@ def _macho_add_rpath(path, want, replace_prefix=None):
 # copied into _libs so the package works on machines that lack it - libcjson
 # and ICU (winpr, FreeRDP 3.31+), OpenSSL, ALSA, udev, xkbcommon, libffi...
 LINUX_BASELINE_LIBS = (
+    # EXACTLY auditwheel's manylinux_2_28/2_39 lib_whitelist (matched by
+    # prefix), plus the dynamic loader. Anything else - including the wider
+    # X11 family (libxcb, libXau, libXfixes, libXrandr, libXi ...) that a
+    # first draft of this list wrongly treated as baseline - is vendored,
+    # otherwise auditwheel reports it as external and the wheel fails its
+    # manylinux audit.
+    "ld-linux", "linux-vdso",
     "libc.so", "libm.so", "libdl.so", "libpthread.so", "librt.so",
-    "libutil.so", "libresolv.so", "libnsl.so", "libcrypt.so",
-    "ld-linux", "linux-vdso", "libgcc_s.so", "libstdc++.so",
-    "libX11.so", "libXext.so", "libXrender.so", "libXfixes.so",
-    "libXcursor.so", "libXinerama.so", "libXrandr.so", "libXi.so",
-    "libXv.so", "libxcb.so", "libXau.so", "libXdmcp.so", "libICE.so",
-    "libSM.so", "libGL.so", "libEGL.so", "libgobject-2.0.so",
-    "libgthread-2.0.so", "libglib-2.0.so",
+    "libutil.so", "libresolv.so", "libnsl.so", "libanl.so", "libmvec.so",
+    "libatomic.so", "libgcc_s.so", "libstdc++.so", "libexpat.so", "libz.so",
+    "libX11.so", "libXext.so", "libXrender.so", "libICE.so", "libSM.so",
+    "libGL.so", "libgobject-2.0.so", "libgthread-2.0.so", "libglib-2.0.so",
 )
 
 
@@ -2663,7 +2667,7 @@ IOS_PLATFORMS = ("OS64", "SIMULATOR64", "SIMULATORARM64")
 
 def build_ios(src, jobs, profile, enable_channels=None,
               disable_channels=None, channels_enabled=True,
-              ios_platform="OS64", deps_prefix=None):
+              ios_platform="OS64", deps_prefix=None, ios_static=False):
     if platform.system() != "Darwin":
         raise SystemExit("iOS builds require macOS + Xcode.")
     if ios_platform not in IOS_PLATFORMS:
@@ -2704,7 +2708,13 @@ def build_ios(src, jobs, profile, enable_channels=None,
                  "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH",
                  "-DWITH_CAIRO=OFF"]
     opts += [
-        "-DBUILD_SHARED_LIBS=OFF",          # static archives for iOS
+        # Shared (.dylib) by default so the libraries can be embedded in an
+        # app bundle as a signed framework and loaded with dlopen / ctypes -
+        # the same shape FreeRDP's own client/iOS super-build uses
+        # (ExternalFreeRDP.cmake imports libfreerdp3.3.dylib). --ios-static
+        # gives the classic .a archives for linking straight into an app.
+        "-DBUILD_SHARED_LIBS={0}".format("OFF" if ios_static else "ON"),
+        "-DCMAKE_INSTALL_NAME_DIR=@rpath",
         "-DWITH_CAIRO=OFF",                 # no cairo on iOS
         "-DWITH_CLIENT_IOS=OFF",            # native iOS client is an Xcode app
         "-DWITH_CLIENT_SDL=OFF",
@@ -2760,8 +2770,10 @@ def build_ios(src, jobs, profile, enable_channels=None,
     # themselves were already built successfully by the step above.
     rc = run(["cmake", "--install", build_dir, "--config", "Release"],
              check=False, env=env)
+    lib_exts = (".a",) if ios_static else (".dylib",)
     if rc == 0:
-        archives = glob.glob(os.path.join(install_dir, "lib", "*.a"))
+        archives = [q for ext in lib_exts
+                    for q in glob.glob(os.path.join(install_dir, "lib", "*" + ext))]
     else:
         print("\n[ios] WARNING: cmake --install exited {0}; look for a "
               "'CMake Error' line above (it is printed before the "
@@ -2771,7 +2783,7 @@ def build_ios(src, jobs, profile, enable_channels=None,
         archives = []
         for root, _dirs, files in os.walk(build_dir):
             for fn in files:
-                if fn.endswith(".a") and not fn.startswith("libfreerdp-test"):
+                if fn.endswith(lib_exts) and not fn.startswith("libfreerdp-test"):
                     archives.append(os.path.join(root, fn))
         # Only ship the public libraries (the tree also holds object
         # library archives on some generators).
@@ -2786,20 +2798,33 @@ def build_ios(src, jobs, profile, enable_channels=None,
         os.makedirs(target)
     staged = []
     for a in sorted(archives):
+        # Follow symlinks: the versioned chain (libfreerdp3.dylib ->
+        # libfreerdp3.3.dylib -> libfreerdp3.3.31.0.dylib) becomes one real
+        # file per name.
         dst = os.path.join(target, os.path.basename(a))
-        shutil.copy2(a, dst)
+        shutil.copy2(os.path.realpath(a), dst)
         staged.append(os.path.basename(a).lower())
         print("[ios] {0}".format(dst))
-    if deps_prefix:
+    if deps_prefix and ios_static:
+        # The dependencies are static archives. In a shared build they are
+        # already linked into the dylibs; only a static build needs them
+        # shipped so the app can link them itself.
         for a in glob.glob(os.path.join(deps_prefix, "lib", "*.a")):
             dst = os.path.join(target, os.path.basename(a))
             shutil.copy2(a, dst)
             print("[ios] {0} (dependency)".format(dst))
+    if not ios_static:
+        # Each dylib finds its siblings next to itself.
+        for fn in os.listdir(target):
+            if fn.endswith(".dylib"):
+                _macho_add_rpath(os.path.join(target, fn), "@loader_path",
+                                 replace_prefix="@loader_path")
     missing = [s for s in EXPECTED_LIBS[profile]
                if not any(s in n for n in staged)]
     if missing:
-        raise SystemExit("[ios] expected static libraries missing: {0}\n"
-                         "staged: {1}".format(missing, staged))
+        raise SystemExit("[ios] expected {0} libraries missing: {1}\n"
+                         "staged: {2}".format(
+                             "static" if ios_static else "shared", missing, staged))
     return target
 
 
@@ -3230,6 +3255,9 @@ def main():
     p.add_argument("--apk-key-alias", default="androiddebugkey")
     p.add_argument("--apk-store-password", default="android")
     p.add_argument("--apk-key-password", default="android")
+    p.add_argument("--ios-static", action="store_true",
+                   help="iOS library target: build .a archives instead of "
+                        "the default .dylib shared libraries.")
     p.add_argument("--sign-ios-app", action="store_true",
                    help="ios-app only: let Xcode code-sign the bundle "
                         "(needs a provisioning profile). Off by default so "
@@ -3468,7 +3496,8 @@ def main():
                   enable_channels=args.enable_channel,
                   disable_channels=args.disable_channel,
                   channels_enabled=channels_enabled,
-                  ios_platform=args.ios_platform, deps_prefix=deps_prefix)
+                  ios_platform=args.ios_platform, deps_prefix=deps_prefix,
+                  ios_static=args.ios_static)
         return 0
 
     return 1
