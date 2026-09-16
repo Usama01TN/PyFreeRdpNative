@@ -263,7 +263,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 39
+            python scripts/$s.py --require-version 40
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -651,7 +651,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 39
+            python scripts/$s.py --require-version 40
           done
 
       - name: Install host tools
@@ -939,7 +939,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 39
+            python scripts/$s.py --require-version 40
           done
 
       - name: Install host tools
@@ -1096,7 +1096,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 39
+            python scripts/$s.py --require-version 40
           done
       - uses: actions/setup-java@v4
         with:
@@ -1235,7 +1235,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 39
+            python scripts/$s.py --require-version 40
           done
       - name: Show toolchain
         run: |
@@ -1320,7 +1320,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 39
+            python scripts/$s.py --require-version 40
           done
 
       - name: Check the packaging script is the expected version
@@ -1380,7 +1380,19 @@ jobs:
                 # mislabels vendored ones as external - but the glibc floor
                 # it computes is still right, so we check that the tag it
                 # derives matches the tag we stamped.
-                report=$(python -m auditwheel show "$whl" 2>&1 || true)
+                # Audit the LIBRARIES only. GUI executables (sdl-freerdp with
+                # WebKitGTK, xfreerdp) legitimately depend on the desktop
+                # stack of the machine they run on; that is not vendorable and
+                # not what Python loads. Make a scratch copy without them via
+                # wheel unpack/pack so RECORD stays valid (auditwheel walks it)
+                # and the filename - which carries the architecture - is kept.
+                rm -rf /tmp/audit && mkdir -p /tmp/audit
+                python -m wheel unpack "$whl" -d /tmp/audit/u >/dev/null
+                root=$(ls -d /tmp/audit/u/*/)
+                find "$root/pyfreerdp/_libs" -maxdepth 1 -type f \
+                  ! -name "*.so*" ! -name "*.txt" ! -name "*.cfg" ! -name "*.pc" -delete
+                python -m wheel pack "$root" -d /tmp/audit >/dev/null
+                report=$(python -m auditwheel show /tmp/audit/*.whl 2>&1 || true)
                 echo "$report" | tail -8
                 derived=$(echo "$report" | sed -n 's/.*constrains the platform tag to "\([^"]*\)".*/\1/p' | tail -1)
                 if [ -z "$derived" ]; then
