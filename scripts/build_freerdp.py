@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 41
+BUILD_SCRIPT_VERSION = 42
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -2707,6 +2707,16 @@ def build_ios(src, jobs, profile, enable_channels=None,
         opts += ["-DCMAKE_FIND_ROOT_PATH={0}".format(deps_prefix),
                  "-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH",
                  "-DWITH_CAIRO=OFF"]
+        if not ios_static and deps_has_openh264(deps_prefix):
+            # The iOS dependencies are static archives folded into the
+            # dylibs, and OpenH264 is C++. FreeRDP is a C project, so its
+            # shared libraries are linked with clang (not clang++) and the
+            # C++ runtime is not pulled in automatically -> "operator new",
+            # "___cxa_*", "___gxx_personality_v0" undefined for arm64.
+            # Link libc++ explicitly. (macOS/Android use a shared
+            # libopenh264 that carries its own libc++ dependency.)
+            opts += ["-DCMAKE_SHARED_LINKER_FLAGS=-lc++",
+                     "-DCMAKE_EXE_LINKER_FLAGS=-lc++"]
     opts += [
         # Shared (.dylib) by default so the libraries can be embedded in an
         # app bundle as a signed framework and loaded with dlopen / ctypes -
