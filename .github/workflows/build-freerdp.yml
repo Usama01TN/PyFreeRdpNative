@@ -1364,12 +1364,27 @@ jobs:
             [ "$files" -gt 0 ] || { echo "::error::$name ships no libraries"; exit 1; }
             case "$name" in
               *manylinux*)
-                # The tag must be honest: auditwheel checks the glibc floor and
-                # that no non-baseline library is left external (they are
-                # vendored into _libs at build time).
-                python -m auditwheel show "$whl" | tail -6
-                python -m auditwheel show "$whl" | grep -q "is consistent" \
-                  || { echo "::error::$name does not satisfy its manylinux tag"; exit 1; }
+                # The tag must be honest. auditwheel can fully verify a wheel
+                # of the runner's own architecture (glibc floor AND that every
+                # non-baseline library is vendored). For a foreign
+                # architecture it cannot resolve the in-wheel libraries, so it
+                # mislabels vendored ones as external - but the glibc floor
+                # it computes is still right, so we check that the tag it
+                # derives matches the tag we stamped.
+                report=$(python -m auditwheel show "$whl" 2>&1 || true)
+                echo "$report" | tail -8
+                derived=$(echo "$report" | sed -n 's/.*constrains the platform tag to "\([^"]*\)".*/\1/p' | tail -1)
+                if [ -z "$derived" ]; then
+                  derived=$(echo "$report" | sed -n 's/.*is consistent with the following platform tag: "\([^"]*\)".*/\1/p' | tail -1)
+                fi
+                [ "$derived" = "$tag" ] \
+                  || { echo "::error::$name is tagged $tag but auditwheel derives ${derived:-<nothing>}"; exit 1; }
+                if [ "${tag##*_}" = "$(uname -m)" ]; then
+                  echo "$report" | grep -q "is consistent" \
+                    || { echo "::error::$name leaves system libraries external on $(uname -m)"; exit 1; }
+                else
+                  echo "($name is a foreign architecture: full external-library check needs an $(echo "$tag" | sed 's/.*_//') runner)"
+                fi
                 ;;
             esac
             case "$name" in
