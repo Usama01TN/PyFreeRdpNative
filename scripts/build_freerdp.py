@@ -269,7 +269,7 @@ CHANNELS = {
 # .github/workflows/*.yml run `--require-version N` first so a stale copy of
 # this script fails in one second with a clear message instead of ten minutes
 # into a CMake configure with baffling errors.
-BUILD_SCRIPT_VERSION = 42
+BUILD_SCRIPT_VERSION = 43
 
 # ---------------------------------------------------------------------------
 # Build profiles
@@ -2712,11 +2712,32 @@ def build_ios(src, jobs, profile, enable_channels=None,
             # dylibs, and OpenH264 is C++. FreeRDP is a C project, so its
             # shared libraries are linked with clang (not clang++) and the
             # C++ runtime is not pulled in automatically -> "operator new",
-            # "___cxa_*", "___gxx_personality_v0" undefined for arm64.
-            # Link libc++ explicitly. (macOS/Android use a shared
+            # "___cxa_*", "std::terminate", "___gxx_personality_v0"
+            # undefined for arm64.
+            #
+            # NB: NOT via CMAKE_SHARED_LINKER_FLAGS. cmake/ios.toolchain.cmake
+            # does an unconditional
+            #   set(CMAKE_SHARED_LINKER_FLAGS "-rpath @executable_path/...")
+            # which shadows any -D value, so a flag passed that way is
+            # silently dropped (that is why the first attempt changed
+            # nothing). CMAKE_C_STANDARD_LIBRARIES is untouched by the
+            # toolchain and is appended to every C link line - exactly the
+            # "always link this" hook. (macOS/Android use a shared
             # libopenh264 that carries its own libc++ dependency.)
-            opts += ["-DCMAKE_SHARED_LINKER_FLAGS=-lc++",
-                     "-DCMAKE_EXE_LINKER_FLAGS=-lc++"]
+            # Two independent hooks the toolchain cannot shadow:
+            #  1. CMAKE_C_STANDARD_LIBRARIES is appended by CMake itself to
+            #     every C link line (<LINK_LIBRARIES> expansion).
+            #  2. CMAKE_PROJECT_INCLUDE runs a snippet right after FreeRDP's
+            #     project() call; link_libraries(c++) there adds libc++ to
+            #     every target defined afterwards, i.e. all of them.
+            opts += ["-DCMAKE_C_STANDARD_LIBRARIES=-lc++"]
+            hook = os.path.join(build_dir, "pyfreerdp-link-libcxx.cmake")
+            with open(hook, "w") as fh:
+                fh.write("# pyfreerdp: OpenH264 (C++) is linked statically into the\n"
+                         "# FreeRDP dylibs; FreeRDP is a C project so libc++ must be\n"
+                         "# added explicitly.\n"
+                         "link_libraries(c++)\n")
+            opts += ["-DCMAKE_PROJECT_INCLUDE={0}".format(hook)]
     opts += [
         # Shared (.dylib) by default so the libraries can be embedded in an
         # app bundle as a signed framework and loaded with dlopen / ctypes -
