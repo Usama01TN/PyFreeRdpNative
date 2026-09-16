@@ -1478,9 +1478,26 @@ jobs:
                 if [ -z "$derived" ]; then
                   derived=$(echo "$flat" | sed -n 's/.*is consistent with the following platform tag: "\([^"]*\)".*/\1/p' | tail -1)
                 fi
-                # auditwheel reports the platform part only; compare like with like.
-                [ "$derived" = "$plat" ] \
-                  || { echo "::error::$name is tagged $plat but auditwheel derives ${derived:-<nothing>}"; exit 1; }
+                # auditwheel reports the platform part only. The rule is that
+                # our tag must not OVER-promise: the glibc floor auditwheel
+                # derives may be equal to or LOWER than the one we stamped
+                # (e.g. a minimal build only needs 2.38 while we stamp 2.39 -
+                # conservative, still honest), but never higher. The
+                # architecture must match exactly.
+                [ -n "$derived" ] || { echo "::error::$name: auditwheel derived no platform tag"; echo "$report"; exit 1; }
+                d_arch=$(echo "$derived" | sed -E 's/^manylinux_[0-9]+_[0-9]+_//')
+                [ "$d_arch" = "$arch" ] \
+                  || { echo "::error::$name is tagged for $arch but auditwheel derives $derived"; exit 1; }
+                s_ver=$(echo "$plat"    | sed -nE 's/^manylinux_([0-9]+)_([0-9]+)_.*/\1 \2/p')
+                d_ver=$(echo "$derived" | sed -nE 's/^manylinux_([0-9]+)_([0-9]+)_.*/\1 \2/p')
+                set -- $s_ver; s_maj=$1; s_min=$2
+                set -- $d_ver; d_maj=$1; d_min=$2
+                if [ "$d_maj" -gt "$s_maj" ] || { [ "$d_maj" -eq "$s_maj" ] && [ "$d_min" -gt "$s_min" ]; }; then
+                  echo "::error::$name is tagged $plat but actually requires $derived (tag over-promises)"; exit 1
+                fi
+                if [ "$derived" != "$plat" ]; then
+                  echo "($name: real floor is $derived, tag $plat is stricter - OK)"
+                fi
                 if [ "$arch" = "$(uname -m)" ]; then
                   echo "$flat" | grep -q "is consistent with the following platform tag" \
                     || { echo "--- full auditwheel report:"; echo "$report"; echo "::error::$name leaves system libraries external on $arch"; exit 1; }
