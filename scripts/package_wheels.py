@@ -34,7 +34,7 @@ import zipfile
 # Bumped whenever the CLI changes; the workflow asks for the version it was
 # written against so a stale copy fails with an explanation rather than
 # "unrecognized arguments".
-PACKAGE_SCRIPT_VERSION = 3
+PACKAGE_SCRIPT_VERSION = 4
 
 
 # Artifact platform name -> wheel platform tag.
@@ -86,6 +86,48 @@ def variant_of(name):
     edition = next((e for e in EDITION_RANK if name.endswith("-" + e)
                     or ("-" + e + "-") in name), None)
     return profile, edition
+
+
+# Every (profile, edition) variant becomes its own pip package, because a
+# wheel filename has no slot for the variant and pip must see exactly one
+# candidate per name+version+platform. The bare name is each profile's
+# default edition. All of them install the same `pyfreerdp` module, so only
+# one may be installed at a time (like opencv-python vs opencv-python-headless).
+BASE_NAME = "pyfreerdpnative"
+DEFAULT_EDITION = {"full": "media", "minimal": "standard"}
+
+
+def package_name(profile, edition):
+    parts = [BASE_NAME]
+    if profile == "minimal":
+        parts.append("minimal")
+    if edition and edition != DEFAULT_EDITION.get(profile or "full"):
+        parts.append(edition)
+    return "-".join(parts)
+
+
+def rename_package(root, new_name):
+    """
+    Rename the distribution inside an unpacked wheel: the dist-info directory
+    (wheel pack derives the filename from it) and the Name in METADATA.
+    """
+    import re
+    dist_infos = glob.glob(os.path.join(root, "*.dist-info"))
+    if len(dist_infos) != 1:
+        raise SystemExit("expected one dist-info, found {0}".format(dist_infos))
+    old = dist_infos[0]
+    version = os.path.basename(old)[:-len(".dist-info")].split("-", 1)[1]
+    normalized = re.sub(r"[-_.]+", "_", new_name).lower()
+    new = os.path.join(root, "{0}-{1}.dist-info".format(normalized, version))
+    if old != new:
+        os.rename(old, new)
+    meta = os.path.join(new, "METADATA")
+    with open(meta) as fh:
+        lines = fh.read().splitlines()
+    lines = ["Name: {0}".format(new_name) if l.startswith("Name: ") else l
+             for l in lines]
+    with open(meta, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
 
 
 def choose_variants(entries, want_profile, want_edition, key_of):
@@ -235,7 +277,7 @@ def build_base_wheel(repo, workdir):
     return hits[0]
 
 
-def wheel_with_libs(base_wheel, libs_dir, bin_dir, tag, outdir):
+def wheel_with_libs(base_wheel, libs_dir, bin_dir, tag, outdir, name=None):
     """
     Insert _libs (and optionally _bin) into a copy of the wheel and retag it.
 
@@ -250,6 +292,9 @@ def wheel_with_libs(base_wheel, libs_dir, bin_dir, tag, outdir):
     if len(roots) != 1:
         raise SystemExit("unexpected unpack layout: {0}".format(roots))
     root = roots[0]
+
+    if name and name != BASE_NAME:
+        rename_package(root, name)
 
     for src_dir, arc_root in ((libs_dir, "_libs"), (bin_dir, "_bin")):
         if not src_dir or not os.path.isdir(src_dir):
@@ -306,6 +351,13 @@ def main():
                         "has one. Current builds put the executables in "
                         "_libs alongside the libraries, so they are included "
                         "either way.")
+    p.add_argument("--all-variants", action="store_true",
+                   help="package every (profile, edition) artifact as its own "
+                        "pip package: pyfreerdpnative (full/media), "
+                        "pyfreerdpnative-minimal (minimal/standard), "
+                        "pyfreerdpnative-ffmpeg, -openh264, -standard, "
+                        "-minimal-ffmpeg, ... Without this, one variant is "
+                        "chosen per platform with --profile/--edition.")
     p.add_argument("--profile", choices=("full", "minimal"), default="full",
                    help="which build profile to publish when a platform has "
                         "several artifacts (default: full).")
@@ -363,8 +415,12 @@ def main():
             tag = PLATFORM_TAGS[plat] if plat else None
         if tag:
             candidates.append((entry, tag))
-    chosen = set(choose_variants(candidates, args.profile, args.edition,
-                                 None).values())
+    if args.all_variants:
+        chosen = set(e for e, _t in candidates)
+        log("packaging every variant as its own pip package")
+    else:
+        chosen = set(choose_variants(candidates, args.profile, args.edition,
+                                     None).values())
 
     made, skipped = [], []
     for entry in entries:
@@ -388,8 +444,11 @@ def main():
                 if root is None:
                     continue
                 restore_exec_bits(os.path.join(root, "_libs"))
+                prof, ed = variant_of(name)
                 whl = wheel_with_libs(base, os.path.join(root, "_libs"),
-                                      None, mtag, outdir)
+                                      None, mtag, outdir,
+                                      name=package_name(prof, ed)
+                                      if args.all_variants else None)
                 log("{0} -> {1}".format(name, os.path.basename(whl)))
                 made.append(whl)
             continue
@@ -403,7 +462,10 @@ def main():
         libs = os.path.join(root, "_libs")
         restore_exec_bits(libs)
         bins = os.path.join(root, "_bin") if args.with_executables else None
-        whl = wheel_with_libs(base, libs, bins, PLATFORM_TAGS[plat], outdir)
+        prof, ed = variant_of(name)
+        whl = wheel_with_libs(base, libs, bins, PLATFORM_TAGS[plat], outdir,
+                              name=package_name(prof, ed)
+                              if args.all_variants else None)
         log("{0} -> {1}".format(name, os.path.basename(whl)))
         made.append(whl)
 
