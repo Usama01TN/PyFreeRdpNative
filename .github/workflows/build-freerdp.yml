@@ -263,7 +263,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 40
+            python scripts/$s.py --require-version 41
           done
 
       # ---- dependencies ---------------------------------------------------
@@ -651,7 +651,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 40
+            python scripts/$s.py --require-version 41
           done
 
       - name: Install host tools
@@ -939,7 +939,7 @@ jobs:
           # Fails fast (with an explanation) if scripts/ is stale relative to
           # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 40
+            python scripts/$s.py --require-version 41
           done
 
       - name: Install host tools
@@ -1022,9 +1022,17 @@ jobs:
             media)    need="libavcodec libavutil libswscale libswresample libopenh264"; sym="_WelsCreateDecoder" ;;
             *)        need=""; sym="" ;;
           esac
-          for f in $need; do ls $d/$f*.a >/dev/null 2>&1 || { echo "::error::$f.a missing from $d"; exit 1; }; done
-          if [ -n "$sym" ]; then nm "$d/libfreerdp3.a" | grep -q "$sym" || { echo "::error::libfreerdp3 has no $sym reference"; exit 1; }; fi
-          echo "arm64 archives with client + server channels present (${{ matrix.profile }}, ${{ matrix.edition }})"
+          # Shared build: the media dependencies are linked INTO the dylibs
+          # rather than shipped as separate archives, so check the symbols
+          # inside libfreerdp3 instead of looking for separate files.
+          for lib in libwinpr3 libfreerdp3 libfreerdp-client3 libfreerdp-server3; do
+            ls $d/$lib*.dylib >/dev/null 2>&1 || { echo "::error::$lib.dylib missing from $d"; exit 1; }
+          done
+          core=$(ls $d/libfreerdp3.*.dylib | head -1)
+          file "$core" | grep -q "arm64" || { echo "::error::$core is not arm64"; exit 1; }
+          if [ -n "$sym" ]; then nm "$core" | grep -q "$sym" || { echo "::error::libfreerdp3 has no $sym reference"; exit 1; }; fi
+          otool -L "$core" | head -12
+          echo "arm64 dylibs with client + server channels present (${{ matrix.profile }}, ${{ matrix.edition }})"
 
       - name: Package
         id: pkg
@@ -1068,7 +1076,7 @@ jobs:
       - name: Publish artifact link to job summary
         run: |
           {
-            echo "### ios-${{ matrix.label }} — FreeRDP $FREERDP_REF (${{ matrix.profile }}, ${{ matrix.edition }}, static)"
+            echo "### ios-${{ matrix.label }} — FreeRDP $FREERDP_REF (${{ matrix.profile }}, ${{ matrix.edition }}, dylib)"
             echo
             echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -1096,7 +1104,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 40
+            python scripts/$s.py --require-version 41
           done
       - uses: actions/setup-java@v4
         with:
@@ -1235,7 +1243,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 40
+            python scripts/$s.py --require-version 41
           done
       - name: Show toolchain
         run: |
@@ -1320,7 +1328,7 @@ jobs:
         shell: bash
         run: |
           for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 40
+            python scripts/$s.py --require-version 41
           done
 
       - name: Check the packaging script is the expected version
