@@ -1435,6 +1435,10 @@ jobs:
                 python -m wheel pack "$root" -d /tmp/audit >/dev/null
                 report=$(python -m auditwheel show /tmp/audit/*.whl 2>&1 || true)
                 echo "$report" | tail -8
+                # auditwheel wraps its prose at ~70 columns, so a long wheel
+                # name can split "is consistent" across two lines. Judge the
+                # report with whitespace collapsed, never line by line.
+                flat=$(echo "$report" | tr -s '[:space:]' ' ')
                 # Independent, precise diagnosis: which NEEDED sonames of the
                 # shipped libraries are satisfied neither by a file in _libs
                 # nor by the manylinux whitelist? This is the question
@@ -1470,15 +1474,15 @@ jobs:
           else:
               print("every NEEDED soname is shipped in _libs or on the manylinux whitelist")
           PY
-                derived=$(echo "$report" | sed -n 's/.*constrains the platform tag to "\([^"]*\)".*/\1/p' | tail -1)
+                derived=$(echo "$flat" | sed -n 's/.*constrains the platform tag to "\([^"]*\)".*/\1/p' | tail -1)
                 if [ -z "$derived" ]; then
-                  derived=$(echo "$report" | sed -n 's/.*is consistent with the following platform tag: "\([^"]*\)".*/\1/p' | tail -1)
+                  derived=$(echo "$flat" | sed -n 's/.*is consistent with the following platform tag: "\([^"]*\)".*/\1/p' | tail -1)
                 fi
                 # auditwheel reports the platform part only; compare like with like.
                 [ "$derived" = "$plat" ] \
                   || { echo "::error::$name is tagged $plat but auditwheel derives ${derived:-<nothing>}"; exit 1; }
                 if [ "$arch" = "$(uname -m)" ]; then
-                  echo "$report" | grep -q "is consistent" \
+                  echo "$flat" | grep -q "is consistent with the following platform tag" \
                     || { echo "--- full auditwheel report:"; echo "$report"; echo "::error::$name leaves system libraries external on $arch"; exit 1; }
                   echo "($name: tag verified and all system libraries vendored)"
                 else
