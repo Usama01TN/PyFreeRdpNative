@@ -1435,6 +1435,41 @@ jobs:
                 python -m wheel pack "$root" -d /tmp/audit >/dev/null
                 report=$(python -m auditwheel show /tmp/audit/*.whl 2>&1 || true)
                 echo "$report" | tail -8
+                # Independent, precise diagnosis: which NEEDED sonames of the
+                # shipped libraries are satisfied neither by a file in _libs
+                # nor by the manylinux whitelist? This is the question
+                # auditwheel answers with "is consistent"; printing the
+                # answer directly beats guessing from a truncated report.
+                python - "$root/pyfreerdp/_libs" <<'PY'
+          import json, os, subprocess, sys, glob
+          import auditwheel
+          libs = sys.argv[1]
+          pol = json.load(open(os.path.join(os.path.dirname(auditwheel.__file__), "policy", "manylinux-policy.json")))
+          allowed = set()
+          for p in pol:
+              allowed.update(p.get("lib_whitelist", []))
+          shipped = set(os.listdir(libs))
+          missing = {}
+          for fn in sorted(shipped):
+              if ".so" not in fn:
+                  continue                     # executables are not audited
+              path = os.path.join(libs, fn)
+              try:
+                  out = subprocess.check_output(["readelf", "-d", path], stderr=subprocess.DEVNULL).decode()
+              except Exception:
+                  continue
+              for line in out.splitlines():
+                  if "(NEEDED)" in line:
+                      so = line.split("[", 1)[1].rstrip("]")
+                      if so not in shipped and so not in allowed and not so.startswith(("ld-linux", "linux-vdso")):
+                          missing.setdefault(so, []).append(fn)
+          if missing:
+              print("UNRESOLVED NEEDED (soname -> needed by):")
+              for so, by in sorted(missing.items()):
+                  print("  {0:<32} {1}".format(so, ", ".join(by[:4]) + (" ..." if len(by) > 4 else "")))
+          else:
+              print("every NEEDED soname is shipped in _libs or on the manylinux whitelist")
+          PY
                 derived=$(echo "$report" | sed -n 's/.*constrains the platform tag to "\([^"]*\)".*/\1/p' | tail -1)
                 if [ -z "$derived" ]; then
                   derived=$(echo "$report" | sed -n 's/.*is consistent with the following platform tag: "\([^"]*\)".*/\1/p' | tail -1)
@@ -1444,7 +1479,7 @@ jobs:
                   || { echo "::error::$name is tagged $plat but auditwheel derives ${derived:-<nothing>}"; exit 1; }
                 if [ "$arch" = "$(uname -m)" ]; then
                   echo "$report" | grep -q "is consistent" \
-                    || { echo "::error::$name leaves system libraries external on $arch"; exit 1; }
+                    || { echo "--- full auditwheel report:"; echo "$report"; echo "::error::$name leaves system libraries external on $arch"; exit 1; }
                   echo "($name: tag verified and all system libraries vendored)"
                 else
                   echo "($name: tag verified; the external-library check needs an $arch runner)"
