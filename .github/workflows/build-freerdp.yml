@@ -1359,6 +1359,10 @@ jobs:
           for whl in dist/*.whl; do
             name=$(basename "$whl")
             tag=$(unzip -p "$whl" "*/WHEEL" | sed -n 's/^Tag: //p' | tr -d '\r')
+            plat=${tag#py3-none-}          # platform part only, e.g. manylinux_2_39_aarch64
+            # arch = everything after manylinux_<major>_<minor>_ (x86_64 has
+            # its own underscore, so a plain ${plat##*_} would give "64").
+            arch=$(echo "$plat" | sed -E 's/^manylinux_[0-9]+_[0-9]+_//')
             files=$(unzip -l "$whl" | grep -c "pyfreerdp/_libs/" || true)
             echo "$name  tag=$tag  libs=$files"
             [ "$files" -gt 0 ] || { echo "::error::$name ships no libraries"; exit 1; }
@@ -1377,13 +1381,15 @@ jobs:
                 if [ -z "$derived" ]; then
                   derived=$(echo "$report" | sed -n 's/.*is consistent with the following platform tag: "\([^"]*\)".*/\1/p' | tail -1)
                 fi
-                [ "$derived" = "$tag" ] \
-                  || { echo "::error::$name is tagged $tag but auditwheel derives ${derived:-<nothing>}"; exit 1; }
-                if [ "${tag##*_}" = "$(uname -m)" ]; then
+                # auditwheel reports the platform part only; compare like with like.
+                [ "$derived" = "$plat" ] \
+                  || { echo "::error::$name is tagged $plat but auditwheel derives ${derived:-<nothing>}"; exit 1; }
+                if [ "$arch" = "$(uname -m)" ]; then
                   echo "$report" | grep -q "is consistent" \
-                    || { echo "::error::$name leaves system libraries external on $(uname -m)"; exit 1; }
+                    || { echo "::error::$name leaves system libraries external on $arch"; exit 1; }
+                  echo "($name: tag verified and all system libraries vendored)"
                 else
-                  echo "($name is a foreign architecture: full external-library check needs an $(echo "$tag" | sed 's/.*_//') runner)"
+                  echo "($name: tag verified; the external-library check needs an $arch runner)"
                 fi
                 ;;
             esac
