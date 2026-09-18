@@ -106,7 +106,10 @@ jobs:
           # _libs is data, __pycache__ is noise; everything else must be identical
           if ! diff -r -x _libs -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative > /tmp/bindings.diff; then
             echo "::error::pyfreerdpnative/ differs from a fresh generation - run scripts/gen_bindings.py and commit"
-            head -60 /tmp/bindings.diff
+            echo "--- files that differ:"
+            diff -rq -x _libs -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative | sed 's/^/  /'
+            echo "--- first differences (long lines cut):"
+            grep -E '^[<>]' /tmp/bindings.diff | cut -c1-160 | head -40
             exit 1
           fi
           echo "committed bindings match the generator output"
