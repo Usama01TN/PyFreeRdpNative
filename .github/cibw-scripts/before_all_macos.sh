@@ -7,7 +7,7 @@
 set -euo pipefail
 
 PROJECT_DIR="${1:-$(pwd)}"
-LIBS_DIR="${PROJECT_DIR}/pyfreerdp/_libs"
+LIBS_DIR="${PROJECT_DIR}/pyfreerdpnative/_libs"
 echo "[before_all_macos] PROJECT_DIR=${PROJECT_DIR}"
 echo "[before_all_macos] arch=$(uname -m)"
 
@@ -81,7 +81,7 @@ cmake .. \
 ninja -j"$(sysctl -n hw.ncpu)"
 ninja install
 
-# --- 4. Stage artifacts into pyfreerdp/_libs/ ------------------------------
+# --- 4. Stage artifacts into pyfreerdpnative/_libs/ ------------------------------
 
 mkdir -p "${LIBS_DIR}"
 

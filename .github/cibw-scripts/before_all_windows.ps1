@@ -8,7 +8,7 @@
 $ErrorActionPreference = "Stop"
 
 $PROJECT_DIR = if ($args[0]) { $args[0] } else { (Get-Location).Path }
-$LIBS_DIR = Join-Path $PROJECT_DIR "pyfreerdp/_libs"
+$LIBS_DIR = Join-Path $PROJECT_DIR "pyfreerdpnative/_libs"
 Write-Host "[before_all_windows] PROJECT_DIR=$PROJECT_DIR"
 
 # --- 1. vcpkg deps ---------------------------------------------------------
@@ -103,7 +103,7 @@ if ($LASTEXITCODE -ne 0) { Write-Error "cmake install failed"; exit 1 }
 
 Pop-Location; Pop-Location; Pop-Location
 
-# --- 4. Stage DLLs into pyfreerdp/_libs/ ----------------------------------
+# --- 4. Stage DLLs into pyfreerdpnative/_libs/ ----------------------------------
 
 if (-not (Test-Path $LIBS_DIR)) {
     New-Item -ItemType Directory -Path $LIBS_DIR -Force | Out-Null
