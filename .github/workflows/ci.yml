@@ -121,15 +121,20 @@ jobs:
             exit 0
           fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
+          # NB: this step runs with `set -e -o pipefail`; diff exits 1 when
+          # files differ and grep exits 1 with no match, so every reporting
+          # pipeline below must be neutralised with `|| true` or it aborts the
+          # step before the package is staged.
           echo "--- files that differ:"
-          diff -rq -x _libs -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative | sed 's/^/  /'
+          { diff -rq -x _libs -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative || true; } | sed 's/^/  /'
           echo "--- first differences (long lines cut):"
-          grep -E '^[<>]' /tmp/bindings.diff | cut -c1-160 | head -40 || true
+          { grep -E '^[<>]' /tmp/bindings.diff || true; } | cut -c1-160 | head -40
           # stage the regenerated package in place (keeps _libs untouched)
-          find pyfreerdpnative -mindepth 1 -maxdepth 1 ! -name _libs -exec rm -rf {} +
+          find pyfreerdpnative -mindepth 1 -maxdepth 1 ! -name _libs -exec rm -rf {} + || true
           cp -r /tmp/regen/. pyfreerdpnative/
           find pyfreerdpnative -name __pycache__ -type d -prune -exec rm -rf {} + || true
-          python -c "import pyfreerdpnative, pyfreerdpnative.freerdp.freerdp" # must import
+          python -c "import pyfreerdpnative, pyfreerdpnative.freerdp.freerdp"   # must import
+          echo "regenerated package staged"
       - name: Upload the regenerated package (pull requests)
         if: steps.compare.outputs.changed == 'true'
         uses: actions/upload-artifact@v4
