@@ -1392,10 +1392,20 @@ jobs:
             -DWITH_CHANNELS=OFF -DWITH_FUSE=OFF -DWITH_PULSE=OFF -DWITH_ALSA=OFF \
             -DWITH_CUPS=OFF -DWITH_PCSC=OFF > /tmp/freerdp-cfg.log 2>&1 \
             || { tail -30 /tmp/freerdp-cfg.log; exit 1; }
+          # Generate into a FRESH directory, then move the result into the
+          # package. Never point --out at the existing package: besides
+          # keeping scratch files out of it, this sidesteps an old generator
+          # bug (relative #include of a scratch file) that only triggered
+          # when the output directory already existed.
+          rm -rf "$RUNNER_TEMP/regen"
           python scripts/gen_bindings.py \
             --include /tmp/freerdp-src/include --include /tmp/freerdp-src/winpr/include \
             --include /tmp/freerdp-cfg/include --include /tmp/freerdp-cfg/winpr/include \
-            --out pyfreerdpnative --version "$FREERDP_REF"
+            --out "$RUNNER_TEMP/regen" --version "$FREERDP_REF"
+          find pyfreerdpnative -mindepth 1 -maxdepth 1 ! -name _libs -exec rm -rf {} + || true
+          cp -r "$RUNNER_TEMP/regen/." pyfreerdpnative/
+          find pyfreerdpnative -name __pycache__ -type d -prune -exec rm -rf {} + || true
+          rm -f pyfreerdpnative/*.c pyfreerdpnative/*.expand.c
           # Prove the output imports and carries the anchors everything else relies on.
           python - <<'PY'
           import ctypes, importlib, os, sys
