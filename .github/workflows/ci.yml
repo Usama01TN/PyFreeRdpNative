@@ -1,236 +1,112 @@
+# Fast checks on every push / PR: the generated bindings import and are
+# self-consistent, the scripts agree on their version, and the examples parse.
+# Building FreeRDP itself is build-freerdp.yml's job.
 name: ci
 
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
-  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Lint + unit tests on every push, no native FreeRDP needed. Runs on all
-  # three host OSes to catch platform-specific candidate-list / loader bugs.
+  # Pure-Python tests on every supported interpreter and OS. No FreeRDP
+  # libraries are present here, so the needs_lib tests skip.
   # ---------------------------------------------------------------------------
   unit:
-    name: unit (${{ matrix.os }} / py${{ matrix.python-version }})
+    name: unit (${{ matrix.os }}, py${{ matrix.python }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        # 3.8 is the floor: f-strings would force 3.6+ but we don't use
-        # them; class-attribute access patterns we use work all the way
-        # back. We still pick 3.8 as the floor since older Pythons have
-        # been EOL for a long time.
-        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+        os: [ubuntu-24.04, macos-15, windows-2022]
+        python: ["3.8", "3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
+        exclude:
+          - os: macos-15
+            python: "3.8"      # no arm64 build of 3.8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install dev deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .[dev]
-      - name: Lint
-        run: |
-          ruff check pyfreerdp tests
-      - name: Static syntax check (no Py3-only features)
-        # We deliberately keep the source Py2-syntax-compatible. This step
-        # asserts no f-string, annotation, dataclass, walrus, or match
-        # leaked back in.
-        run: |
-          python scripts/check_py2_syntax.py
-      - name: Unit tests (no native lib)
-        run: |
-          pytest -v -m "not needs_lib"
-
-  # ---------------------------------------------------------------------------
-  # Integration: install FreeRDP from apt (client + server + winpr), then
-  # run the needs_lib-marked tests so we exercise the loader and the
-  # bind_client / bind_server / bind_winpr paths against a real shared library.
-  # ---------------------------------------------------------------------------
-  integration-linux:
-    name: integration (linux, system FreeRDP)
-    runs-on: ubuntu-latest
-    needs: unit
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Check build scripts are the expected version
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+      - run: python -m pip install --upgrade pip pytest
+      - name: Build scripts are version-consistent
         shell: bash
         run: |
-          # Fails fast (with an explanation) if scripts/ is stale relative to
-          # this workflow, instead of dying deep inside a CMake configure.
           for s in build_freerdp build_deps validate_build; do
             python scripts/$s.py --require-version 43
           done
-      - name: Install FreeRDP from apt (client + server + winpr)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libfreerdp-client3-3 \
-            libfreerdp-server3-3 \
-            libfreerdp3-3 \
-            libwinpr3-3
-      - name: Install package
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .[dev]
-      - name: Run needs_lib tests
-        run: |
-          pytest -v -m needs_lib
-      - name: Confirm all three halves loadable
-        run: |
-          python -c "
-          import pyfreerdp
-          c = pyfreerdp.find_freerdp_library()
-          s = pyfreerdp.find_freerdp_server_library()
-          w = pyfreerdp.find_winpr_library()
-          print('client:', c)
-          print('server:', s)
-          print('winpr: ', w)
-          assert c, 'client lib not found'
-          assert s, 'server lib not found'
-          assert w, 'winpr lib not found'
-          "
+          python scripts/package_wheels.py --require-version 4
+      - name: Py2-compatible syntax in the hand-written code
+        run: python scripts/check_py2_syntax.py
+      - name: Unit tests
+        run: pytest -v -m "not needs_lib"
+      - name: Examples compile
+        shell: bash
+        run: python -m compileall -q examples
 
   # ---------------------------------------------------------------------------
-  # Build FreeRDP from source with --profile=full and verify all libraries
-  # (client, server, winpr) plus the client/server channels land in
-  # pyfreerdp/_libs/. Runs on every push / PR / manual dispatch: an earlier
-  # version gated this on "did scripts/build_freerdp.py change?", and both
-  # the head_commit.modified check and a paths-filter job skipped it when it
-  # should have run. ~10 min on a 4-core runner is cheaper than a silently
-  # skipped build.
+  # Lint the hand-written code (generated modules are excluded in pyproject).
   # ---------------------------------------------------------------------------
-  # ---------------------------------------------------------------------------
-  # Minimal profile: the size-optimised library-only package the wheel ships.
-  # No media deps, no executables, MinSizeRel + stripped + SONAME-only files.
-  # ---------------------------------------------------------------------------
-  build-minimal:
-    name: build FreeRDP from source (--profile=minimal)
-    runs-on: ubuntu-latest
+  lint:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
+      - run: python -m pip install ruff
+      - run: ruff check scripts tests examples pyfreerdpnative/__init__.py pyfreerdpnative/_loader.py
 
-      - name: Check build scripts are the expected version
-        shell: bash
-        run: |
-          # Fails fast (with an explanation) if scripts/ is stale relative to
-          # this workflow, instead of dying deep inside a CMake configure.
-          for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 43
-          done
-      - name: Install FreeRDP build deps (apt, core only)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build git pkg-config patchelf \
-            libssl-dev zlib1g-dev libkrb5-dev libcjson-dev libicu-dev \
-            libasound2-dev libpng-dev libjpeg-dev libcairo2-dev
-      - name: Build FreeRDP (minimal profile)
-        run: |
-          python scripts/build_freerdp.py --target host --profile minimal --edition standard --jobs "$(nproc)"
-      - name: Report package size and contents
-        run: |
-          du -sh pyfreerdp/_libs
-          ls -l pyfreerdp/_libs
-          test ! -d pyfreerdp/_bin || { echo "::error::minimal must not stage executables"; exit 1; }
-          for f in pyfreerdp/_libs/*.so*; do
-            readelf -d "$f" | grep -q "libavcodec\|libopenh264" && { echo "::error::$f links media libs in minimal"; exit 1; }
-            file "$f" | grep -q "not stripped" && { echo "::error::$f is not stripped"; exit 1; }
-          done
-          echo "minimal package OK"
-      - name: Validate
-        run: |
-          python scripts/validate_build.py --profile minimal --edition standard --kerberos on
-      - name: Run test suite against bundled libs
-        run: |
-          pip install -e .[dev]
-          pytest -v
-
-  build-from-source:
-    name: build FreeRDP from source (--profile=full)
-    runs-on: ubuntu-latest
+  # ---------------------------------------------------------------------------
+  # The committed bindings must match what the generator produces from the
+  # FreeRDP tag build-freerdp.yml builds - otherwise layouts drift from the
+  # libraries. Regenerate and diff.
+  # ---------------------------------------------------------------------------
+  bindings-up-to-date:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Check build scripts are the expected version
+          python-version: "3.12"
+      - name: Tools
+        run: |
+          python -m pip install pycparser
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+            cmake gcc libssl-dev zlib1g-dev libcjson-dev
+      - name: Regenerate from the pinned FreeRDP tag
         shell: bash
-        run: |
-          # Fails fast (with an explanation) if scripts/ is stale relative to
-          # this workflow, instead of dying deep inside a CMake configure.
-          for s in build_freerdp build_deps validate_build; do
-            python scripts/$s.py --require-version 43
-          done
-      - name: Install FreeRDP build deps (apt)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential cmake ninja-build git pkg-config \
-            libssl-dev zlib1g-dev libkrb5-dev libcjson-dev libicu-dev \
-            libx11-dev libxext-dev libxrandr-dev libxinerama-dev \
-            libxfixes-dev libxcursor-dev libxi-dev libxv-dev \
-            libxkbfile-dev libxkbcommon-dev \
-            libwayland-dev wayland-protocols \
-            libasound2-dev libpng-dev libjpeg-dev libcairo2-dev \
-            nasm libudev-dev libv4l-dev xvfb patchelf
-      - name: Cache dependency prefix (libusb, OpenH264, FFmpeg)
-        id: deps-cache
-        uses: actions/cache@v4
-        with:
-          path: build/deps/linux-x86_64-media
-          key: deps-v3-media-linux-x86_64-${{ hashFiles('scripts/build_deps.py', 'scripts/vcpkg.json') }}
-      - name: Build dependencies (media edition)
-        if: steps.deps-cache.outputs.cache-hit != 'true'
-        run: |
-          python scripts/build_deps.py --target host --edition media --jobs "$(nproc)"
-      - name: Show channel plan
-        run: |
-          python scripts/build_freerdp.py --list-channels --profile full \
-            --enable-channel urbdrc --enable-channel rdpecam
-      - name: Build FreeRDP (full profile, with FFmpeg/OpenH264/libusb + executables)
-        run: |
-          python scripts/build_freerdp.py --target host --profile full --edition media \
-            --deps-prefix build/deps/linux-x86_64-media --jobs "$(nproc)"
-      - name: Assert all halves staged
-        run: |
-          ls -1 pyfreerdp/_libs/ | tee /tmp/libs.txt
-          grep -q 'freerdp-client' /tmp/libs.txt
-          grep -q 'freerdp-server' /tmp/libs.txt
-          grep -q 'winpr' /tmp/libs.txt
-      - name: Assert client + server channels compiled in
         run: |
           set -e
-          # Server channels are exported; client channels live in a static
-          # entry table with hidden visibility, so look at all symbols.
-          for sym in cliprdr_server_context_new rdpsnd_server_context_new \
-                     rdpgfx_server_context_new rail_server_context_new \
-                     drdynvc_server_context_new disp_server_context_new; do
-            nm -D --defined-only pyfreerdp/_libs/libfreerdp-server3.so | grep -q " $sym$" \
-              || { echo "::error::server channel symbol missing: $sym"; exit 1; }
-          done
-          for sym in cliprdr_VirtualChannelEntryEx drdynvc_VirtualChannelEntryEx \
-                     rdpgfx_DVCPluginEntry disp_DVCPluginEntry drive_DeviceServiceEntry; do
-            nm --defined-only pyfreerdp/_libs/libfreerdp-client3.so | grep -q " $sym$" \
-              || { echo "::error::client channel symbol missing: $sym"; exit 1; }
-          done
-          echo "client + server channels present"
-      - name: Validate (media, executables, loopback session)
+          # build-freerdp.yml: FREERDP_REF: ${{ inputs.freerdp_ref || '3.31.1' }} -> the default
+          ref=$(grep -oE "freerdp_ref \|\| '[^']+'" .github/workflows/build-freerdp.yml | head -1 | grep -oE "'[^']+'" | tr -d "'")
+          test -n "$ref" || { echo "::error::could not read the FreeRDP tag from build-freerdp.yml"; exit 1; }
+          echo "FreeRDP tag: $ref"
+          git clone -q --depth=1 --branch "$ref" https://github.com/FreeRDP/FreeRDP.git /tmp/src
+          cmake -S /tmp/src -B /tmp/cfg -DWITH_CLIENT=OFF -DWITH_SERVER=ON -DWITH_SAMPLE=OFF \
+            -DWITH_MANPAGES=OFF -DBUILD_TESTING=OFF -DWITH_X11=OFF -DWITH_WAYLAND=OFF \
+            -DWITH_FFMPEG=OFF -DWITH_SWSCALE=OFF -DWITH_DSP_FFMPEG=OFF -DWITH_CAIRO=OFF \
+            -DWITH_OPENH264=OFF -DWITH_INTERNAL_MD4=ON -DWITH_INTERNAL_MD5=ON -DWITH_INTERNAL_RC4=ON \
+            -DWITH_KRB5=OFF -DWITH_PROXY=OFF -DWITH_SHADOW=OFF -DWITH_CHANNELS=OFF -DWITH_FUSE=OFF \
+            -DWITH_PULSE=OFF -DWITH_ALSA=OFF -DWITH_CUPS=OFF -DWITH_PCSC=OFF > /tmp/cfg.log 2>&1 \
+            || { tail -20 /tmp/cfg.log; exit 1; }
+          python scripts/gen_bindings.py \
+            --include /tmp/src/include --include /tmp/src/winpr/include \
+            --include /tmp/cfg/include --include /tmp/cfg/winpr/include \
+            --out /tmp/regen --version "$ref"
+      - name: Compare with the committed package
+        shell: bash
         run: |
-          python scripts/validate_build.py --profile full --edition media --media --executables --loopback --kerberos on
-      - name: Run full test matrix against bundled libs
-        run: |
-          pip install -e .[dev]
-          pytest -v
+          # _libs is data, __pycache__ is noise; everything else must be identical
+          if ! diff -r -x _libs -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative > /tmp/bindings.diff; then
+            echo "::error::pyfreerdpnative/ differs from a fresh generation - run scripts/gen_bindings.py and commit"
+            head -60 /tmp/bindings.diff
+            exit 1
+          fi
+          echo "committed bindings match the generator output"

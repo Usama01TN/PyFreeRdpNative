@@ -14,7 +14,7 @@ name: build-freerdp
 #                               tests every executable, and (Linux) runs a real
 #                               sfreerdp-server <-> xfreerdp loopback session
 #
-# and publishes pyfreerdp/_libs (+ _bin) as downloadable artifacts.
+# and publishes pyfreerdpnative/_libs (+ _bin) as downloadable artifacts.
 #
 # Every platform x architecture is built in profiles x editions:
 #
@@ -34,7 +34,7 @@ name: build-freerdp
 # scripts/build_freerdp.py (FULL_PLATFORM), and documented in docs/BUILD.md.
 #
 # This is NOT the wheel pipeline (see wheels.yml). It produces raw native
-# libraries - the contents of pyfreerdp/_libs/ - so they can be:
+# libraries - the contents of pyfreerdpnative/_libs/ - so they can be:
 #   * inspected / smoke-tested independently of Python packaging,
 #   * downloaded by users who want prebuilt FreeRDP without a wheel,
 #   * attached to a GitHub release with stable URLs.
@@ -198,7 +198,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Desktop hosts. One job per (OS, arch); each runs the script with
-  # --target host and uploads pyfreerdp/_libs/ as an artifact.
+  # --target host and uploads pyfreerdpnative/_libs/ as an artifact.
   #
   # Profiles: Linux gets the requested profile (default full = shadow +
   # proxy too). macOS and Windows are capped at 'minimal' (client + server
@@ -449,7 +449,7 @@ jobs:
           want = {"x64": 0x8664, "x86": 0x14C, "arm64": 0xAA64}["${{ matrix.win_arch }}"]
           names = {0x8664: "x64", 0x14C: "x86", 0xAA64: "arm64"}
           bad = []
-          for dll in glob.glob("pyfreerdp/_libs/*.dll"):
+          for dll in glob.glob("pyfreerdpnative/_libs/*.dll"):
               with open(dll, "rb") as fh:
                   data = fh.read(4096)
               off = struct.unpack_from("<I", data, 0x3C)[0]
@@ -469,14 +469,14 @@ jobs:
         if: matrix.win_arch != 'arm64' && (runner.os != 'Windows' || inputs.win_target == null || inputs.win_target == '10' || inputs.win_toolset != '')
         shell: bash
         env:
-          LD_LIBRARY_PATH: ${{ github.workspace }}/pyfreerdp/_libs
-          DYLD_LIBRARY_PATH: ${{ github.workspace }}/pyfreerdp/_libs
+          LD_LIBRARY_PATH: ${{ github.workspace }}/pyfreerdpnative/_libs
+          DYLD_LIBRARY_PATH: ${{ github.workspace }}/pyfreerdpnative/_libs
         run: |
           set -e
-          ls -la pyfreerdp/_libs/
+          ls -la pyfreerdpnative/_libs/
           python - <<'PY'
           import ctypes, glob, os, platform, sys
-          libs = "pyfreerdp/_libs"
+          libs = "pyfreerdpnative/_libs"
           ext = {"Windows": ".dll", "Darwin": ".dylib"}.get(platform.system(), ".so")
           def find(stem):
               hits = sorted(p for p in glob.glob(os.path.join(libs, "*%s*" % stem))
@@ -572,9 +572,9 @@ jobs:
             esac
             echo
             echo "Files (libraries and executables together):"
-            ls -l pyfreerdp/_libs
-          } > pyfreerdp/_libs/BUILD-INFO.txt
-          cp build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}/DEPS-MANIFEST.txt pyfreerdp/_libs/ 2>/dev/null || true
+            ls -l pyfreerdpnative/_libs
+          } > pyfreerdpnative/_libs/BUILD-INFO.txt
+          cp build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}/DEPS-MANIFEST.txt pyfreerdpnative/_libs/ 2>/dev/null || true
           # upload-artifact zips whatever it is given, so hand it the plain
           # directory: pre-archiving would nest an archive inside the .zip.
           # Staging already resolved every symlink into a real file, so the
@@ -582,7 +582,7 @@ jobs:
           # package_wheels.py restores it, and `chmod +x _libs/*` does the
           # same by hand.
           mkdir -p "out/$name"
-          cp -r pyfreerdp/_libs "out/$name/"
+          cp -r pyfreerdpnative/_libs "out/$name/"
           echo "file=out/$name" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
           ls -lh out/
@@ -731,13 +731,13 @@ jobs:
           # Ship OpenSSL alongside so the artifact is self-contained.
           cp openssl-android-${{ matrix.abi }}/lib/libssl.so \
              openssl-android-${{ matrix.abi }}/lib/libcrypto.so \
-             pyfreerdp/_libs/android/${{ matrix.abi }}/
-          ls -la pyfreerdp/_libs/android/${{ matrix.abi }}/
+             pyfreerdpnative/_libs/android/${{ matrix.abi }}/
+          ls -la pyfreerdpnative/_libs/android/${{ matrix.abi }}/
 
       - name: Verify ELF targets and channel symbols
         run: |
           set -e
-          d=pyfreerdp/_libs/android/${{ matrix.abi }}
+          d=pyfreerdpnative/_libs/android/${{ matrix.abi }}
           for f in $d/*.so; do
             file "$f" | grep -q "ELF" || { echo "::error::$f is not an ELF"; exit 1; }
           done
@@ -772,9 +772,9 @@ jobs:
             echo "Platform:     android ${{ matrix.abi }} (API ${API_LEVEL}, OpenSSL ${OPENSSL_VERSION})"
             echo "Repo commit:  $GITHUB_SHA"
             echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          } > pyfreerdp/_libs/android/${{ matrix.abi }}/BUILD-INFO.txt
+          } > pyfreerdpnative/_libs/android/${{ matrix.abi }}/BUILD-INFO.txt
           mkdir -p "out/$name"
-          cp -r pyfreerdp/_libs/android/${{ matrix.abi }} "out/$name/_libs"
+          cp -r pyfreerdpnative/_libs/android/${{ matrix.abi }} "out/$name/_libs"
           echo "name=$name" >> "$GITHUB_OUTPUT"
           echo "file=out/$name" >> "$GITHUB_OUTPUT"
 
@@ -1013,14 +1013,14 @@ jobs:
             # (In the dynamic build OpenSSL is already inside the dylibs.)
             cp openssl-ios-${{ matrix.platform }}/lib/libssl.a \
                openssl-ios-${{ matrix.platform }}/lib/libcrypto.a \
-               pyfreerdp/_libs/ios/${{ matrix.platform }}/
+               pyfreerdpnative/_libs/ios/${{ matrix.platform }}/
           fi
-          ls -la pyfreerdp/_libs/ios/${{ matrix.platform }}/
+          ls -la pyfreerdpnative/_libs/ios/${{ matrix.platform }}/
 
       - name: Verify architecture and channel symbols
         run: |
           set -e
-          d=pyfreerdp/_libs/ios/${{ matrix.platform }}
+          d=pyfreerdpnative/_libs/ios/${{ matrix.platform }}
           case "${{ matrix.edition }}" in
             ffmpeg)   need="libavcodec libavutil libswscale libswresample"; sym="_avcodec_send_packet" ;;
             openh264) need="libopenh264"; sym="_WelsCreateDecoder" ;;
@@ -1080,9 +1080,9 @@ jobs:
             echo
             echo "Link order: freerdp-client3 / freerdp-server3, freerdp3, winpr3, openh264, avcodec, avformat, swscale, swresample, avutil, ssl, crypto, (libc++)"
             echo "Frameworks: Foundation, Security, CoreFoundation, SystemConfiguration"
-          } > pyfreerdp/_libs/ios/${{ matrix.platform }}/BUILD-INFO.txt
+          } > pyfreerdpnative/_libs/ios/${{ matrix.platform }}/BUILD-INFO.txt
           mkdir -p "out/$name"
-          cp -r pyfreerdp/_libs/ios/${{ matrix.platform }} "out/$name/_libs"
+          cp -r pyfreerdpnative/_libs/ios/${{ matrix.platform }} "out/$name/_libs"
           echo "name=$name" >> "$GITHUB_OUTPUT"
           echo "file=out/$name" >> "$GITHUB_OUTPUT"
 
@@ -1226,10 +1226,10 @@ jobs:
           path: |
             build/diagnostics/
             client/Android/Studio/**/build/reports/
-            /tmp/pyfreerdp-build/FreeRDP/client/Android/Studio/**/build/reports/
-            /tmp/pyfreerdp-build/FreeRDP/client/Android/Studio/**/.cxx/**/*.log
-            /tmp/pyfreerdp-build/FreeRDP/client/Android/Studio/**/.cxx/**/*.txt
-            /tmp/pyfreerdp-build/FreeRDP/client/Android/Studio/**/.cxx/**/*.cmake
+            /tmp/pyfreerdpnative-build/FreeRDP/client/Android/Studio/**/build/reports/
+            /tmp/pyfreerdpnative-build/FreeRDP/client/Android/Studio/**/.cxx/**/*.log
+            /tmp/pyfreerdpnative-build/FreeRDP/client/Android/Studio/**/.cxx/**/*.txt
+            /tmp/pyfreerdpnative-build/FreeRDP/client/Android/Studio/**/.cxx/**/*.cmake
           if-no-files-found: ignore
           retention-days: 7
 
@@ -1323,7 +1323,7 @@ jobs:
           name: diagnostics-ios-app-${{ matrix.platform }}
           path: |
             build/diagnostics/
-            /tmp/pyfreerdp-build/FreeRDP/build-ios-app-*/**/*-stamp/*.log
+            /tmp/pyfreerdpnative-build/FreeRDP/build-ios-app-*/**/*-stamp/*.log
           if-no-files-found: ignore
           retention-days: 7
 
@@ -1337,7 +1337,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Package the library artifacts into wheels: one per platform, tagged
-  # py3-none-<platform>. pyfreerdp loads its libraries with ctypes and never
+  # py3-none-<platform>. pyfreerdpnative loads its libraries with ctypes and never
   # links libpython, so a single wheel serves every Python version - no
   # per-interpreter matrix needed. Android/iOS get PEP 738 / PEP 730 tags.
   # ---------------------------------------------------------------------------
@@ -1368,7 +1368,57 @@ jobs:
         run: python scripts/package_wheels.py --require-version 4
 
       - name: Install packaging tools
-        run: python -m pip install --upgrade build wheel auditwheel
+        run: |
+          python -m pip install --upgrade build wheel auditwheel pycparser
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+            cmake gcc libssl-dev zlib1g-dev libcjson-dev
+
+      # -------------------------------------------------------------------
+      # ctypes bindings generated from the SAME FreeRDP checkout the
+      # libraries were built from, so struct layouts, settings key ids and
+      # prototypes match the DLLs/.so files in every wheel exactly.
+      # -------------------------------------------------------------------
+      - name: Generate ctypes bindings from the FreeRDP headers
+        run: |
+          set -e
+          git clone -q --depth=1 --branch "$FREERDP_REF" https://github.com/FreeRDP/FreeRDP.git /tmp/freerdp-src
+          # configure only (no build): produces settings_keys.h, version.h,
+          # config.h and the winpr equivalents the public headers include
+          cmake -S /tmp/freerdp-src -B /tmp/freerdp-cfg -DWITH_CLIENT=OFF -DWITH_SERVER=ON \
+            -DWITH_SAMPLE=OFF -DWITH_MANPAGES=OFF -DBUILD_TESTING=OFF -DWITH_X11=OFF \
+            -DWITH_WAYLAND=OFF -DWITH_FFMPEG=OFF -DWITH_SWSCALE=OFF -DWITH_DSP_FFMPEG=OFF \
+            -DWITH_CAIRO=OFF -DWITH_OPENH264=OFF -DWITH_INTERNAL_MD4=ON -DWITH_INTERNAL_MD5=ON \
+            -DWITH_INTERNAL_RC4=ON -DWITH_KRB5=OFF -DWITH_PROXY=OFF -DWITH_SHADOW=OFF \
+            -DWITH_CHANNELS=OFF -DWITH_FUSE=OFF -DWITH_PULSE=OFF -DWITH_ALSA=OFF \
+            -DWITH_CUPS=OFF -DWITH_PCSC=OFF > /tmp/freerdp-cfg.log 2>&1 \
+            || { tail -30 /tmp/freerdp-cfg.log; exit 1; }
+          python scripts/gen_bindings.py \
+            --include /tmp/freerdp-src/include --include /tmp/freerdp-src/winpr/include \
+            --include /tmp/freerdp-cfg/include --include /tmp/freerdp-cfg/winpr/include \
+            --out pyfreerdpnative --version "$FREERDP_REF"
+          # Prove the output imports and carries the anchors everything else relies on.
+          python - <<'PY'
+          import ctypes, importlib, os, sys
+          sys.path.insert(0, ".")
+          import pyfreerdpnative as g
+          # every mirrored header module must import
+          root = os.path.dirname(g.__file__); n = 0
+          for d, _, files in os.walk(root):
+              for f in files:
+                  if f.endswith(".py"):
+                      rel = os.path.relpath(os.path.join(d, f[:-3]), root).replace(os.sep, ".")
+                      importlib.import_module("pyfreerdpnative." + (rel[:-9] if rel.endswith(".__init__") else rel)); n += 1
+          # the anchors the rest of the package relies on, read from the mirror
+          from pyfreerdpnative.freerdp import freerdp, client, settings_keys, scancode
+          from pyfreerdpnative.freerdp.codec import color
+          assert freerdp.rdpContext.settings.offset % 8 == 0 and ctypes.sizeof(freerdp.rdpContext) >= 1000
+          assert ctypes.sizeof(client.RDP_CLIENT_ENTRY_POINTS_V1) == 72
+          assert "freerdp_connect" in freerdp.FUNCTIONS and "freerdp_client_context_new" in client.FUNCTIONS
+          for m, name in ((settings_keys, "FreeRDP_ColorDepth"), (color, "PIXEL_FORMAT_BGRX32"), (scancode, "RDP_SCANCODE_RETURN")):
+              assert hasattr(m, name), name
+          print("generated bindings OK: %d modules, %d prototypes, rdpContext=%d bytes, settings@%d" % (
+              n, len(g.PROTOTYPES), ctypes.sizeof(freerdp.rdpContext), freerdp.rdpContext.settings.offset))
+          PY
 
       - name: Download the library artifacts
         uses: actions/download-artifact@v4
@@ -1409,7 +1459,7 @@ jobs:
             # arch = everything after manylinux_<major>_<minor>_ (x86_64 has
             # its own underscore, so a plain ${plat##*_} would give "64").
             arch=$(echo "$plat" | sed -E 's/^manylinux_[0-9]+_[0-9]+_//')
-            files=$(unzip -l "$whl" | grep -c "pyfreerdp/_libs/" || true)
+            files=$(unzip -l "$whl" | grep -c "pyfreerdpnative/_libs/" || true)
             echo "$name  tag=$tag  libs=$files"
             [ "$files" -gt 0 ] || { echo "::error::$name ships no libraries"; exit 1; }
             case "$name" in
@@ -1430,7 +1480,7 @@ jobs:
                 rm -rf /tmp/audit && mkdir -p /tmp/audit
                 python -m wheel unpack "$whl" -d /tmp/audit/u >/dev/null
                 root=$(ls -d /tmp/audit/u/*/)
-                find "$root/pyfreerdp/_libs" -maxdepth 1 -type f \
+                find "$root/pyfreerdpnative/_libs" -maxdepth 1 -type f \
                   ! -name "*.so*" ! -name "*.txt" ! -name "*.cfg" ! -name "*.pc" -delete
                 python -m wheel pack "$root" -d /tmp/audit >/dev/null
                 report=$(python -m auditwheel show /tmp/audit/*.whl 2>&1 || true)
@@ -1444,7 +1494,7 @@ jobs:
                 # nor by the manylinux whitelist? This is the question
                 # auditwheel answers with "is consistent"; printing the
                 # answer directly beats guessing from a truncated report.
-                python - "$root/pyfreerdp/_libs" <<'PY'
+                python - "$root/pyfreerdpnative/_libs" <<'PY'
           import json, os, subprocess, sys, glob
           import auditwheel
           libs = sys.argv[1]
@@ -1510,13 +1560,13 @@ jobs:
             case "$name" in
               *manylinux*x86_64*)
                 python -m venv /tmp/wv && /tmp/wv/bin/pip install -q "$whl"
-                # Run from /tmp, not the repo: the checkout has a pyfreerdp/
+                # Run from /tmp, not the repo: the checkout has a pyfreerdpnative/
                 # source directory that would shadow the installed package
                 # (cwd is first on sys.path) and the check would inspect the
                 # wrong thing.
                 (cd /tmp && /tmp/wv/bin/python -c "
-          import ctypes, glob, os, pyfreerdp
-          pkg = os.path.dirname(pyfreerdp.__file__)
+          import ctypes, glob, os, pyfreerdpnative
+          pkg = os.path.dirname(pyfreerdpnative.__file__)
           assert 'site-packages' in pkg, 'imported the source tree, not the wheel: ' + pkg
           d = os.path.join(pkg, '_libs')
           hits = sorted(glob.glob(os.path.join(d, '*freerdp3.so*')))
@@ -1565,7 +1615,7 @@ jobs:
             echo
             echo "One wheel per platform, valid for every Python version (ctypes, no libpython link)."
             echo "One pip package per build variant: \`pyfreerdpnative\` (full/media), \`pyfreerdpnative-minimal\` (minimal/standard),"
-            echo "\`pyfreerdpnative-<edition>\`, \`pyfreerdpnative-minimal-<edition>\`. Install only one - they all provide the \`pyfreerdp\` module."
+            echo "\`pyfreerdpnative-<edition>\`, \`pyfreerdpnative-minimal-<edition>\`. Install only one - they all provide the \`pyfreerdpnative\` module."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------------
@@ -1701,7 +1751,7 @@ jobs:
 
           Built from commit ${GITHUB_SHA} — workflow run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
 
-          Unpack the archive for your platform and drop the contents into \`pyfreerdp/_libs/\` (Android: \`pyfreerdp/_libs/android/<abi>/\`). See BUILD-INFO.txt inside each archive."
+          Unpack the archive for your platform and drop the contents into \`pyfreerdpnative/_libs/\` (Android: \`pyfreerdpnative/_libs/android/<abi>/\`). See BUILD-INFO.txt inside each archive."
           fi
           {
             echo
