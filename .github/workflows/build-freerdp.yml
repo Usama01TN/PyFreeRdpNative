@@ -1402,7 +1402,7 @@ jobs:
             --include /tmp/freerdp-src/include --include /tmp/freerdp-src/winpr/include \
             --include /tmp/freerdp-cfg/include --include /tmp/freerdp-cfg/winpr/include \
             --out "$RUNNER_TEMP/regen" --version "$FREERDP_REF"
-          find pyfreerdpnative -mindepth 1 -maxdepth 1 ! -name _libs -exec rm -rf {} + || true
+          find pyfreerdpnative -mindepth 1 -maxdepth 1 ! -name _libs ! -name examples -exec rm -rf {} + || true
           cp -r "$RUNNER_TEMP/regen/." pyfreerdpnative/
           find pyfreerdpnative -name __pycache__ -type d -prune -exec rm -rf {} + || true
           rm -f pyfreerdpnative/*.c pyfreerdpnative/*.expand.c

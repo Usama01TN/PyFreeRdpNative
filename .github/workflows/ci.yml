@@ -1,5 +1,6 @@
 # Fast checks on every push / PR: the generated bindings import and are
-# self-consistent, the scripts agree on their version, and the examples parse.
+# self-consistent, the scripts agree on their version, and the bundled
+# examples parse and list.
 # Building FreeRDP itself is build-freerdp.yml's job.
 name: ci
 
@@ -46,9 +47,11 @@ jobs:
         run: python scripts/check_py2_syntax.py
       - name: Unit tests
         run: pytest -v -m "not needs_lib"
-      - name: Examples compile
+      - name: Examples compile and list
         shell: bash
-        run: python -m compileall -q examples
+        run: |
+          python -m compileall -q pyfreerdpnative/examples
+          python -m pyfreerdpnative.examples
 
   # ---------------------------------------------------------------------------
   # Lint the hand-written code (generated modules are excluded in pyproject).
@@ -61,7 +64,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install ruff
-      - run: ruff check scripts tests examples pyfreerdpnative/__init__.py pyfreerdpnative/_loader.py
+      - run: ruff check scripts tests pyfreerdpnative/__init__.py pyfreerdpnative/_loader.py pyfreerdpnative/examples
 
   # ---------------------------------------------------------------------------
   # The committed bindings must match what the generator produces from the
@@ -114,8 +117,9 @@ jobs:
         id: compare
         shell: bash
         run: |
-          # _libs is data, __pycache__ is noise; everything else must be identical
-          if diff -r -x _libs -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative > /tmp/bindings.diff; then
+          # _libs is data, examples/ is hand-written and ships with the package,
+          # __pycache__ is noise; everything else must be identical
+          if diff -r -x _libs -x examples -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative > /tmp/bindings.diff; then
             echo "committed bindings match the generator output"
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -126,13 +130,13 @@ jobs:
           # pipeline below must be neutralised with `|| true` or it aborts the
           # step before the package is staged.
           echo "--- files that differ:"
-          { diff -rq -x _libs -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative || true; } | sed 's/^/  /'
+          { diff -rq -x _libs -x examples -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative || true; } | sed 's/^/  /'
           echo "--- first differences (long lines cut):"
           # grep -m stops after 40 matches by itself: no `head` closing the
           # pipe early, which made `cut` fail with EPIPE under pipefail
           { grep -m 40 -E '^[<>]' /tmp/bindings.diff || true; } | cut -c1-160
           # stage the regenerated package in place (keeps _libs untouched)
-          find pyfreerdpnative -mindepth 1 -maxdepth 1 ! -name _libs -exec rm -rf {} + || true
+          find pyfreerdpnative -mindepth 1 -maxdepth 1 ! -name _libs ! -name examples -exec rm -rf {} + || true
           cp -r /tmp/regen/. pyfreerdpnative/
           find pyfreerdpnative -name __pycache__ -type d -prune -exec rm -rf {} + || true
           python -c "import pyfreerdpnative, pyfreerdpnative.freerdp.freerdp"   # must import
