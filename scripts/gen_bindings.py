@@ -165,6 +165,13 @@ SKIP_NAMES = {"main"}
 # translation unit and the results are merged.
 SEPARATE_TUS = [["winpr/asn1.h"]]
 
+# Constants that describe the machine that ran `cmake`, not FreeRDP's API:
+# the detected features (FREERDP_BUILD_CONFIG, WINPR_HAVE_*), the git revision
+# of the checkout ('n/a' for a tarball). They differ from run to run, so they
+# are never emitted; struct layouts and prototypes do not depend on them.
+ENVIRONMENT_HEADERS = re.compile(r"(^|/)(freerdp|winpr)/(buildflags|build-config|config)\.h$")
+ENVIRONMENT_MACROS = re.compile(r"^(FREERDP|WINPR)_(GIT_REVISION|BUILD_CONFIG)$|^WINPR_HAVE_")
+
 # Headers that cannot be included standalone / are not public API.
 EXCLUDE_HEADERS = re.compile(
     r"(^|/)(private/|.*_private\.h$|winpr/tools/|freerdp/client/utils/|"
@@ -1331,7 +1338,8 @@ def main():
     all_headers = []
     for inc in includes:
         for top in ("freerdp", "winpr"):
-            for root, _d, files in os.walk(os.path.join(inc, top)):
+            for root, dirs, files in os.walk(os.path.join(inc, top)):
+                dirs.sort()          # os.walk order is filesystem-dependent; make it stable
                 for fn in sorted(files):
                     if fn.endswith(".h"):
                         rel = os.path.relpath(os.path.join(root, fn), inc).replace(os.sep, "/")
@@ -1359,10 +1367,14 @@ def main():
             m = constants_from_macros(tmp, includes, fake)
             for name, text in expand_macros(tmp, includes, fake, sorted(m)).items():
                 m[name] = text
+            origins = macro_origins(tmp, includes, fake)
             for k, v in m.items():
+                if ENVIRONMENT_MACROS.match(k) or ENVIRONMENT_HEADERS.search(origins.get(k, "")):
+                    continue
                 macros.setdefault(k, v)
-            for k, v in macro_origins(tmp, includes, fake).items():
-                macro_files.setdefault(k, v)
+            for k, v in origins.items():
+                if not (ENVIRONMENT_MACROS.match(k) or ENVIRONMENT_HEADERS.search(v)):
+                    macro_files.setdefault(k, v)
         finally:
             try:
                 os.remove(tmp)
