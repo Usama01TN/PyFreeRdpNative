@@ -128,15 +128,28 @@ compiler's type checking, at call time.
 
 ## Examples
 
-| | |
-|---|---|
-| [`examples/basic_connect.py`](examples/basic_connect.py) | connect and disconnect |
-| [`examples/send_input.py`](examples/send_input.py) | keyboard and mouse events |
-| [`examples/screenshot.py`](examples/screenshot.py) | software GDI framebuffer → BMP |
-| [`examples/list_api.py`](examples/list_api.py) | search prototypes and constants, see which library exports what |
+Runnable examples ship **inside the package**, so they work straight from an
+installed wheel - no repository checkout needed:
 
 ```bash
-python examples/basic_connect.py 10.0.0.5 alice secret
+pyfreerdpnative-examples                   # list them
+python -m pyfreerdpnative.examples.basic_connect 10.0.0.5 alice secret
+python -m pyfreerdpnative.examples --source screenshot     # read the code
+```
+
+| | |
+|---|---|
+| `basic_connect` | connect and disconnect |
+| `send_input` | keyboard and mouse events |
+| `screenshot` | software GDI framebuffer -> BMP |
+| `list_api` | search prototypes and constants, see which library exports what |
+
+Each is a plain module with a `main(argv)` function, so it can also be
+imported and called, or copied as a starting point:
+
+```python
+from pyfreerdpnative.examples import basic_connect
+basic_connect.main(["basic_connect", "10.0.0.5", "alice", "secret"])
 ```
 
 ## What you don't get
@@ -185,7 +198,7 @@ including profiles, editions, channel selection and mobile builds.
 pip install -e .[dev,generate]
 pytest                        # bindings tests; library tests skip without _libs
 PYFREERDP_LIBS=/path/to/_libs pytest   # …or point them at a build
-ruff check scripts tests examples
+ruff check scripts tests pyfreerdpnative/examples
 ```
 
 ## Versioning

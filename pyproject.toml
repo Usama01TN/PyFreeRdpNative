@@ -59,8 +59,10 @@ Releases = "https://github.com/Usama01TN/PyFreeRdpNative/releases"
 
 
 [tool.setuptools.packages.find]
+# pyfreerdpnative* includes pyfreerdpnative.examples, which ships with the
+# package; the top-level tests/ and scripts/ directories do not.
 include = ["pyfreerdpnative*"]
-exclude = ["tests*", "examples*", "scripts*"]
+exclude = ["tests*", "scripts*"]
 
 [tool.setuptools.package-data]
 pyfreerdpnative = ["_libs/*", "_libs/**/*"]
@@ -81,6 +83,11 @@ ignore = [
     "B008",   # mutable defaults in argparse Namespace usage
 ]
 
+[project.scripts]
+# `pyfreerdpnative-examples` lists the examples; each one is also runnable as
+# `python -m pyfreerdpnative.examples.<name>`.
+pyfreerdpnative-examples = "pyfreerdpnative.examples.__main__:main"
+
 [tool.ruff.lint.per-file-ignores]
 # the package __init__ re-exports the public API
 "pyfreerdpnative/__init__.py" = ["F401", "I001"]
@@ -88,6 +95,8 @@ ignore = [
 "pyfreerdpnative/_core/*" = ["ALL"]
 "pyfreerdpnative/freerdp/**" = ["ALL"]
 "pyfreerdpnative/winpr/**" = ["ALL"]
+# examples are teaching code: a module-level script body wrapped in main()
+"pyfreerdpnative/examples/*" = ["E501"]
 # build scripts: Py2-compatible style, validated by the CI builds; not restyled for lint
 "scripts/build_*.py" = ["E741", "B007", "F841", "E702"]
 "scripts/validate_build.py" = ["E741", "B007", "F841", "E702"]
