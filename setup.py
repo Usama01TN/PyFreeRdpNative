@@ -1,6 +1,5 @@
 """
 setup.py - compatibility shim; all metadata lives in pyproject.toml.
-
 pyfreerdpnative is a pure-Python package (ctypes bindings generated from the
 FreeRDP headers) plus the prebuilt FreeRDP libraries in pyfreerdpnative/_libs.
 It never links against libpython, so there is no C extension to build and no
@@ -13,7 +12,6 @@ per platform by adding the matching _libs and re-tagging.
 
 Style: Py2-compatible syntax; runs on Python 3.
 """
-
 from setuptools import setup
 
 setup()
