@@ -253,9 +253,9 @@ jobs:
     # link into the step summary and the `links` job re-reads the run's
     # artifact list via the API.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           # Only Windows cells set this (x86 needs a 32-bit interpreter for
@@ -329,7 +329,7 @@ jobs:
 
       - name: Export GitHub Actions cache vars for vcpkg
         if: runner.os == 'Windows'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
@@ -362,7 +362,7 @@ jobs:
       - name: Cache dependency prefix
         id: deps-cache
         if: matrix.edition != 'standard' || runner.os == 'Windows'
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}
           key: deps-v3-${{ matrix.edition }}-${{ matrix.profile }}-${{ steps.deps.outputs.label }}-${{ hashFiles('scripts/build_deps.py', 'scripts/vcpkg.json') }}
@@ -589,7 +589,7 @@ jobs:
 
       - name: Upload artifact
         id: upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.pkg.outputs.name }}
           path: ${{ steps.pkg.outputs.file }}
@@ -598,7 +598,7 @@ jobs:
 
       - name: Upload diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: diagnostics-${{ matrix.label }}-${{ matrix.profile }}-${{ matrix.edition }}
           path: |
@@ -647,8 +647,8 @@ jobs:
       API_LEVEL: "24"
       OPENSSL_VERSION: "3.3.2"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -678,7 +678,7 @@ jobs:
 
       - name: Cache cross-built OpenSSL
         id: ssl-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: openssl-android-${{ matrix.abi }}
           key: openssl-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
@@ -704,7 +704,7 @@ jobs:
       # rather than picked up from the host.
       - name: Cache dependency prefix
         id: deps-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/deps/android-${{ matrix.abi }}-${{ matrix.edition }}
           key: deps-v3-android-${{ matrix.abi }}-${{ matrix.edition }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}-${{ hashFiles('scripts/build_deps.py') }}
@@ -780,7 +780,7 @@ jobs:
 
       - name: Upload artifact
         id: upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.pkg.outputs.name }}
           path: ${{ steps.pkg.outputs.file }}
@@ -789,7 +789,7 @@ jobs:
 
       - name: Upload diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: diagnostics-android-${{ matrix.abi }}-${{ matrix.profile }}-${{ matrix.edition }}
           path: |
@@ -817,10 +817,10 @@ jobs:
     runs-on: windows-11-arm
     continue-on-error: true   # preview runner; don't fail the run if it's unavailable
     steps:
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: freerdp-*-windows-arm64-*
           path: dl/
@@ -935,8 +935,8 @@ jobs:
     env:
       OPENSSL_VERSION: "3.3.2"
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -958,7 +958,7 @@ jobs:
 
       - name: Cache cross-built OpenSSL
         id: ssl-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: openssl-ios-${{ matrix.platform }}
           key: openssl-${{ env.OPENSSL_VERSION }}-ios-${{ matrix.platform }}-xcode${{ hashFiles('/Applications/Xcode.app/Contents/version.plist') }}
@@ -983,7 +983,7 @@ jobs:
       # for winpr's JSON support; see the Android job).
       - name: Cache dependency prefix
         id: deps-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: build/deps/ios-${{ matrix.platform }}-${{ matrix.edition }}
           key: deps-v3-ios-${{ matrix.platform }}-${{ matrix.edition }}-xcode${{ hashFiles('/Applications/Xcode.app/Contents/version.plist') }}-${{ hashFiles('scripts/build_deps.py') }}
@@ -1088,7 +1088,7 @@ jobs:
 
       - name: Upload artifact
         id: upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.pkg.outputs.name }}
           path: ${{ steps.pkg.outputs.file }}
@@ -1097,7 +1097,7 @@ jobs:
 
       - name: Upload diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: diagnostics-ios-${{ matrix.label }}-${{ matrix.profile }}-${{ matrix.edition }}
           path: |
@@ -1128,8 +1128,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -1139,7 +1139,7 @@ jobs:
           for s in build_freerdp build_deps validate_build; do
             python scripts/$s.py --require-version 43
           done
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -1211,7 +1211,7 @@ jobs:
 
       - name: Upload APK
         id: upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: afreerdp-apk-${{ env.FREERDP_REF }}
           path: build/android-apk/*
@@ -1220,7 +1220,7 @@ jobs:
 
       - name: Upload diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: diagnostics-android-apk
           path: |
@@ -1267,8 +1267,8 @@ jobs:
         # device-SDK static library.
         platform: [OS64]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -1309,7 +1309,7 @@ jobs:
 
       - name: Upload app
         id: upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.pkg.outputs.name }}
           path: out/${{ steps.pkg.outputs.name }}
@@ -1318,7 +1318,7 @@ jobs:
 
       - name: Upload diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: diagnostics-ios-app-${{ matrix.platform }}
           path: |
@@ -1352,8 +1352,8 @@ jobs:
       && needs.desktop.result == 'success'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -1421,7 +1421,7 @@ jobs:
           PY
 
       - name: Download the library artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: freerdp-*
           path: artifacts/
@@ -1591,7 +1591,7 @@ jobs:
       # own artifact so each wheel can be downloaded on its own.
       - name: Upload wheels (staging)
         id: upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-staging-${{ env.FREERDP_REF }}
           path: |
@@ -1632,12 +1632,12 @@ jobs:
       matrix:
         file: ${{ fromJSON(needs.wheels.outputs.files) }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: wheels-staging-${{ env.FREERDP_REF }}
           path: dist/
       - name: Upload ${{ matrix.file }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Artifact names may not contain / \ : * ? " < > | - wheel
           # filenames are fine as they are.
@@ -1659,7 +1659,7 @@ jobs:
       contents: write   # only used when publishing a release
       actions: read     # list artifacts of this run
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: List artifacts of this run
         id: list
@@ -1702,7 +1702,7 @@ jobs:
           (github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
           github.event_name == 'release' ||
           (github.event_name == 'push' && github.ref == 'refs/heads/main')
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           # Library artifacts are plain _libs directories, so they must NOT be
           # merged (every platform would collapse into one _libs). Each
