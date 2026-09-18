@@ -1791,12 +1791,6 @@ class struct_rdpTransportLayer(ctypes.Structure):
     pass
 class struct_rdp_transport_io(ctypes.Structure):
     pass
-class struct_S_FREERDP_AV1_CONTEXT(ctypes.Structure):
-    pass
-class struct_s_FREERDP_VIDEO_CONTEXT(ctypes.Structure):
-    pass
-class struct_S_ZGFX_CONTEXT(ctypes.Structure):
-    pass
 class struct_GFXREDIR_HEADER(ctypes.Structure):
     pass
 class struct_GFXREDIR_LEGACY_CAPS_PDU(ctypes.Structure):
@@ -1823,22 +1817,6 @@ class struct_GFXREDIR_PRESENT_BUFFER_PDU(ctypes.Structure):
     pass
 class struct_GFXREDIR_PRESENT_BUFFER_ACK_PDU(ctypes.Structure):
     pass
-class struct_s_gfxredir_server_private(ctypes.Structure):
-    pass
-class struct_s_gfxredir_server_context(ctypes.Structure):
-    pass
-class struct_s_gdiVideoContext(ctypes.Structure):
-    pass
-class struct_rdp_certificate_data(ctypes.Structure):
-    pass
-class struct_rdp_certificate_store(ctypes.Structure):
-    pass
-class struct_rdp_CertInfo(ctypes.Structure):
-    pass
-class struct_SYSTEM_LOCALE(ctypes.Structure):
-    pass
-class struct_smartcard_emulation_context(ctypes.Structure):
-    pass
 class struct_cliprdr_file_context(ctypes.Structure):
     pass
 class struct_s_location_client_context(ctypes.Structure):
@@ -1854,6 +1832,28 @@ class struct_SSHAgentClientContext(ctypes.Structure):
 class struct_TSMF_VIDEO_FRAME_EVENT(ctypes.Structure):
     pass
 class struct_s_tsmf_client_context(ctypes.Structure):
+    pass
+class struct_S_FREERDP_AV1_CONTEXT(ctypes.Structure):
+    pass
+class struct_s_FREERDP_VIDEO_CONTEXT(ctypes.Structure):
+    pass
+class struct_S_ZGFX_CONTEXT(ctypes.Structure):
+    pass
+class struct_rdp_certificate_data(ctypes.Structure):
+    pass
+class struct_rdp_certificate_store(ctypes.Structure):
+    pass
+class struct_rdp_CertInfo(ctypes.Structure):
+    pass
+class struct_smartcard_emulation_context(ctypes.Structure):
+    pass
+class struct_s_gdiVideoContext(ctypes.Structure):
+    pass
+class struct_SYSTEM_LOCALE(ctypes.Structure):
+    pass
+class struct_s_gfxredir_server_private(ctypes.Structure):
+    pass
+class struct_s_gfxredir_server_context(ctypes.Structure):
     pass
 class struct_ChannelPduTracker(ctypes.Structure):
     pass
@@ -4640,12 +4640,6 @@ pTransportSetBlockingMode = ctypes.CFUNCTYPE(BOOL, ctypes.POINTER(rdpTransport),
 pTransportConnectLayer = ctypes.CFUNCTYPE(ctypes.POINTER(rdpTransportLayer), ctypes.POINTER(rdpTransport), ctypes.c_char_p, ctypes.c_int, DWORD)
 pTransportAttachLayer = ctypes.CFUNCTYPE(BOOL, ctypes.POINTER(rdpTransport), ctypes.POINTER(rdpTransportLayer))
 rdpTransportIo = struct_rdp_transport_io
-FREERDP_AV1_CONTEXT = struct_S_FREERDP_AV1_CONTEXT
-FREERDP_AV1_RATECONTROL = ctypes.c_int
-FREERDP_AV1_CONTEXT_OPTION = ctypes.c_int
-FREERDP_VIDEO_CONTEXT = struct_s_FREERDP_VIDEO_CONTEXT
-FREERDP_VIDEO_FORMAT = ctypes.c_int
-ZGFX_CONTEXT = struct_S_ZGFX_CONTEXT
 GFXREDIR_HEADER = struct_GFXREDIR_HEADER
 GFXREDIR_LEGACY_CAPS_PDU = struct_GFXREDIR_LEGACY_CAPS_PDU
 GFXREDIR_CAPS_HEADER = struct_GFXREDIR_CAPS_HEADER
@@ -4659,28 +4653,6 @@ GFXREDIR_CREATE_BUFFER_PDU = struct_GFXREDIR_CREATE_BUFFER_PDU
 GFXREDIR_DESTROY_BUFFER_PDU = struct_GFXREDIR_DESTROY_BUFFER_PDU
 GFXREDIR_PRESENT_BUFFER_PDU = struct_GFXREDIR_PRESENT_BUFFER_PDU
 GFXREDIR_PRESENT_BUFFER_ACK_PDU = struct_GFXREDIR_PRESENT_BUFFER_ACK_PDU
-GfxRedirServerPrivate = struct_s_gfxredir_server_private
-GfxRedirServerContext = struct_s_gfxredir_server_context
-psGfxRedirOpen = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext))
-psGfxRedirClose = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext))
-psGfxRedirError = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_ERROR_PDU))
-psGfxRedirGraphicsRedirectionLegacyCaps = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_LEGACY_CAPS_PDU))
-psGfxRedirGraphicsRedirectionCapsAdvertise = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_CAPS_ADVERTISE_PDU))
-psGfxRedirGraphicsRedirectionCapsConfirm = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_CAPS_CONFIRM_PDU))
-psGfxRedirOpenPool = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_OPEN_POOL_PDU))
-psGfxRedirClosePool = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_CLOSE_POOL_PDU))
-psGfxRedirCreateBuffer = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_CREATE_BUFFER_PDU))
-psGfxRedirDestroyBuffer = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_DESTROY_BUFFER_PDU))
-psGfxRedirPresentBuffer = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_PRESENT_BUFFER_PDU))
-psGfxRedirPresentBufferAck = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_PRESENT_BUFFER_ACK_PDU))
-p_BitBlt = ctypes.CFUNCTYPE(BOOL, HGDI_DC, INT32, INT32, INT32, INT32, HGDI_DC, INT32, INT32, DWORD)
-gdiVideoContext = struct_s_gdiVideoContext
-rdpCertificateData = struct_rdp_certificate_data
-rdpCertificateStore = struct_rdp_certificate_store
-freerdp_certificate_store_result = ctypes.c_int
-rdpCertInfo = struct_rdp_CertInfo
-SYSTEM_LOCALE = struct_SYSTEM_LOCALE
-SmartcardEmulationContext = struct_smartcard_emulation_context
 CliprdrFileContext = struct_cliprdr_file_context
 LocationClientContext = struct_s_location_client_context
 pcLocationStart = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(LocationClientContext), UINT32, UINT32)
@@ -4703,6 +4675,34 @@ SSHAgentClientContext = struct_SSHAgentClientContext
 TSMF_VIDEO_FRAME_EVENT = struct_TSMF_VIDEO_FRAME_EVENT
 TsmfClientContext = struct_s_tsmf_client_context
 pcTsmfFrameEvent = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(TsmfClientContext), ctypes.POINTER(TSMF_VIDEO_FRAME_EVENT))
+FREERDP_AV1_CONTEXT = struct_S_FREERDP_AV1_CONTEXT
+FREERDP_AV1_RATECONTROL = ctypes.c_int
+FREERDP_AV1_CONTEXT_OPTION = ctypes.c_int
+FREERDP_VIDEO_CONTEXT = struct_s_FREERDP_VIDEO_CONTEXT
+FREERDP_VIDEO_FORMAT = ctypes.c_int
+ZGFX_CONTEXT = struct_S_ZGFX_CONTEXT
+rdpCertificateData = struct_rdp_certificate_data
+rdpCertificateStore = struct_rdp_certificate_store
+freerdp_certificate_store_result = ctypes.c_int
+rdpCertInfo = struct_rdp_CertInfo
+SmartcardEmulationContext = struct_smartcard_emulation_context
+p_BitBlt = ctypes.CFUNCTYPE(BOOL, HGDI_DC, INT32, INT32, INT32, INT32, HGDI_DC, INT32, INT32, DWORD)
+gdiVideoContext = struct_s_gdiVideoContext
+SYSTEM_LOCALE = struct_SYSTEM_LOCALE
+GfxRedirServerPrivate = struct_s_gfxredir_server_private
+GfxRedirServerContext = struct_s_gfxredir_server_context
+psGfxRedirOpen = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext))
+psGfxRedirClose = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext))
+psGfxRedirError = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_ERROR_PDU))
+psGfxRedirGraphicsRedirectionLegacyCaps = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_LEGACY_CAPS_PDU))
+psGfxRedirGraphicsRedirectionCapsAdvertise = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_CAPS_ADVERTISE_PDU))
+psGfxRedirGraphicsRedirectionCapsConfirm = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_CAPS_CONFIRM_PDU))
+psGfxRedirOpenPool = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_OPEN_POOL_PDU))
+psGfxRedirClosePool = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_CLOSE_POOL_PDU))
+psGfxRedirCreateBuffer = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_CREATE_BUFFER_PDU))
+psGfxRedirDestroyBuffer = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_DESTROY_BUFFER_PDU))
+psGfxRedirPresentBuffer = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_PRESENT_BUFFER_PDU))
+psGfxRedirPresentBufferAck = ctypes.CFUNCTYPE(UINT, ctypes.POINTER(GfxRedirServerContext), ctypes.POINTER(GFXREDIR_PRESENT_BUFFER_ACK_PDU))
 AAD_WELLKNOWN_VALUES = ctypes.c_int
 ChannelPduTracker = struct_ChannelPduTracker
 FREERDP_HTTP_STATUS = ctypes.c_int
@@ -4947,15 +4947,15 @@ PSID_AND_ATTRIBUTES_ARRAY = ctypes.c_void_p  # unresolved: ctypes.POINTER(SID_AN
 # struct rdp_assistance_file: opaque
 # struct s_wClipboard: opaque
 # struct rdp_license: opaque
+# struct cliprdr_file_context: opaque
 # struct S_FREERDP_AV1_CONTEXT: opaque
 # struct s_FREERDP_VIDEO_CONTEXT: opaque
 # struct S_ZGFX_CONTEXT: opaque
-# struct s_gfxredir_server_private: opaque
-# struct s_gdiVideoContext: opaque
 # struct rdp_certificate_data: opaque
 # struct rdp_certificate_store: opaque
 # struct smartcard_emulation_context: opaque
-# struct cliprdr_file_context: opaque
+# struct s_gdiVideoContext: opaque
+# struct s_gfxredir_server_private: opaque
 # struct ChannelPduTracker: opaque
 # struct s_scard_call_context: opaque
 # struct S_TP_CALLBACK_INSTANCE: opaque
@@ -11881,35 +11881,6 @@ struct_GFXREDIR_PRESENT_BUFFER_ACK_PDU._fields_ = [
     ('windowId', UINT64),
     ('presentId', UINT64),
 ]
-struct_s_gfxredir_server_context._fields_ = [
-    ('custom', ctypes.c_void_p),
-    ('vcm', HANDLE),
-    ('Open', psGfxRedirOpen),
-    ('Close', psGfxRedirClose),
-    ('Error', psGfxRedirError),
-    ('GraphicsRedirectionLegacyCaps', psGfxRedirGraphicsRedirectionLegacyCaps),
-    ('GraphicsRedirectionCapsAdvertise', psGfxRedirGraphicsRedirectionCapsAdvertise),
-    ('GraphicsRedirectionCapsConfirm', psGfxRedirGraphicsRedirectionCapsConfirm),
-    ('OpenPool', psGfxRedirOpenPool),
-    ('ClosePool', psGfxRedirClosePool),
-    ('CreateBuffer', psGfxRedirCreateBuffer),
-    ('DestroyBuffer', psGfxRedirDestroyBuffer),
-    ('PresentBuffer', psGfxRedirPresentBuffer),
-    ('PresentBufferAck', psGfxRedirPresentBufferAck),
-    ('priv', ctypes.POINTER(GfxRedirServerPrivate)),
-    ('rdpcontext', ctypes.POINTER(rdpContext)),
-    ('confirmedCapsVersion', UINT32),
-]
-struct_rdp_CertInfo._fields_ = [
-    ('Modulus', ctypes.POINTER(BYTE)),
-    ('ModulusLength', DWORD),
-    ('exponent', (BYTE * 4)),
-]
-struct_SYSTEM_LOCALE._fields_ = [
-    ('language', (ctypes.c_char * 6)),
-    ('country', (ctypes.c_char * 10)),
-    ('code', DWORD),
-]
 struct_s_location_client_context._fields_ = [
     ('handle', ctypes.c_void_p),
     ('custom', ctypes.c_void_p),
@@ -11970,6 +11941,35 @@ struct_s_tsmf_client_context._fields_ = [
     ('handle', ctypes.c_void_p),
     ('custom', ctypes.c_void_p),
     ('FrameEvent', pcTsmfFrameEvent),
+]
+struct_rdp_CertInfo._fields_ = [
+    ('Modulus', ctypes.POINTER(BYTE)),
+    ('ModulusLength', DWORD),
+    ('exponent', (BYTE * 4)),
+]
+struct_SYSTEM_LOCALE._fields_ = [
+    ('language', (ctypes.c_char * 6)),
+    ('country', (ctypes.c_char * 10)),
+    ('code', DWORD),
+]
+struct_s_gfxredir_server_context._fields_ = [
+    ('custom', ctypes.c_void_p),
+    ('vcm', HANDLE),
+    ('Open', psGfxRedirOpen),
+    ('Close', psGfxRedirClose),
+    ('Error', psGfxRedirError),
+    ('GraphicsRedirectionLegacyCaps', psGfxRedirGraphicsRedirectionLegacyCaps),
+    ('GraphicsRedirectionCapsAdvertise', psGfxRedirGraphicsRedirectionCapsAdvertise),
+    ('GraphicsRedirectionCapsConfirm', psGfxRedirGraphicsRedirectionCapsConfirm),
+    ('OpenPool', psGfxRedirOpenPool),
+    ('ClosePool', psGfxRedirClosePool),
+    ('CreateBuffer', psGfxRedirCreateBuffer),
+    ('DestroyBuffer', psGfxRedirDestroyBuffer),
+    ('PresentBuffer', psGfxRedirPresentBuffer),
+    ('PresentBufferAck', psGfxRedirPresentBufferAck),
+    ('priv', ctypes.POINTER(GfxRedirServerPrivate)),
+    ('rdpcontext', ctypes.POINTER(rdpContext)),
+    ('confirmedCapsVersion', UINT32),
 ]
 struct_RingBuffer._fields_ = [
     ('initialSize', ctypes.c_size_t),
