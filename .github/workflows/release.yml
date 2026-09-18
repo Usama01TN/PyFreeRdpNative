@@ -3,16 +3,26 @@
 # build-freerdp.yml builds the libraries, generates the bindings from the same
 # FreeRDP checkout, packages one wheel per platform and variant, and attaches
 # them to the freerdp-libs-<ref> GitHub release. This workflow takes those
-# wheels and uploads them to an index. Run it manually with the run id of a
-# green build-freerdp run.
+# wheels and uploads them to an index. It runs:
+#
+#   * automatically, when a build-freerdp run that was itself started by a
+#     GitHub release finishes successfully (the run id comes from the event);
+#     the target index is the repository variable PYPI_AUTO_TARGET:
+#     "testpypi" (default when unset), "pypi", or "none" to disable;
+#   * manually (workflow_dispatch), for any target; the run id may be given,
+#     or left blank to use the latest successful build-freerdp run on main.
 name: release
 
 on:
+  workflow_run:
+    workflows: [build-freerdp]
+    types: [completed]
   workflow_dispatch:
     inputs:
       build_run_id:
-        description: "Run id of the build-freerdp workflow whose wheels to publish"
-        required: true
+        description: "Run id of the build-freerdp workflow whose wheels to publish (blank = latest successful run on main)"
+        required: false
+        default: ""
         type: string
       repository:
         description: "Where to publish"
@@ -29,12 +39,65 @@ on:
 permissions:
   contents: read
   id-token: write        # trusted publishing (no API token needed)
-  actions: read          # download artifacts of another run
+  actions: read          # list runs / download artifacts of another run
 
 jobs:
-  publish:
+  # ---------------------------------------------------------------------------
+  # Decide whether to run and where to publish. For the chained trigger only a
+  # release-initiated, successful build counts; pushes to main build too, but
+  # those must not publish.
+  # ---------------------------------------------------------------------------
+  resolve:
     runs-on: ubuntu-24.04
-    environment: ${{ inputs.repository }}
+    outputs:
+      run_id: ${{ steps.pick.outputs.run_id }}
+      target: ${{ steps.pick.outputs.target }}
+      publish: ${{ steps.pick.outputs.publish }}
+    steps:
+      - name: Pick the build run and the target index
+        id: pick
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          WR_ID: ${{ github.event.workflow_run.id }}
+          WR_EVENT: ${{ github.event.workflow_run.event }}
+          WR_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          INPUT_RUN_ID: ${{ inputs.build_run_id }}
+          INPUT_TARGET: ${{ inputs.repository }}
+          AUTO_TARGET: ${{ vars.PYPI_AUTO_TARGET }}
+        run: |
+          set -e
+          publish=false; run_id=""; target=""
+          if [ "$EVENT" = "workflow_run" ]; then
+            target="${AUTO_TARGET:-testpypi}"
+            if [ "$WR_CONCLUSION" = "success" ] && [ "$WR_EVENT" = "release" ] && [ "$target" != "none" ]; then
+              publish=true; run_id="$WR_ID"
+              echo "chained: build-freerdp run $run_id (started by a release) -> $target"
+            else
+              echo "chained trigger ignored: conclusion=$WR_CONCLUSION event=$WR_EVENT target=$target"
+            fi
+          else
+            target="$INPUT_TARGET"; publish=true
+            if [ -n "$INPUT_RUN_ID" ]; then
+              run_id="$INPUT_RUN_ID"
+            else
+              run_id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow build-freerdp.yml \
+                         --branch main --status success --limit 1 --json databaseId -q '.[0].databaseId')
+              test -n "$run_id" || { echo "::error::no successful build-freerdp run on main to publish from"; exit 1; }
+              echo "using the latest successful build-freerdp run on main: $run_id"
+            fi
+            echo "manual: run $run_id -> $target"
+          fi
+          echo "run_id=$run_id"   >> "$GITHUB_OUTPUT"
+          echo "target=$target"   >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: resolve
+    if: needs.resolve.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    environment: ${{ needs.resolve.outputs.target }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -44,19 +107,21 @@ jobs:
       - name: Download the wheels from the build run
         uses: actions/download-artifact@v8
         with:
-          run-id: ${{ inputs.build_run_id }}
+          run-id: ${{ needs.resolve.outputs.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           pattern: "{pyfreerdpnative-*,pyfreerdpnative_*}"
           path: dl/
 
       - name: Select what to publish
         shell: bash
+        env:
+          PACKAGES: ${{ inputs.packages }}
         run: |
           set -e
           mkdir -p dist
           find dl -type f \( -name "*.whl" -o -name "*.tar.gz" \) -exec mv {} dist/ \;
-          if [ -n "${{ inputs.packages }}" ]; then
-            keep=$(echo "${{ inputs.packages }}" | tr ',' '\n' | sed 's/-/_/g; s/ //g')
+          if [ -n "$PACKAGES" ]; then
+            keep=$(echo "$PACKAGES" | tr ',' '\n' | sed 's/-/_/g; s/ //g')
             for f in dist/*; do
               name=$(basename "$f" | sed -E 's/^([A-Za-z0-9_]+)-[0-9].*/\1/')
               echo "$keep" | grep -qx "$name" || rm -f "$f"
@@ -67,14 +132,14 @@ jobs:
           python -m pip install -q twine && twine check dist/*
 
       - name: Publish to TestPyPI
-        if: inputs.repository == 'testpypi'
+        if: needs.resolve.outputs.target == 'testpypi'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
           skip-existing: true
 
       - name: Publish to PyPI
-        if: inputs.repository == 'pypi'
+        if: needs.resolve.outputs.target == 'pypi'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           skip-existing: true
