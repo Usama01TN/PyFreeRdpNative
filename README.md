@@ -1,264 +1,201 @@
-# pyfreerdp
+# pyfreerdpnative
 
-Python bindings for [FreeRDP](https://github.com/FreeRDP/FreeRDP) — connect to Microsoft RDP servers from Python (client side) **and** accept RDP connections from Python (server side), with full virtual-channel support and a WinPR helper subset. Linux, macOS, Windows, plus mobile via NDK / Xcode cross-compile.
+**FreeRDP for Python — the headers, translated 1:1 into ctypes, plus the prebuilt libraries.**
 
-> **Read this first.** This package wraps `libfreerdp-client3`, `libfreerdp-server3`, and `libwinpr3` via `ctypes`. It does **not** statically embed FreeRDP — you either install FreeRDP from your package manager or build it with the included `pyfreerdp-build` tool. Mobile platforms have additional constraints; see [docs/MOBILE.md](docs/MOBILE.md).
+`pyfreerdpnative` is not a hand-written wrapper. Every module in it is generated
+from FreeRDP's own C headers: each `.h` becomes a `.py` with the same name in the
+same folder, carrying that header's `#define`s, enums, struct layouts and function
+prototypes. The wheels bundle the matching FreeRDP libraries, so `pip install`
+gives you a working RDP client *and* server stack with no system dependencies.
 
-## Style note
+```python
+import ctypes
+from pyfreerdpnative import load
+from pyfreerdpnative.freerdp import freerdp as F, client as CLIENT, settings_keys as KEY
 
-The Python source is written in a **Python-2-compatible syntax style** — no f-strings, no `from __future__ import annotations`, no type annotations, no dataclasses, no walrus operator, no `match` statement, no PEP 604 unions. The package itself only ever runs on **Python 3** (Python 2 is end-of-life and we don't test it), but the syntax restriction is a project preference. If you're contributing, mirror it: use `"...{0}".format(x)` instead of `f"...{x}"`, plain classes with explicit `__init__` instead of `@dataclass`, etc.
+api = load()                                          # opens the bundled libraries,
+                                                      # binds every prototype
+entry = CLIENT.RDP_CLIENT_ENTRY_POINTS_V1()
+entry.Size = ctypes.sizeof(entry)
+entry.Version = CLIENT.RDP_CLIENT_INTERFACE_VERSION
+entry.ContextSize = ctypes.sizeof(F.rdpContext)
+ctx = api.freerdp_client_context_new(ctypes.byref(entry))
+
+s = ctx.contents.settings                             # typed struct access, no offsets
+api.freerdp_settings_set_string(s, KEY.FreeRDP_ServerHostname, b"10.0.0.5")
+api.freerdp_settings_set_string(s, KEY.FreeRDP_Username, b"alice")
+api.freerdp_settings_set_string(s, KEY.FreeRDP_Password, b"secret")
+api.freerdp_settings_set_bool(s, KEY.FreeRDP_IgnoreCertificate, True)
+
+if api.freerdp_connect(ctx.contents.instance):
+    print("connected")
+    api.freerdp_disconnect(ctx.contents.instance)
+api.freerdp_client_context_free(ctx)
+```
+
+If you know FreeRDP's C API, you already know this one. The names, argument
+orders and constants are FreeRDP's; only the syntax is Python.
 
 ## Installation
 
-### Option 1 — install FreeRDP separately, then `pip install` (fastest)
+Wheels are attached to the `freerdp-libs-<version>` GitHub release. One wheel
+per platform, valid for **every Python 3.8+** (ctypes never links `libpython`,
+so there is no per-interpreter build):
 
 ```bash
-# Debian / Ubuntu — both halves
-sudo apt install libfreerdp-client3-3 libfreerdp-server3-3 libfreerdp3-3
-
-# Fedora / RHEL
-sudo dnf install freerdp-libs freerdp-server
-
-# macOS (Homebrew bundles client + server + winpr)
-brew install freerdp
-
-# Windows (vcpkg)
-vcpkg install freerdp:x64-windows
+pip install pyfreerdpnative \
+  --find-links https://github.com/Usama01TN/PyFreeRdpNative/releases/expanded_assets/freerdp-libs-3.31.1
 ```
 
-Then:
+pip picks the wheel for your OS and architecture. Or install a file directly:
 
 ```bash
-pip install pyfreerdp
+pip install https://github.com/Usama01TN/PyFreeRdpNative/releases/download/freerdp-libs-3.31.1/pyfreerdpnative-0.2.0-py3-none-win_amd64.whl
 ```
 
-### Option 2 — build FreeRDP from source as part of install
+### Variants
 
-```bash
-PYFREERDP_BUILD_FREERDP=1 pip install pyfreerdp
-```
+Every build variant is its own pip package. They all provide the same
+`pyfreerdpnative` module, so **install exactly one**:
 
-This clones FreeRDP at the pinned tag (3.31.1), runs CMake with **client + server + shadow + proxy** enabled (`--profile=full`), and stages every produced `.so/.dylib/.dll` into the wheel. Takes 5–15 min depending on the host.
-
-### Option 3 — explicit pre-build with profile selection
-
-```bash
-pip install pyfreerdp
-pyfreerdp-build --target host --profile full          # client + server + shadow + proxy (default)
-pyfreerdp-build --target host --profile client-only   # client only — fastest, smallest
-pyfreerdp-build --target host --profile server-only   # server + shadow + proxy
-pyfreerdp-build --target host --profile minimal       # both protocol cores, no shadow/proxy
-```
-
-After install, the script verifies the expected library families actually landed in `pyfreerdp/_libs/`. If a CMake feature was silently skipped because a system dep was missing, you get a loud error pointing at the exact missing libraries instead of a wheel that fails at runtime.
-
-## Quick start — client
-
-```python
-from pyfreerdp import RdpClient, RdpSettings
-
-settings = RdpSettings(
-    host="10.0.0.5",
-    username="alice",
-    password="...",
-    domain="CORP",
-    width=1920, height=1080,
-    ignore_certificate=True,        # lab only — don't ship this enabled
-)
-
-with RdpClient(settings) as client:
-    client.send_mouse_move(960, 540)
-    client.send_key(0x1F, pressed=True)
-    client.send_key(0x1F, pressed=False)
-    client.run_event_loop(timeout=10.0)
-```
-
-## Quick start — server
-
-```python
-from pyfreerdp import RdpServer, RdpServerSettings, SecurityProtocol
-
-def handle(peer):
-    with peer:
-        print("Client connected: {0}".format(peer.os_type))
-        peer.run(timeout=60)
-
-settings = RdpServerSettings(
-    bind_address="0.0.0.0", port=3389,
-    certificate_file="server.crt",
-    private_key_file="server.key",
-    security=SecurityProtocol.TLS | SecurityProtocol.NLA,
-)
-
-with RdpServer(settings, handle) as server:
-    server.serve_forever()
-```
-
-A complete server skeleton is in [`examples/server_echo.py`](examples/server_echo.py).
-
-## Quick start — virtual channels
-
-```python
-from pyfreerdp import RdpClient, RdpSettings, ClipboardChannel
-from pyfreerdp import DriveRedirection, DriveRedirectionChannel
-
-clipboard = ClipboardChannel()
-drive = DriveRedirection(name="share", local_path="/home/me/shared")
-
-settings = RdpSettings(
-    host="rdp.example.com", username="alice", password="hunter2",
-    channels=[
-        clipboard,
-        DriveRedirectionChannel(drives=[drive]),
-    ],
-)
-
-with RdpClient(settings) as client:
-    clipboard.set_text("hello from python")
-    client.run_event_loop(timeout=30.0)
-    text = clipboard.get_text(timeout=2.0)
-    print("Remote clipboard:", text)
-```
-
-See [docs/CHANNELS.md](docs/CHANNELS.md) for the full channel framework reference and which channels work end-to-end vs. ship as registration scaffolding only.
-
-## Quick start — full PyQt5 viewer
-
-Two complete GUI viewers ship in `examples/`:
-
-```bash
-# Legacy bitmap path (any server, no extra deps beyond PyQt5)
-pip install PyQt5
-python examples/qt5_viewer_legacy.py
-
-# rdpgfx + H.264 path (modern Windows servers, faster)
-pip install PyQt5 av
-python examples/qt5_viewer_gfx.py
-```
-
-Both demonstrate connection settings dialog, input injection, clipboard sync, drive redirection, display-resize, and a custom channel — wired into PyQt5's signal/slot system end to end.
-
-## What you get
-
-**Client**
-- `RdpClient` — context-managed RDP session with channel integration
-- `RdpSettings` — connection options (display, security, gateway, redirection, channels)
-- Input injection: `send_key`, `send_unicode`, `send_mouse_move`, `send_mouse_button`
-
-**Server**
-- `RdpServer` — bound listener; per-peer threading model
-- `RdpServerSettings` — bind address, TLS material, advertised desktop, security policy
-- `RdpPeer` — per-client lifecycle (`initialize` / `run` / `close`)
-
-**Virtual channels** (everything in `pyfreerdp.channels`)
-
-| Channel | Class | Status | Notes |
+| Package | Profile | Media | Contents |
 |---|---|---|---|
-| cliprdr | `ClipboardChannel` | ✅ working | Text + HTML; file-list opt-in |
-| rdpdr (drives) | `DriveRedirectionChannel` | ✅ working | Filesystem only |
-| disp | `DisplayControlChannel` | ✅ working | Resize PDU framework |
-| rail | `RailChannel` | ✅ working | RemoteApp window state |
-| rdpei | `MultitouchChannel` | ✅ working | Touch contact events |
-| encomsp | `EncompChannel` | ✅ working | Multiparty roster |
-| remdesk | `RemdeskChannel` | ✅ working | Remote Assistance |
-| DRDYNVC | `DynamicChannelManager` | ✅ working | DVC plumbing |
-| (any) | `CustomChannel` | ✅ working | Bring-your-own |
-| rdpsnd | `AudioOutChannel` | ⚠️ stub | Need audio stack |
-| audin | `AudioInChannel` | ⚠️ stub | Need capture device |
-| rdpgfx | `GraphicsPipelineChannel` | ⚠️ stub | Need video decoder |
+| `pyfreerdpnative` | full | FFmpeg + OpenH264 | everything: libraries, all channels, executables (`xfreerdp`, `sfreerdp-server`, `freerdp-proxy`, `ffmpeg` …) |
+| `pyfreerdpnative-minimal` | minimal | none | libraries only, size-optimised (~4 MB) |
+| `pyfreerdpnative-ffmpeg` / `-openh264` / `-standard` | full | as named | |
+| `pyfreerdpnative-minimal-ffmpeg` / `-minimal-openh264` / `-minimal-media` | minimal | as named | |
 
-**WinPR helpers** (`pyfreerdp.winpr`)
-- `Stream` — wStream-equivalent buffer with little/big-endian read/write
-- `query_security_package(name)` — confirm SSPI package available
-- `parse_logon_identity(c_void_p)` — decode SEC_WINNT_AUTH_IDENTITY in server Logon callbacks
+### Platforms
 
-**Shared**
-- `SecurityProtocol` — bitmask for RDP / TLS / NLA / NLA-Ext
-- Cross-platform library loading with explicit overrides
-- Exception hierarchy: `RdpError` → `RdpConnectionError`, `RdpAuthenticationError`, `RdpProtocolError`, `ChannelError`, `WinPRError`, `FreeRdpNotFoundError`
+| | Tags | Notes |
+|---|---|---|
+| Windows | `win_amd64`, `win32`, `win_arm64` | Windows 10+; 32-bit Python needs `win32` |
+| Linux | `manylinux_2_39_x86_64`, `manylinux_2_39_aarch64` | glibc 2.39+ (Ubuntu 24.04, Fedora 40, Debian 13); system libraries such as cJSON, ICU, OpenSSL, krb5 are vendored |
+| macOS | `macosx_11_0_arm64`, `macosx_11_0_x86_64` | |
+| Android | `android_24_arm64_v8a`, `_armeabi_v7a`, `_x86_64`, `_x86` | PEP 738 tags; installed by cross-install into an app, or retagged for Termux/Pydroid — see [docs/MOBILE.md](docs/MOBILE.md) |
+| iOS | `ios_13_0_arm64_iphoneos`, `_iphonesimulator` | PEP 730 tags; `.dylib`s to embed in a signed app bundle — see [docs/MOBILE.md](docs/MOBILE.md) |
 
-## What you don't get (be honest about this)
+Windows 7 / 8.1 are not supported by the published wheels (the VS 2022 runtime
+dropped them); an experimental static-CRT build exists, see
+[scripts/BUILD.md](scripts/BUILD.md#targeting-older-windows-experimental).
 
-- **Pixel rendering.** FreeRDP delivers bitmap updates on the client and expects them as input on the server. Painting them into / out of a window is your job. Hook `rdpUpdate` from your own code.
-- **Audio playback / capture.** PCM is exposed via the channel callbacks but not auto-routed to a sound device. Subclass `AudioOutChannel.on_pcm` and `AudioInChannel.next_pcm` to wire your stack.
-- **Video decoding.** `GraphicsPipelineChannel` registers and negotiates rdpgfx with the peer, but H.264 / RemoteFX-Progressive frames arrive raw — wire them into your decoder of choice.
-- **Frame source for the server.** A real server has to read pixels from somewhere — local screen capture (Windows DXGI / macOS AVFoundation / Linux X11 or PipeWire) — and feed them through `peer.update->BeginPaint/EndPaint`. We expose the protocol layer; the screen source is your problem. (FreeRDP's bundled `freerdp-shadow-cli` is one such implementation.)
-- **Printer / smartcard / serial / parallel redirection.** rdpdr's drive sub-protocol is implemented; the others are stubs.
-- **App Store-ready iOS distribution.** Apple forbids `dlopen` of arbitrary dylibs. iOS works in side-loaded / dev builds; for App Store you need to statically link FreeRDP into your app binary. See [docs/MOBILE.md](docs/MOBILE.md).
+## What is in the package
 
-## Cross-platform support matrix
-
-| Platform | Client | Server | Channels | Notes |
-|----------|--------|--------|----------|-------|
-| Linux x86_64 / aarch64 | ✅ | ✅ | ✅ | Full profile builds cleanly |
-| macOS Intel / Apple Silicon | ✅ | ✅ | ✅ | Shadow uses AVFoundation |
-| Windows x64 | ✅ | ✅ | ✅ | Shadow uses DXGI duplication |
-| Android (NDK r25+) | ⚠️ | ⚠️ | ✅ | No shadow (no NDK capture API). Server-side useful for screen-share apps. |
-| iOS (dev signing) | ⚠️ | ⚠️ | ✅ | Static archive only; App Store needs app-side linking |
-| FreeBSD / OpenBSD | 🤷 | 🤷 | 🤷 | Should work; untested |
-
-## Building from source
-
-```bash
-# Host (your machine), full client+server+shadow+proxy
-pyfreerdp-build --target host --profile full --jobs 8
-
-# Client only — when you don't need server-side
-pyfreerdp-build --target host --profile client-only
-
-# Android arm64 (server-capable, no shadow)
-ANDROID_NDK_ROOT=/path/to/ndk \
-    pyfreerdp-build --target android --abi arm64-v8a
-
-# iOS device (must run on macOS)
-pyfreerdp-build --target ios
-
-# Pin to a specific FreeRDP version
-pyfreerdp-build --ref 3.31.1 --target host --profile full
+```
+pyfreerdpnative/
+├── __init__.py          load(), FreeRDP, constants, types, functions, PROTOTYPES
+├── _loader.py           finds _libs, opens the libraries, attaches every prototype
+├── _libs/               the FreeRDP libraries (+ executables) for this platform
+├── _core/
+│   ├── constants.py     every #define and enum member, flat
+│   ├── types.py         every typedef, struct and union as ctypes classes
+│   └── functions.py     every FREERDP_API / WINPR_API prototype
+├── freerdp/             mirror of include/freerdp/  (freerdp.h -> freerdp.py, codec/color.h -> codec/color.py …)
+└── winpr/               mirror of winpr/include/winpr/
 ```
 
-Output goes to `pyfreerdp/_libs/`:
-- Host: `libfreerdp-client3.so`, `libfreerdp-server3.so`, `libfreerdp-shadow3.so`, `libfreerdp3.so`, `libwinpr3.so` (and their symlinks)
-- Android: `_libs/android/<abi>/lib*.so`
-- iOS: `_libs/ios/lib*.a`
+Use the mirror modules the way you would include headers:
 
-If the build doesn't produce every promised library family for the chosen profile, the script aborts with the exact list of missing pieces and the system packages you likely need.
+```python
+from pyfreerdpnative.freerdp import scancode, input as rdp_input
+from pyfreerdpnative.freerdp.codec import color
+from pyfreerdpnative.freerdp.gdi import gdi
 
-## Configuration
+scancode.RDP_SCANCODE_RETURN     # 0x1c   from freerdp/scancode.h
+rdp_input.KBD_FLAGS_RELEASE      # 0x8000 from freerdp/input.h
+color.PIXEL_FORMAT_BGRX32        # 0x20040888
+gdi.rdpGdi.primary_buffer.offset # 64 — layouts match the C compiler byte for byte
+```
 
-| Env var | Effect |
-|---------|--------|
-| `PYFREERDP_CLIENT_LIBRARY` | Absolute path to `libfreerdp-client3` to load. Bypasses auto-detection. |
-| `PYFREERDP_SERVER_LIBRARY` | Absolute path to `libfreerdp-server3`. Bypasses auto-detection. |
-| `PYFREERDP_WINPR_LIBRARY` | Absolute path to `libwinpr3`. Bypasses auto-detection. |
-| `PYFREERDP_LIBRARY` | Legacy combined override. Applied to **client only** (server + WinPR lookups ignore it). |
-| `PYFREERDP_BUILD_FREERDP` | When `1` during `pip install`, triggers `build_freerdp.py` automatically. |
-| `PYFREERDP_FREERDP_REF` | Override the FreeRDP git tag built when `PYFREERDP_BUILD_FREERDP=1`. |
-| `PYFREERDP_EXTRA_CMAKE` | Extra `-DFOO=BAR` flags appended to the CMake configure step. Useful for opting into FFmpeg / OpenH264 / etc. |
+Each mirror module also lists the functions its header declares
+(`freerdp.FUNCTIONS`) and can bind just those (`freerdp.bind(lib)`).
+
+### The `api` object
+
+`load()` returns a `FreeRDP` object. `api.<name>` resolves the function in
+whichever library exports it, with `restype`/`argtypes` from the header:
+
+```python
+api.library_of("freerdp_connect")          # 'freerdp3'
+api.library_of("Stream_New")               # 'winpr3'
+api.libs["freerdp-client3"]                # the raw ctypes.CDLL, if you need it
+api.version()                              # '3.31.1'
+```
+
+Because argument types are enforced, passing a plain `int` where a
+`POINTER(rdpSettings)` is expected raises `ctypes.ArgumentError` — the C
+compiler's type checking, at call time.
+
+## Examples
+
+| | |
+|---|---|
+| [`examples/basic_connect.py`](examples/basic_connect.py) | connect and disconnect |
+| [`examples/send_input.py`](examples/send_input.py) | keyboard and mouse events |
+| [`examples/screenshot.py`](examples/screenshot.py) | software GDI framebuffer → BMP |
+| [`examples/list_api.py`](examples/list_api.py) | search prototypes and constants, see which library exports what |
+
+```bash
+python examples/basic_connect.py 10.0.0.5 alice secret
+```
+
+## What you don't get
+
+- **A high-level Python API.** This package deliberately stops at the C API.
+  Event loops, callbacks (`PostConnect`, update handlers, channel callbacks)
+  and rendering are yours to write, exactly as in C. `ctypes.CFUNCTYPE` types
+  for every callback are in `types.py`.
+- **A GUI client.** The `full` wheels ship FreeRDP's own clients (`xfreerdp`,
+  `wfreerdp`, `sdl-freerdp`) as executables in `_libs/`; on Linux the SDL
+  client needs the desktop's GTK/WebKit stack.
+- **Loading on a store-installed iOS Python.** iOS only loads dylibs from a
+  signed app bundle; see [docs/MOBILE.md](docs/MOBILE.md).
+
+## How the bindings are made
+
+`scripts/gen_bindings.py` preprocesses the headers with `cpp`, parses them with
+pycparser, and emits Python. It handles the things a naive translation gets
+wrong — `ALIGN64` fields, `#pragma pack`, `sizeof()` in array bounds, ctypes'
+array-type caching — and the output is checked against gcc: **767 of 767 struct
+sizes match** for FreeRDP 3.31.1. CI regenerates the bindings from the pinned
+FreeRDP tag on every push and fails if the committed package differs, so
+layouts can never drift from the libraries.
+
+```bash
+pip install pycparser
+python scripts/gen_bindings.py \
+    --include <freerdp>/include --include <freerdp>/winpr/include \
+    --include <build>/include   --include <build>/winpr/include \
+    --out pyfreerdpnative --version 3.31.1
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Building the libraries
+
+`scripts/build_freerdp.py` builds FreeRDP and its dependencies for every
+platform; `.github/workflows/build-freerdp.yml` runs it across the whole matrix,
+generates the bindings from the same checkout, packages the wheels and attaches
+everything to a release. [scripts/BUILD.md](scripts/BUILD.md) has the details,
+including profiles, editions, channel selection and mobile builds.
 
 ## Development
 
 ```bash
-git clone <this-repo>
-cd pyfreerdp
-pip install -e .[dev]
-pytest                                 # 107 unit tests, no native lib needed
-pytest -m needs_lib                    # extra checks if FreeRDP is installed
+pip install -e .[dev,generate]
+pytest                        # bindings tests; library tests skip without _libs
+PYFREERDP_LIBS=/path/to/_libs pytest   # …or point them at a build
+ruff check scripts tests examples
 ```
 
 ## Versioning
 
-`pyfreerdp` is versioned independently from FreeRDP. Each release pins a `FREERDP_VERIFIED_VERSION` in [`pyfreerdp/version.py`](pyfreerdp/version.py); other versions in the same major series should work but aren't guaranteed by the test suite.
+The package version tracks the Python layer. The FreeRDP version is the
+release tag (`freerdp-libs-3.31.1`) and `api.version()` at runtime. Struct
+layouts are specific to a FreeRDP release: never mix a wheel's `pyfreerdpnative`
+with libraries from a different FreeRDP build.
 
 ## License
 
-Apache-2.0. FreeRDP itself is Apache-2.0 with some optional components under different terms — see the [FreeRDP repository](https://github.com/FreeRDP/FreeRDP). This package does not redistribute FreeRDP source; it only provides binding code.
-
-## Further reading
-
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — design rationale, lifecycle diagrams, server callback model
-- [docs/CHANNELS.md](docs/CHANNELS.md) — virtual channel reference, wire-protocol expectations
-- [docs/MOBILE.md](docs/MOBILE.md) — Android + iOS specifics, Chaquopy/BeeWare integration
-- [docs/PUBLISHING.md](docs/PUBLISHING.md) — wheel build + PyPI release workflow setup
-- [FreeRDP project](https://github.com/FreeRDP/FreeRDP)
-- FreeRDP API headers — [`include/freerdp/peer.h`](https://github.com/FreeRDP/FreeRDP/blob/master/include/freerdp/peer.h), [`include/freerdp/listener.h`](https://github.com/FreeRDP/FreeRDP/blob/master/include/freerdp/listener.h), [`include/freerdp/freerdp.h`](https://github.com/FreeRDP/FreeRDP/blob/master/include/freerdp/freerdp.h)
+Apache-2.0 for this project. FreeRDP is Apache-2.0; bundled FFmpeg is LGPL,
+OpenH264 is BSD (Cisco's binary licence does not apply — it is built from source).

@@ -1,26 +1,26 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "PyFreeRdpNative"
 version = "0.2.0"
-description = "Python bindings for FreeRDP - client + server + virtual channels + WinPR helpers."
+description = "ctypes bindings generated 1:1 from the FreeRDP/WinPR headers, with prebuilt FreeRDP libraries."
 readme = "README.md"
-# 3.8 floor: pyfreerdp itself is Py-3-only, but we deliberately keep the
+# 3.8 floor: pyfreerdpnative itself is Py-3-only, but we deliberately keep the
 # source written in Py2-syntax-compatible style (no f-strings, no annotations,
 # no dataclasses). The 3.8 floor is set by ctypes feature availability and
 # by what we test in CI, not by the syntax we use.
 requires-python = ">=3.8"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [
-    { name = "pyfreerdp contributors" },
+    { name = "pyfreerdpnative contributors" },
 ]
 keywords = ["rdp", "freerdp", "remote-desktop", "windows", "ctypes", "winpr", "channels"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",
     "Operating System :: Microsoft :: Windows",
@@ -31,6 +31,9 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: Android",
+    "Operating System :: iOS",
     "Topic :: System :: Networking",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
@@ -42,21 +45,25 @@ dev = [
     "pytest-cov>=4",
     "ruff>=0.5",
 ]
+# needed only to regenerate the bindings (scripts/gen_bindings.py)
+generate = [
+    "pycparser>=2.21",
+]
 
 [project.urls]
-Homepage = "https://github.com/example/pyfreerdp"
-"Bug Tracker" = "https://github.com/example/pyfreerdp/issues"
+Homepage = "https://github.com/Usama01TN/PyFreeRdpNative"
+Documentation = "https://github.com/Usama01TN/PyFreeRdpNative/tree/main/docs"
+Releases = "https://github.com/Usama01TN/PyFreeRdpNative/releases"
+"Bug Tracker" = "https://github.com/Usama01TN/PyFreeRdpNative/issues"
 "FreeRDP Upstream" = "https://github.com/FreeRDP/FreeRDP"
 
-[project.scripts]
-pyfreerdp-build = "pyfreerdp.scripts.build_freerdp:main"
 
 [tool.setuptools.packages.find]
-include = ["pyfreerdp*"]
+include = ["pyfreerdpnative*"]
 exclude = ["tests*", "examples*", "scripts*"]
 
 [tool.setuptools.package-data]
-pyfreerdp = ["_libs/*", "_libs/**/*"]
+pyfreerdpnative = ["_libs/*", "_libs/**/*"]
 
 [tool.ruff]
 line-length = 100
@@ -75,14 +82,16 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-# Package __init__.py files re-export the public API; F401 (unused imports)
-# is exactly the wrong rule for those.
-"pyfreerdp/__init__.py" = ["F401", "I001"]
-"pyfreerdp/channels/__init__.py" = ["F401", "I001"]
-"pyfreerdp/winpr/__init__.py" = ["F401", "I001"]
-# Tests intentionally import a few symbols just to confirm they're exported,
-# even when no test body references them by name.
-"tests/test_pyfreerdp.py" = ["I001"]
+# the package __init__ re-exports the public API
+"pyfreerdpnative/__init__.py" = ["F401", "I001"]
+# generated code is not linted
+"pyfreerdpnative/_core/*" = ["ALL"]
+"pyfreerdpnative/freerdp/**" = ["ALL"]
+"pyfreerdpnative/winpr/**" = ["ALL"]
+# build scripts: Py2-compatible style, validated by the CI builds; not restyled for lint
+"scripts/build_*.py" = ["E741", "B007", "F841", "E702"]
+"scripts/validate_build.py" = ["E741", "B007", "F841", "E702"]
+"scripts/package_wheels.py" = ["E741"]
 
 [tool.pytest.ini_options]
 minversion = "7.0"
@@ -135,7 +144,7 @@ manylinux-aarch64-image = "manylinux_2_28"
 musllinux-x86_64-image = "musllinux_1_2"
 
 # CIBW_BEFORE_ALL runs once per architecture (BEFORE the per-Python build
-# loop). It installs build deps and compiles FreeRDP into pyfreerdp/_libs/.
+# loop). It installs build deps and compiles FreeRDP into pyfreerdpnative/_libs/.
 before-all = "bash {project}/.github/cibw-scripts/before_all_linux.sh {project}"
 
 # auditwheel rewrites the wheel after building to bundle libfreerdp +
