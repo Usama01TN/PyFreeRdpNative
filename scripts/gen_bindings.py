@@ -29,8 +29,10 @@ from __future__ import print_function
 import argparse
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 try:
     from pycparser import c_ast, c_parser
@@ -342,7 +344,10 @@ def expand_macros(header, includes, fake_libc, names):
     name -> expanded text.
     """
     marker = "@@GEN@@"
-    body = ["#include \"{0}\"".format(header)]
+    # absolute: cpp resolves a quoted #include relative to the including
+    # file's directory, so "pyfreerdpnative/_all_roots_0.c" from a file that
+    # lives in pyfreerdpnative/ is looked up as pyfreerdpnative/pyfreerdpnative/...
+    body = ["#include \"{0}\"".format(os.path.abspath(header))]
     for n in names:
         # the first copy is a string literal so cpp leaves it alone
         body.append('{0} "{1}" {2}'.format(marker, n, n))
@@ -359,8 +364,13 @@ def expand_macros(header, includes, fake_libc, names):
         cmd += ["-I", inc]
     cmd.append(tmp)
     try:
-        out = subprocess.check_output(cmd, stderr=subprocess.PIPE).decode(
-            "utf-8", "replace")
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if proc.returncode != 0:
+            err = proc.stderr.decode("utf-8", "replace")
+            errors = [line for line in err.splitlines() if "error" in line.lower()]
+            sys.exit("cpp failed while expanding macros (exit {0}):\n{1}".format(
+                proc.returncode, "\n".join(errors[:20] or err.splitlines()[-20:])))
+        out = proc.stdout.decode("utf-8", "replace")
     finally:
         os.remove(tmp)
     expanded = {}
@@ -1356,10 +1366,12 @@ def main():
     macros = {}
     macro_files = {}
     parser = c_parser.CParser()
+    scratch = tempfile.mkdtemp(prefix="gen_bindings_")
     for idx, headers in enumerate(tus):
         tu = PRELUDE + "\n".join("#include <{0}>".format(r) for r in headers)
-        tmp = os.path.join(args.out if os.path.isdir(args.out) else ".",
-                           "_all_roots_{0}.c".format(idx))
+        # scratch files live in a temp dir, never inside the output package
+        # (where they would be picked up as package files or shadow modules)
+        tmp = os.path.join(scratch, "_all_roots_{0}.c".format(idx))
         with open(tmp, "w") as fh:
             fh.write(tu + "\n")
         try:
@@ -1439,6 +1451,7 @@ def main():
                  "from ._loader import load, FreeRDP, find_library, default_libs_dir  # noqa: F401\n"
                  "# Header mirror: pyfreerdpnative.freerdp.freerdp, pyfreerdpnative.winpr.sspi, ... (one module per .h)\n")
     print("  mirror    : {0} header modules (one .py per .h, same folders)".format(n_headers))
+    shutil.rmtree(scratch, ignore_errors=True)
 
     print("generated into {0}:".format(args.out))
     print("  constants : {0} #defines + {1} enum members".format(
