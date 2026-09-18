@@ -69,9 +69,19 @@ jobs:
   # libraries. Regenerate and diff.
   # ---------------------------------------------------------------------------
   bindings-up-to-date:
+    # The committed bindings must match what the generator produces from the
+    # FreeRDP tag build-freerdp.yml builds. Regenerating needs cpp/cmake on
+    # Linux, which a Windows workstation does not have, so this job is the
+    # canonical regenerator: on a push to main it COMMITS the regenerated
+    # package back ([skip ci] avoids a second run); on a pull request it fails
+    # and attaches the fresh package as an artifact to download and commit.
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -101,15 +111,45 @@ jobs:
             --include /tmp/cfg/include --include /tmp/cfg/winpr/include \
             --out /tmp/regen --version "$ref"
       - name: Compare with the committed package
+        id: compare
         shell: bash
         run: |
           # _libs is data, __pycache__ is noise; everything else must be identical
-          if ! diff -r -x _libs -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative > /tmp/bindings.diff; then
-            echo "::error::pyfreerdpnative/ differs from a fresh generation - run scripts/gen_bindings.py and commit"
-            echo "--- files that differ:"
-            diff -rq -x _libs -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative | sed 's/^/  /'
-            echo "--- first differences (long lines cut):"
-            grep -E '^[<>]' /tmp/bindings.diff | cut -c1-160 | head -40
-            exit 1
+          if diff -r -x _libs -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative > /tmp/bindings.diff; then
+            echo "committed bindings match the generator output"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          echo "committed bindings match the generator output"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "--- files that differ:"
+          diff -rq -x _libs -x __pycache__ -x '*.pyc' /tmp/regen pyfreerdpnative | sed 's/^/  /'
+          echo "--- first differences (long lines cut):"
+          grep -E '^[<>]' /tmp/bindings.diff | cut -c1-160 | head -40 || true
+          # stage the regenerated package in place (keeps _libs untouched)
+          find pyfreerdpnative -mindepth 1 -maxdepth 1 ! -name _libs -exec rm -rf {} +
+          cp -r /tmp/regen/. pyfreerdpnative/
+          find pyfreerdpnative -name __pycache__ -type d -prune -exec rm -rf {} + || true
+          python -c "import pyfreerdpnative, pyfreerdpnative.freerdp.freerdp" # must import
+      - name: Upload the regenerated package (pull requests)
+        if: steps.compare.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pyfreerdpnative-regenerated
+          path: |
+            pyfreerdpnative
+            !pyfreerdpnative/_libs
+      - name: Commit the regenerated package (push to main)
+        if: steps.compare.outputs.changed == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A pyfreerdpnative
+          git commit -m "chore: regenerate pyfreerdpnative bindings from scripts/gen_bindings.py [skip ci]"
+          git push
+          echo "regenerated bindings committed"
+      - name: Fail on a pull request (the artifact above is the fix)
+        if: steps.compare.outputs.changed == 'true' && github.event_name != 'push'
+        run: |
+          echo "::error::pyfreerdpnative/ differs from a fresh generation. Download the 'pyfreerdpnative-regenerated' artifact and commit it, or merge to main and the job commits it for you."
+          exit 1
