@@ -41,10 +41,10 @@ def default_libs_dir():
     A directory only counts if it actually contains a FreeRDP library, so an
     empty placeholder cannot shadow a real location further down the list.
     """
-
     def has_libs(d):
         try:
-            return any(f.startswith(("libfreerdp3", "freerdp3", "libwinpr3", "winpr3")) for f in os.listdir(d))
+            return any(f.startswith(("libfreerdp3", "freerdp3", "libwinpr3", "winpr3"))
+                       for f in os.listdir(d))
         except OSError:
             return False
 
@@ -52,22 +52,21 @@ def default_libs_dir():
     if env:
         return env
     here = os.path.dirname(os.path.abspath(__file__))
-    candidates = [os.path.join(here, '_libs'), '_lib']
+    candidates = [os.path.join(here, "_libs")]
     for up in (1, 2, 3):
-        candidates.append(os.path.normpath(os.path.join(here, *([".."] * up + ['_libs']))))
+        candidates.append(os.path.normpath(os.path.join(here, *([".."] * up + ["_libs"]))))
     for cand in candidates:
         if has_libs(cand):
             return cand
-    return candidates[0]  # bundled location, even if empty (clear error later)
-
+    return candidates[0]        # bundled location, even if empty (clear error later)
 
 def find_library(libs_dir, stem):
     """First file in libs_dir for a library stem, any platform naming."""
     ext = _ext()
     patterns = [
-        os.path.join(libs_dir, "lib" + stem + ext + "*"),  # libfreerdp3.so, .so.3
-        os.path.join(libs_dir, "lib" + stem + "*" + ext),  # libfreerdp3.3.dylib
-        os.path.join(libs_dir, stem + ext),  # freerdp3.dll
+        os.path.join(libs_dir, "lib" + stem + ext + "*"),   # libfreerdp3.so, .so.3
+        os.path.join(libs_dir, "lib" + stem + "*" + ext),   # libfreerdp3.3.dylib
+        os.path.join(libs_dir, stem + ext),                 # freerdp3.dll
     ]
     for pat in patterns:
         hits = sorted(p for p in glob.glob(pat) if os.path.isfile(p))
