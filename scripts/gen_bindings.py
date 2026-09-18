@@ -273,6 +273,17 @@ def preprocess(header, includes, fake_libc, extra_defines=()):
     return out
 
 
+def run_cpp(cmd, what):
+    """Run a cpp command; on failure show ITS errors, not a bare CalledProcessError."""
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", "replace")
+        errors = [line for line in err.splitlines() if "error" in line.lower()]
+        sys.exit("cpp failed while {0} (exit {1}):\n{2}".format(
+            what, proc.returncode, "\n".join(errors[:20] or err.splitlines()[-20:])))
+    return proc.stdout.decode("utf-8", "replace")
+
+
 def macro_origins(header, includes, fake_libc):
     """
     name -> relative header path for every object-like #define, using
@@ -288,7 +299,7 @@ def macro_origins(header, includes, fake_libc):
     for inc in includes:
         cmd += ["-I", inc]
     cmd.append(header)
-    out = subprocess.check_output(cmd, stderr=subprocess.PIPE).decode("utf-8", "replace")
+    out = run_cpp(cmd, "locating macro definitions")
     abs_incs = [os.path.abspath(i) for i in includes]
     origins, cur = {}, None
     for line in out.splitlines():
@@ -322,8 +333,7 @@ def constants_from_macros(header, includes, fake_libc):
     for inc in includes:
         cmd += ["-I", inc]
     cmd.append(header)
-    out = subprocess.check_output(cmd, stderr=subprocess.PIPE).decode("utf-8",
-                                                                      "replace")
+    out = run_cpp(cmd, "collecting #defines")
     macros = {}
     for line in out.splitlines():
         m = re.match(r"#define\s+([A-Za-z_]\w*)\s*(.*)$", line)
@@ -364,13 +374,7 @@ def expand_macros(header, includes, fake_libc, names):
         cmd += ["-I", inc]
     cmd.append(tmp)
     try:
-        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if proc.returncode != 0:
-            err = proc.stderr.decode("utf-8", "replace")
-            errors = [line for line in err.splitlines() if "error" in line.lower()]
-            sys.exit("cpp failed while expanding macros (exit {0}):\n{1}".format(
-                proc.returncode, "\n".join(errors[:20] or err.splitlines()[-20:])))
-        out = proc.stdout.decode("utf-8", "replace")
+        out = run_cpp(cmd, "expanding macros")
     finally:
         os.remove(tmp)
     expanded = {}
