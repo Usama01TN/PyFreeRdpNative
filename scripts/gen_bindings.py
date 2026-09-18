@@ -34,8 +34,21 @@ import sys
 
 try:
     from pycparser import c_ast, c_parser
+    HAVE_PYCPARSER = True
 except ImportError:
-    sys.exit("pycparser is required: pip install pycparser")
+    # Let the module import - and `--help` work - without pycparser: the
+    # Emitter class below subclasses c_ast.NodeVisitor, so a stand-in base is
+    # needed at class-definition time. Generating bindings checks
+    # HAVE_PYCPARSER first and says what to install.
+    HAVE_PYCPARSER = False
+    c_parser = None
+
+    class _StubAst(object):
+        class NodeVisitor(object):
+            def visit(self, node):
+                raise RuntimeError("pycparser is required: pip install pycparser")
+
+    c_ast = _StubAst()
 
 # ---------------------------------------------------------------------------
 # Type mapping
@@ -1302,6 +1315,8 @@ def main():
                     help="extra -D for the preprocessor")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+    if not HAVE_PYCPARSER:
+        sys.exit("pycparser is required to generate bindings: pip install pycparser")
 
     includes = [os.path.abspath(i) for i in args.include]
     fake = find_fake_libc(args.fake_libc)
