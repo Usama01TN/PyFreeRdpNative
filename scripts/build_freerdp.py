@@ -888,12 +888,28 @@ def cmake_options_for(profile, host_os, enable_channels=None,
         # X11/Wayland only matter for the xfreerdp/wlfreerdp executables;
         # the minimal library package skips them (and their -dev packages).
         gui = "ON" if profile == "full" else "OFF"
+        # WITH_WAYLAND builds uwac ("Using Wayland As Client") and the
+        # wlfreerdp client; uwac/CMakeLists.txt then treats Wayland as a
+        # REQUIRED feature and hard-fails when it is absent. Older or
+        # minimal distributions (CentOS 7 / manylinux2014) have no Wayland
+        # at all, so detect it the way cairo and SDL are detected instead of
+        # demanding it. Same for X11.
+        wayland = gui
+        if gui == "ON" and not (_pkg_config_has("wayland-client")
+                                and _pkg_config_has("wayland-scanner")):
+            print("\n[warn] wayland-client/wayland-scanner not found - building "
+                  "with WITH_WAYLAND=OFF (no wlfreerdp). Install "
+                  "libwayland-dev / wayland-devel + wayland-protocols to "
+                  "enable it.")
+            wayland = "OFF"
+        x11 = gui
+        if gui == "ON" and not _pkg_config_has("x11"):
+            print("\n[warn] x11.pc not found - building with WITH_X11=OFF "
+                  "(no xfreerdp). Install libx11-dev / libX11-devel to enable it.")
+            x11 = "OFF"
         opts += [
-            "-DWITH_X11={0}".format(gui),
-            # WITH_WAYLAND builds uwac ("Using Wayland As Client") and the
-            # wlfreerdp Wayland client. Needs wayland + pixman (see the apt
-            # list in the workflow / docs).
-            "-DWITH_WAYLAND={0}".format(gui),
+            "-DWITH_X11={0}".format(x11),
+            "-DWITH_WAYLAND={0}".format(wayland),
             "-DWITH_ALSA=ON",
             "-DWITH_CUPS=OFF",
             "-DWITH_PCSC=OFF",

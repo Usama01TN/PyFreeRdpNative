@@ -20,6 +20,12 @@ Everything is driven by `.github/workflows/build-freerdp.yml` (all platforms,
 artifacts + optional release) and `ci.yml` (Linux, every push/PR).
 
 
+Wayland and X11 are **detected**, not required: `build_freerdp.py` checks
+`wayland-client`/`wayland-scanner`/`x11` with pkg-config and turns the
+matching feature off with a warning when they are absent (FreeRDP's
+`uwac/CMakeLists.txt` otherwise treats Wayland as required and
+hard-fails, which is what happened on manylinux2014).
+
 ## Linux: two glibc floors
 
 Linux is built four times per profile/edition:
