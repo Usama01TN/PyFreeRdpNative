@@ -166,7 +166,10 @@ env:
   WINDOWS_SHADOW: ${{ (github.event_name != 'workflow_dispatch' || inputs.windows_shadow) && 'yes' || 'no' }}
   MOBILE_APPS: ${{ (github.event_name != 'workflow_dispatch' || inputs.mobile_apps) && 'yes' || 'no' }}
   WHEELS: ${{ (github.event_name != 'workflow_dispatch' || inputs.wheels) && 'yes' || 'no' }}
-  LEGACY_LINUX: ${{ inputs.legacy_linux || 'yes' }}
+  # glibc 2.17 (manylinux2014 / CentOS 7) is NOT buildable for FreeRDP
+  # 3.31 - see the linux-legacy job for the two blocking reasons. Left
+  # here so it can be tried again when FreeRDP's requirements change.
+  LEGACY_LINUX: ${{ inputs.legacy_linux || 'no' }}
   IOS_LINKAGE: ${{ inputs.ios_linkage || 'dynamic' }}
   ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
 
@@ -769,8 +772,18 @@ jobs:
     name: linux-glibc217 (${{ matrix.arch }}, ${{ matrix.profile }}/${{ matrix.edition }})
     needs: plan
     if: needs.plan.outputs.legacy_linux == 'yes'
-    # CentOS 7 is end-of-life: a failure here must not sink a run whose
-    # other three glibc floors are green.
+    # DISABLED by default (LEGACY_LINUX=no). Two hard blockers, both proven
+    # by build logs, neither fixable from this repository:
+    #   1. FreeRDP 3.31 sources use the C23 keyword `nullptr`, which needs
+    #      GCC 13+ / clang 16+. CentOS 7's newest toolchain is devtoolset-11
+    #      (GCC 11.2), which fails on it - and on the _Pragma() expansions in
+    #      winpr/platform.h that surround the same code.
+    #   2. CentOS 7 ships OpenSSL 1.0.2. FreeRDP 3.31 calls 1.1.0+ APIs
+    #      (X509_get0_pubkey, RSA_set0_key, EVP_PKEY_get0_RSA), so even with
+    #      a newer compiler the crypto layer will not build against it.
+    # manylinux_2_28 (glibc 2.28, GCC 12+, OpenSSL 1.1.1) is the lowest floor
+    # FreeRDP 3.31 can actually target, and it already covers every
+    # distribution still receiving support.
     continue-on-error: true
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     strategy:
