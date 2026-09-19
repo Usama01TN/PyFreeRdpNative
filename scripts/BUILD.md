@@ -36,8 +36,9 @@ glibc 2.17 cannot use a job-level `container:`. Every GitHub JS action
 needs glibc >= 2.28 - inside a CentOS 7 image they abort with
 `version GLIBC_2.28 not found`. The `linux-legacy` job therefore stays on the
 runner, where the actions work, and puts only the build inside the image via
-`docker run`. It also enables `devtoolset-10`, because CentOS 7's stock GCC
-4.8 cannot compile FreeRDP 3. It is **enabled by default** but marked `continue-on-error`: the image is
+`docker run`. It also enables the newest devtoolset the image offers (11, falling back to
+10), because CentOS 7's stock GCC 4.8 cannot compile FreeRDP 3 at all and
+GCC 10 chokes on FreeRDP 3.31's `_Pragma()` use in `winpr/platform.h`. It is **enabled by default** but marked `continue-on-error`: the image is
 end-of-life, so if it breaks the other three floors still publish. Set
 `LEGACY_LINUX: no` in the workflow env to skip it entirely.
 
