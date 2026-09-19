@@ -44,6 +44,8 @@ PACKAGE_SCRIPT_VERSION = 4
 #     installs on RHEL/Alma 9, Debian 12 (2.36), Ubuntu 22.04 (2.35);
 #   * in the manylinux_2_28 container (AlmaLinux 8, glibc 2.28) -> the lowest
 #     floor pypa maintains: RHEL/Alma 8+, Ubuntu 18.04+, Debian 10+, SLES 15.
+#   * in the manylinux2014 container (CentOS 7, glibc 2.17) -> the widest
+#     reach a glibc wheel can have, covering distributions back to 2014.
 # pip prefers the highest tag a system satisfies, so a 2.39 machine still
 # gets the 2.39 wheel. Alpine (musl) is NOT covered by any of these; that
 # needs musllinux wheels built in an Alpine toolchain.
@@ -58,6 +60,8 @@ PLATFORM_TAGS = {
     "linux-aarch64-glibc234": "manylinux_2_34_aarch64",
     "linux-x86_64-glibc228": "manylinux_2_28_x86_64",
     "linux-aarch64-glibc228": "manylinux_2_28_aarch64",
+    "linux-x86_64-glibc217": "manylinux2014_x86_64",
+    "linux-aarch64-glibc217": "manylinux2014_aarch64",
     "macos-arm64": "macosx_11_0_arm64",
     "macos-x86_64": "macosx_11_0_x86_64",
     "windows-x64": "win_amd64",

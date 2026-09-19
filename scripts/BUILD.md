@@ -22,17 +22,23 @@ artifacts + optional release) and `ci.yml` (Linux, every push/PR).
 
 ## Linux: two glibc floors
 
-Linux is built three times per profile/edition:
+Linux is built four times per profile/edition:
 
 | label | where | wheel tag | installs on |
 |---|---|---|---|
 | `linux-x86_64`, `linux-aarch64` | ubuntu-24.04 runners | `manylinux_2_39_*` | glibc 2.39+ (Ubuntu 24.04, Fedora 40, Debian 13) |
 | `linux-x86_64-glibc234`, `linux-aarch64-glibc234` | `quay.io/pypa/manylinux_2_34_*` container | `manylinux_2_34_*` | glibc 2.34+ (RHEL/Alma 9, Debian 12, Ubuntu 22.04) |
 | `linux-x86_64-glibc228`, `linux-aarch64-glibc228` | `quay.io/pypa/manylinux_2_28_*` container | `manylinux_2_28_*` | glibc 2.28+ (RHEL/Alma 8, Ubuntu 18.04+, Debian 10+, SLES 15) |
+| `linux-x86_64-glibc217`, `linux-aarch64-glibc217` | `quay.io/pypa/manylinux2014_*` container | `manylinux2014_*` | glibc 2.17+ (CentOS/RHEL 7 and anything newer) |
 
-Not covered by any of these: musl systems (Alpine) need `musllinux` wheels
-from an Alpine toolchain, and glibc below 2.28 (CentOS 7) would need
-`manylinux2014`, whose image pypa no longer maintains.
+The manylinux2014 image is CentOS 7 and end-of-life: its stock GCC 4.8
+cannot build FreeRDP 3, so those cells enable `devtoolset-10` and install
+packages with `yum` rather than `dnf`. Treat that row as best-effort - if
+upstream drops the image or a dependency is unavailable there, the other
+three floors still cover every supported distribution.
+
+Not covered: musl systems (Alpine) need `musllinux` wheels from an Alpine
+toolchain.
 
 pip installs the highest tag a system satisfies, so a modern machine still
 gets the 2.39 wheel and older distributions fall back to 2.34. The container
