@@ -437,6 +437,17 @@ class Toolchain(object):
              "--disable-ffplay"]
         if with_openh264:
             f.append("--enable-libopenh264")
+            # openh264 is C++; when it is linked statically FFmpeg's configure
+            # probe needs the C++ runtime too, or it reports the library as
+            # missing. (openh264.pc also carries it - see fix_static_cxx_pc -
+            # but --extra-libs covers consumers that ignore Libs.private.)
+            if not self.shared:
+                if self.target == "android":
+                    f.append("--extra-libs=-lc++_shared")
+                elif self.target == "ios" or platform.system() == "Darwin":
+                    f.append("--extra-libs=-lc++")
+                else:
+                    f.append("--extra-libs=-lstdc++")
         f += [
              # Deterministic, dependency-free build:
              "--disable-autodetect", "--enable-pthreads",
@@ -572,6 +583,15 @@ def build_openh264(tc, work):
         run(["make", "install-shared"] + make_vars, cwd=src, env=env)
     else:
         run(["make", "install-static"] + make_vars, cwd=src, env=env)
+        # OpenH264 is C++, so a STATIC libopenh264.a only links if the C++
+        # runtime comes with it. FFmpeg's configure probes openh264 with a
+        # link test (`--pkg-config-flags=--static`), and without the runtime
+        # that test fails with the misleading
+        #     ERROR: openh264 >= 1.3.0 not found using pkg-config
+        # even though the .pc file is right there. Add the runtime to the
+        # installed .pc so every consumer gets it.
+        fix_static_cxx_pc(tc, os.path.join(tc.prefix, "lib", "pkgconfig",
+                                           "openh264.pc"))
     # Executables (h264enc / h264dec) are not part of `make install`.
     if tc.target == "host":
         bindir = os.path.join(tc.prefix, "bin")
@@ -598,6 +618,39 @@ def build_openh264(tc, work):
             if not os.path.islink(dylib):
                 run(["install_name_tool", "-id",
                      "@rpath/" + os.path.basename(dylib), dylib])
+
+
+def fix_static_cxx_pc(tc, pc_path):
+    """
+    Append the platform's C++ runtime to a pkg-config file for a static C++
+    library, so consumers' link tests succeed. Android uses libc++
+    (-lc++_shared with ANDROID_STL=c++_shared), Apple/BSD -lc++, and GNU
+    toolchains -lstdc++.
+    """
+    if not os.path.isfile(pc_path):
+        return
+    if tc.target == "android":
+        runtime = "-lc++_shared"
+    elif tc.target == "ios" or platform.system() == "Darwin":
+        runtime = "-lc++"
+    else:
+        runtime = "-lstdc++"
+    with open(pc_path) as fh:
+        text = fh.read()
+    if runtime in text:
+        return
+    out = []
+    for line in text.splitlines():
+        if line.startswith("Libs.private:"):
+            line = line + " " + runtime
+        elif line.startswith("Libs:") and "Libs.private:" not in text:
+            line = line + " " + runtime
+        out.append(line)
+    if not any(l.startswith("Libs.private:") for l in out):
+        out.append("Libs.private: " + runtime)
+    with open(pc_path, "w") as fh:
+        fh.write("\n".join(out) + "\n")
+    print("[deps] openh264.pc: added {0} for static linking".format(runtime))
 
 
 def build_cjson(tc, work):
