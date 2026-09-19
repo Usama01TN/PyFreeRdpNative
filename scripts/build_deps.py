@@ -524,7 +524,12 @@ class Toolchain(object):
         if self.shared:
             f += ["--enable-shared", "--disable-static"]
         else:
-            f += ["--enable-static", "--disable-shared"]
+            # libtool builds static archives WITHOUT -fPIC by default, and
+            # these get linked into libfreerdp3.so: "relocation R_386_PC32
+            # cannot be used against symbol 'libusb_...'; recompile with
+            # -fPIC". --with-pic makes libtool emit PIC objects for the
+            # static library too.
+            f += ["--enable-static", "--disable-shared", "--with-pic"]
         if self.target == "android":
             f += ["--host={0}".format(self.triple), "--disable-udev"]
         elif self.host_os == "Linux":
@@ -545,6 +550,10 @@ def build_libusb(tc, work):
     env = dict(tc.env)
     if tc.target == "host":
         env["CFLAGS"] = " ".join(tc.cflags)
+    elif not tc.shared:
+        # cross static build: the archive is linked into a shared library
+        for var in ("CFLAGS", "CXXFLAGS"):
+            env[var] = (env.get(var, "") + " -fPIC").strip()
     run(["./configure"] + tc.libusb_configure_flags(), cwd=src, env=env)
     run(["make", "-j{0}".format(tc.jobs)], cwd=src, env=env)
     run(["make", "install"], cwd=src, env=env)
