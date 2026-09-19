@@ -110,12 +110,15 @@ def _elf_dynamic(path):
             off = e_phoff + i * e_phentsize
             p_type, = struct.unpack_from(end + "I", data, off)
             if p_type == 2:                   # PT_DYNAMIC
+                # p_offset (file offset), NOT p_vaddr: they are equal in many
+                # shared objects but not all, and reading the wrong one makes
+                # the parse silently yield nothing.
                 if is64:
-                    dyn_off, = struct.unpack_from(end + "Q", data, off + 0x10)
+                    dyn_off, = struct.unpack_from(end + "Q", data, off + 0x08)
                     dyn_size, = struct.unpack_from(end + "Q", data, off + 0x20)
                 else:
-                    dyn_off, = struct.unpack_from(end + "I", data, off + 0x08)
-                    dyn_size, = struct.unpack_from(end + "I", data, off + 0x14)
+                    dyn_off, = struct.unpack_from(end + "I", data, off + 0x04)
+                    dyn_size, = struct.unpack_from(end + "I", data, off + 0x10)
                 break
         if not dyn_size:
             return None, []
@@ -184,6 +187,24 @@ def _load_order(libs_dir, files):
         info[path] = (soname, needed)
         by_soname.setdefault(soname or os.path.basename(path), path)
         by_soname.setdefault(os.path.basename(path), path)
+
+    # Fallback rank, used when a file yields no DT_NEEDED (unreadable, or a
+    # format this parser does not know): third-party dependencies first, then
+    # winpr, freerdp, and the libraries built on top. Without this a failed
+    # parse degrades to directory order, which on Android loads
+    # libfreerdp-client3.so before libfreerdp3.so and fails.
+    def rank(path):
+        base = os.path.basename(path)
+        if base.startswith(("libwinpr3", "libwinpr.")):
+            return 1
+        if base.startswith("libfreerdp3"):
+            return 2
+        if base.startswith(("libfreerdp-client", "libfreerdp-server", "libuwac", "librdtk",
+                            "libwinpr-tools")):
+            return 3
+        return 0                                   # ssl, crypto, cjson, c++_shared, ...
+
+    files = sorted(files, key=lambda p: (rank(p), os.path.basename(p)))
 
     ordered, seen, visiting = [], set(), set()
 
