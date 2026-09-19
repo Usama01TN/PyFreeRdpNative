@@ -29,13 +29,17 @@ Linux is built four times per profile/edition:
 | `linux-x86_64`, `linux-aarch64` | ubuntu-24.04 runners | `manylinux_2_39_*` | glibc 2.39+ (Ubuntu 24.04, Fedora 40, Debian 13) |
 | `linux-x86_64-glibc234`, `linux-aarch64-glibc234` | `quay.io/pypa/manylinux_2_34_*` container | `manylinux_2_34_*` | glibc 2.34+ (RHEL/Alma 9, Debian 12, Ubuntu 22.04) |
 | `linux-x86_64-glibc228`, `linux-aarch64-glibc228` | `quay.io/pypa/manylinux_2_28_*` container | `manylinux_2_28_*` | glibc 2.28+ (RHEL/Alma 8, Ubuntu 18.04+, Debian 10+, SLES 15) |
-| `linux-x86_64-glibc217`, `linux-aarch64-glibc217` | `quay.io/pypa/manylinux2014_*` container | `manylinux2014_*` | glibc 2.17+ (CentOS/RHEL 7 and anything newer) |
+| (separate `linux-legacy` job) | `docker run quay.io/pypa/manylinux2014_*` | `manylinux2014_*` | glibc 2.17+ (CentOS/RHEL 7 and newer) - **on by default**; set `LEGACY_LINUX: no` in the workflow env to skip |
 
-The manylinux2014 image is CentOS 7 and end-of-life: its stock GCC 4.8
-cannot build FreeRDP 3, so those cells enable `devtoolset-10` and install
-packages with `yum` rather than `dnf`. Treat that row as best-effort - if
-upstream drops the image or a dependency is unavailable there, the other
-three floors still cover every supported distribution.
+glibc 2.17 cannot use a job-level `container:`. Every GitHub JS action
+(checkout, setup-python, cache, upload-artifact) runs on Node, and Node 20+
+needs glibc >= 2.28 - inside a CentOS 7 image they abort with
+`version GLIBC_2.28 not found`. The `linux-legacy` job therefore stays on the
+runner, where the actions work, and puts only the build inside the image via
+`docker run`. It also enables `devtoolset-10`, because CentOS 7's stock GCC
+4.8 cannot compile FreeRDP 3. It is **enabled by default** but marked `continue-on-error`: the image is
+end-of-life, so if it breaks the other three floors still publish. Set
+`LEGACY_LINUX: no` in the workflow env to skip it entirely.
 
 Not covered: musl systems (Alpine) need `musllinux` wheels from an Alpine
 toolchain.

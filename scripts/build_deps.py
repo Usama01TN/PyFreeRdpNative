@@ -322,7 +322,14 @@ class Toolchain(object):
         if target in ("android", "ios"):
             self.env["PKG_CONFIG_LIBDIR"] = self.env["PKG_CONFIG_PATH"]
             self.env["PKG_CONFIG_SYSROOT_DIR"] = ""
-        self.shared = target != "ios"
+        # Static third-party libraries on the mobile targets. iOS forbids
+        # shared libraries outside an app bundle; Android resolves DT_NEEDED
+        # by SONAME only, so a bundled libcrypto.so / libssl.so / libcjson.so
+        # is shadowed by any copy the host process already loaded (Termux's
+        # Python loads its own OpenSSL for hashlib/ssl) - and then FreeRDP
+        # binds to the wrong version and fails on the first symbol they do
+        # not share. Linked in, there is nothing to collide with.
+        self.shared = target not in ("ios", "android")
         self._setup()
 
     # -- per-target ---------------------------------------------------------
@@ -597,7 +604,7 @@ def build_cjson(tc, work):
     """
     Cross-build cJSON with CMake. Installs cJSONConfig.cmake + libcjson.pc,
     which is what FreeRDP's detect_package(cJSON ...) looks for. Static on
-    iOS (no shared libraries in an app bundle), shared elsewhere.
+    the mobile targets (see Toolchain.shared), shared elsewhere.
     """
     src = fetch_source("cjson", work)
     build = os.path.join(src, "build-{0}".format(tc.target))
