@@ -166,6 +166,7 @@ env:
   WINDOWS_SHADOW: ${{ (github.event_name != 'workflow_dispatch' || inputs.windows_shadow) && 'yes' || 'no' }}
   MOBILE_APPS: ${{ (github.event_name != 'workflow_dispatch' || inputs.mobile_apps) && 'yes' || 'no' }}
   WHEELS: ${{ (github.event_name != 'workflow_dispatch' || inputs.wheels) && 'yes' || 'no' }}
+  LEGACY_LINUX: ${{ inputs.legacy_linux || 'no' }}
   IOS_LINKAGE: ${{ inputs.ios_linkage || 'dynamic' }}
   ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
 
@@ -181,6 +182,9 @@ jobs:
     outputs:
       profiles: ${{ steps.sel.outputs.profiles }}
       editions: ${{ steps.sel.outputs.editions }}
+      # glibc 2.17 (manylinux2014) wheels: off unless LEGACY_LINUX says yes.
+      # The image is end-of-life; 2.28 already covers every supported distro.
+      legacy_linux: ${{ steps.sel.outputs.legacy_linux }}
     steps:
       - id: sel
         shell: bash
@@ -194,7 +198,8 @@ jobs:
             standard|ffmpeg|openh264|media) echo "editions=[\"${EDITIONS}\"]" >> "$GITHUB_OUTPUT" ;;
             *) echo 'editions=["standard","ffmpeg","openh264","media"]' >> "$GITHUB_OUTPUT" ;;
           esac
-          echo "building profiles: ${PROFILES:-both}, editions: ${EDITIONS:-all}"
+          echo "legacy_linux=${LEGACY_LINUX:-no}" >> "$GITHUB_OUTPUT"
+          echo "building profiles: ${PROFILES:-both}, editions: ${EDITIONS:-all}, glibc2.17: ${LEGACY_LINUX:-no}"
 
   # ---------------------------------------------------------------------------
   # Desktop hosts. One job per (OS, arch); each runs the script with
@@ -222,7 +227,6 @@ jobs:
         label: [linux-x86_64, linux-aarch64,
                 linux-x86_64-glibc234, linux-aarch64-glibc234,
                 linux-x86_64-glibc228, linux-aarch64-glibc228,
-                linux-x86_64-glibc217, linux-aarch64-glibc217,
                 macos-arm64, macos-x86_64,
                 windows-x64, windows-x86, windows-arm64]
         profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
@@ -251,16 +255,6 @@ jobs:
           - label: linux-aarch64-glibc228
             runner: ubuntu-24.04-arm
             container: quay.io/pypa/manylinux_2_28_aarch64
-          # manylinux2014 = CentOS 7, glibc 2.17: the widest reach there is
-          # for a glibc wheel (anything from 2014 on). The image is EOL and
-          # its default GCC 4.8 cannot build FreeRDP 3, so the dnf/yum step
-          # below enables devtoolset-10 for these cells.
-          - label: linux-x86_64-glibc217
-            runner: ubuntu-24.04
-            container: quay.io/pypa/manylinux2014_x86_64
-          - label: linux-aarch64-glibc217
-            runner: ubuntu-24.04-arm
-            container: quay.io/pypa/manylinux2014_aarch64
           - label: macos-arm64
             runner: macos-15
           - label: macos-x86_64
@@ -747,6 +741,85 @@ jobs:
   # OpenSSL isn't in the NDK, so we cross-build it first and hand its prefix
   # to the script via PYFREERDP_EXTRA_CMAKE.
   # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # glibc 2.17 (manylinux2014). The job canNOT use `container:`: that image is
+  # CentOS 7, and every JS action (checkout, setup-python, cache,
+  # upload-artifact) runs on Node, which needs glibc >= 2.28. So the job stays
+  # on the runner - where the actions work - and only the BUILD runs in the
+  # image, through `docker run`. The image is end-of-life and ships GCC 4.8,
+  # which cannot compile FreeRDP 3, so devtoolset-10 is enabled inside.
+  # ---------------------------------------------------------------------------
+  linux-legacy:
+    name: linux-glibc217 (${{ matrix.arch }}, ${{ matrix.profile }}/${{ matrix.edition }})
+    needs: plan
+    if: needs.plan.outputs.legacy_linux == 'yes'
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
+        edition: ${{ fromJSON(needs.plan.outputs.editions) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build inside manylinux2014
+        shell: bash
+        run: |
+          set -e
+          image="quay.io/pypa/manylinux2014_${{ matrix.arch }}"
+          docker pull -q "$image"
+          cat > /tmp/inside.sh <<'INSIDE'
+          set -e
+          # devtoolset-10: CentOS 7's stock GCC 4.8 cannot build FreeRDP 3
+          yum -y install devtoolset-10-gcc devtoolset-10-gcc-c++ devtoolset-10-binutils >/dev/null 2>&1 || true
+          for d in /opt/rh/devtoolset-*/root/usr/bin; do [ -d "$d" ] && export PATH="$d:$PATH" && break; done
+          yum -y install epel-release >/dev/null 2>&1 || true
+          yum -y install openssl-devel zlib-devel krb5-devel libicu-devel \
+                         alsa-lib-devel libpng-devel libjpeg-turbo-devel >/dev/null 2>&1 || true
+          if [ "$PROFILE" = "full" ]; then
+            yum -y install libX11-devel libXext-devel libXrandr-devel libXinerama-devel \
+                           libXfixes-devel libXcursor-devel libXi-devel libXv-devel \
+                           libxkbfile-devel libxkbcommon-devel nasm >/dev/null 2>&1 || true
+          fi
+          export PATH="/opt/python/cp312-cp312/bin:$PATH"
+          python --version && gcc --version | head -1 && cmake --version | head -1
+          cd /work
+          if [ "$EDITION" != "standard" ]; then
+            python scripts/build_deps.py --target host --edition "$EDITION" \
+              --profile "$PROFILE" --jobs "$(nproc)"
+            extra="--deps-prefix build/deps/linux-$ARCH-$EDITION"
+          else
+            extra=""
+          fi
+          python scripts/build_freerdp.py --target host --profile "$PROFILE" \
+            --edition "$EDITION" --jobs "$(nproc)" --ref "$FREERDP_REF" $extra
+          python scripts/validate_build.py --profile "$PROFILE" --edition "$EDITION" || \
+            echo "::warning::validation reported problems on the glibc 2.17 build"
+          chown -R "$HOST_UID:$HOST_GID" build dist 2>/dev/null || true
+          INSIDE
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e PROFILE="${{ matrix.profile }}" -e EDITION="${{ matrix.edition }}" \
+            -e ARCH="${{ matrix.arch }}" -e FREERDP_REF="$FREERDP_REF" \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -v /tmp/inside.sh:/tmp/inside.sh:ro \
+            "$image" bash /tmp/inside.sh
+
+      - name: Locate the output directory
+        id: out
+        shell: bash
+        run: |
+          dir=$(find build -maxdepth 2 -type d -name "_libs" | head -1)
+          test -n "$dir" || { echo "::error::no _libs produced"; find build -maxdepth 2 -type d | head -20; exit 1; }
+          echo "dir=$(dirname "$dir")" >> "$GITHUB_OUTPUT"
+          ls -la "$dir" | head -10
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: freerdp-${{ env.FREERDP_REF }}-linux-${{ matrix.arch }}-glibc217-${{ matrix.profile }}-${{ matrix.edition }}
+          path: ${{ steps.out.outputs.dir }}
+          if-no-files-found: error
+
   android:
     name: android-${{ matrix.abi }} (${{ matrix.profile }}, ${{ matrix.edition }})
     needs: plan
