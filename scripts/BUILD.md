@@ -29,16 +29,18 @@ Linux is built four times per profile/edition:
 | `linux-x86_64`, `linux-aarch64` | ubuntu-24.04 runners | `manylinux_2_39_*` | glibc 2.39+ (Ubuntu 24.04, Fedora 40, Debian 13) |
 | `linux-x86_64-glibc234`, `linux-aarch64-glibc234` | `quay.io/pypa/manylinux_2_34_*` container | `manylinux_2_34_*` | glibc 2.34+ (RHEL/Alma 9, Debian 12, Ubuntu 22.04) |
 | `linux-x86_64-glibc228`, `linux-aarch64-glibc228` | `quay.io/pypa/manylinux_2_28_*` container | `manylinux_2_28_*` | glibc 2.28+ (RHEL/Alma 8, Ubuntu 18.04+, Debian 10+, SLES 15) |
-| (separate `linux-legacy` job) | `docker run quay.io/pypa/manylinux2014_*` | `manylinux2014_*` | glibc 2.17+ (CentOS/RHEL 7 and newer) - **on by default**; set `LEGACY_LINUX: no` in the workflow env to skip |
+| (separate `linux-legacy` job, **x86_64 only**) | `docker run quay.io/pypa/manylinux2014_x86_64` | `manylinux2014_*` | glibc 2.17+ (CentOS/RHEL 7 and newer) - **on by default**; set `LEGACY_LINUX: no` in the workflow env to skip |
 
 glibc 2.17 cannot use a job-level `container:`. Every GitHub JS action
 (checkout, setup-python, cache, upload-artifact) runs on Node, and Node 20+
 needs glibc >= 2.28 - inside a CentOS 7 image they abort with
 `version GLIBC_2.28 not found`. The `linux-legacy` job therefore stays on the
 runner, where the actions work, and puts only the build inside the image via
-`docker run`. It also enables the newest devtoolset the image offers (11, falling back to
-10), because CentOS 7's stock GCC 4.8 cannot compile FreeRDP 3 at all and
-GCC 10 chokes on FreeRDP 3.31's `_Pragma()` use in `winpr/platform.h`. It is **enabled by default** but marked `continue-on-error`: the image is
+`docker run`. Inside the image it writes explicit `vault.centos.org` repositories (CentOS 7
+is EOL; the stock repo files carry only a dead mirrorlist) and installs
+**devtoolset-11**: GCC 10, the image default, rejects FreeRDP 3.31's
+`_Pragma()` use in `winpr/platform.h`. devtoolset was only ever published for
+x86_64, which is why this floor is x86_64-only. It is **enabled by default** but marked `continue-on-error`: the image is
 end-of-life, so if it breaks the other three floors still publish. Set
 `LEGACY_LINUX: no` in the workflow env to skip it entirely.
 
