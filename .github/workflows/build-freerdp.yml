@@ -278,6 +278,29 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # The manylinux images ship CPython under /opt/python/<tag>/bin and no
+      # `python` on the default PATH. This must run BEFORE any step that uses
+      # python (the version handshake right below does), and GITHUB_PATH only
+      # affects LATER steps - hence its own step here, not a line in the
+      # dependency step further down.
+      - name: Use the container's Python (manylinux)
+        if: matrix.container != ''
+        shell: bash
+        run: |
+          set -e
+          py=""
+          for cand in /opt/python/cp312-cp312/bin /opt/python/cp311-cp311/bin /opt/python/cp313-cp313/bin; do
+            if [ -x "$cand/python" ]; then py="$cand"; break; fi
+          done
+          if [ -z "$py" ]; then
+            py=$(dirname "$(command -v python3)")
+          fi
+          test -n "$py" || { echo "::error::no Python in this container image"; exit 1; }
+          echo "$py" >> "$GITHUB_PATH"
+          "$py/python" --version
+          # some images have python3 but no `python`
+          [ -x "$py/python" ] || ln -sf "$py/python3" "$py/python"
+
       # Skipped inside the manylinux container: it ships CPython at
       # /opt/python/cp312-cp312/bin (added to PATH by the dnf step), and
       # setup-python's downloads target the runner's glibc, not the image's.
@@ -335,7 +358,6 @@ jobs:
               rdpecam) dnf -y install libv4l-devel || true ;;
             esac
           done
-          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
           echo "PYFREERDP_IN_MANYLINUX=1" >> "$GITHUB_ENV"
 
       - name: Install build deps (apt)
