@@ -222,6 +222,7 @@ jobs:
         label: [linux-x86_64, linux-aarch64,
                 linux-x86_64-glibc234, linux-aarch64-glibc234,
                 linux-x86_64-glibc228, linux-aarch64-glibc228,
+                linux-x86_64-glibc217, linux-aarch64-glibc217,
                 macos-arm64, macos-x86_64,
                 windows-x64, windows-x86, windows-arm64]
         profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
@@ -250,6 +251,16 @@ jobs:
           - label: linux-aarch64-glibc228
             runner: ubuntu-24.04-arm
             container: quay.io/pypa/manylinux_2_28_aarch64
+          # manylinux2014 = CentOS 7, glibc 2.17: the widest reach there is
+          # for a glibc wheel (anything from 2014 on). The image is EOL and
+          # its default GCC 4.8 cannot build FreeRDP 3, so the dnf/yum step
+          # below enables devtoolset-10 for these cells.
+          - label: linux-x86_64-glibc217
+            runner: ubuntu-24.04
+            container: quay.io/pypa/manylinux2014_x86_64
+          - label: linux-aarch64-glibc217
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux2014_aarch64
           - label: macos-arm64
             runner: macos-15
           - label: macos-x86_64
@@ -327,35 +338,44 @@ jobs:
 
       # manylinux containers are AlmaLinux 9: dnf, no sudo, and the runner's
       # Python lives at /opt/python/cp312-cp312/bin.
-      - name: Install build deps (dnf, manylinux container)
+      - name: Install build deps (dnf/yum, manylinux container)
         if: matrix.container != ''
         shell: bash
         run: |
           set -e
-          dnf -y install epel-release || true
-          dnf -y install \
+          # manylinux2014 is CentOS 7 (yum, devtoolset); 2_28/2_34 are
+          # AlmaLinux (dnf) with a modern GCC already in place.
+          if command -v dnf >/dev/null 2>&1; then PM=dnf; else PM=yum; fi
+          if [ "$PM" = "yum" ]; then
+            yum -y install devtoolset-10-gcc devtoolset-10-gcc-c++ devtoolset-10-binutils || true
+            for d in /opt/rh/devtoolset-*/root/usr/bin; do
+              [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH" && break
+            done
+          fi
+          $PM -y install epel-release || true
+          $PM -y install \
             cmake ninja-build git pkgconfig patchelf \
             openssl-devel zlib-devel krb5-devel libicu-devel \
             alsa-lib-devel libpng-devel libjpeg-turbo-devel cairo-devel
           # cJSON is not in the base repos of every image; FreeRDP falls back
           # to its bundled copy when it is missing.
-          dnf -y install cjson-devel || echo "::notice::cjson-devel unavailable; FreeRDP will use its bundled cJSON"
+          $PM -y install cjson-devel || echo "::notice::cjson-devel unavailable; FreeRDP will use its bundled cJSON"
           if [ "${{ matrix.profile }}" = "full" ]; then
-            dnf -y install \
+            $PM -y install \
               libX11-devel libXext-devel libXrandr-devel libXinerama-devel \
               libXfixes-devel libXcursor-devel libXi-devel libXv-devel \
               libxkbfile-devel libxkbcommon-devel \
               wayland-devel wayland-protocols-devel pixman-devel \
               nasm systemd-devel libv4l-devel xorg-x11-server-Xvfb || true
             # GTK/WebKit (the wlfreerdp/GTK bits) and SDL are optional here.
-            dnf -y install gtk3-devel SDL2-devel SDL2_ttf-devel || \
+            $PM -y install gtk3-devel SDL2-devel SDL2_ttf-devel || \
               echo "::notice::optional GUI packages unavailable in this image"
           fi
           for ch in $ENABLE_CHANNELS; do
             case "$ch" in
-              urbdrc)  dnf -y install libusbx-devel || true ;;
-              printer) dnf -y install cups-devel || true ;;
-              rdpecam) dnf -y install libv4l-devel || true ;;
+              urbdrc)  $PM -y install libusbx-devel || true ;;
+              printer) $PM -y install cups-devel || true ;;
+              rdpecam) $PM -y install libv4l-devel || true ;;
             esac
           done
           echo "PYFREERDP_IN_MANYLINUX=1" >> "$GITHUB_ENV"
@@ -448,6 +468,7 @@ jobs:
           case "${{ matrix.label }}" in
             *-glibc234) abi="glibc234" ;;
             *-glibc228) abi="glibc228" ;;
+            *-glibc217) abi="glibc217" ;;
           esac
           echo "abi=$abi" >> "$GITHUB_OUTPUT"
 
