@@ -432,20 +432,24 @@ jobs:
         id: deps
         shell: bash
         run: |
-          # The deps prefix is per ABI+toolchain: the manylinux cells get
-          # their own label so their glibc-2.34 build is never served a
-          # cached prefix from the Ubuntu 24.04 (glibc 2.39) cells.
+          # `label` MUST equal the directory build_deps.py derives from the
+          # machine itself (it names build/deps/<label>-<edition>), so the
+          # manylinux cells keep the plain platform name. The glibc floor
+          # goes into `abi` instead, which only distinguishes the CACHE KEY -
+          # a glibc-2.39 prefix must never be restored into a 2.34 build.
+          abi=""
           case "${{ matrix.label }}" in
-            linux-x86_64)  echo "label=linux-x86_64"  >> "$GITHUB_OUTPUT" ;;
-            linux-aarch64) echo "label=linux-aarch64" >> "$GITHUB_OUTPUT" ;;
-            linux-x86_64-glibc234)  echo "label=linux-x86_64-glibc234"  >> "$GITHUB_OUTPUT" ;;
-            linux-aarch64-glibc234) echo "label=linux-aarch64-glibc234" >> "$GITHUB_OUTPUT" ;;
-            linux-x86_64-glibc228)  echo "label=linux-x86_64-glibc228"  >> "$GITHUB_OUTPUT" ;;
-            linux-aarch64-glibc228) echo "label=linux-aarch64-glibc228" >> "$GITHUB_OUTPUT" ;;
+            linux-x86_64*)  echo "label=linux-x86_64"  >> "$GITHUB_OUTPUT" ;;
+            linux-aarch64*) echo "label=linux-aarch64" >> "$GITHUB_OUTPUT" ;;
             macos-arm64)   echo "label=darwin-arm64"  >> "$GITHUB_OUTPUT" ;;
             macos-x86_64)  echo "label=darwin-x86_64" >> "$GITHUB_OUTPUT" ;;
             windows-*)     echo "label=windows-${{ matrix.win_arch }}" >> "$GITHUB_OUTPUT" ;;
           esac
+          case "${{ matrix.label }}" in
+            *-glibc234) abi="glibc234" ;;
+            *-glibc228) abi="glibc228" ;;
+          esac
+          echo "abi=$abi" >> "$GITHUB_OUTPUT"
 
       # The standard edition needs no built dependencies on Linux/macOS
       # (system OpenSSL); on Windows every edition takes OpenSSL/zlib/cJSON
@@ -457,7 +461,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}
-          key: deps-v3-${{ matrix.edition }}-${{ matrix.profile }}-${{ steps.deps.outputs.label }}-${{ hashFiles('scripts/build_deps.py', 'scripts/vcpkg.json') }}
+          key: deps-v3-${{ matrix.edition }}-${{ matrix.profile }}-${{ steps.deps.outputs.label }}${{ steps.deps.outputs.abi && format('-{0}', steps.deps.outputs.abi) || '' }}-${{ hashFiles('scripts/build_deps.py', 'scripts/vcpkg.json') }}
 
       - name: Build dependencies (${{ matrix.edition }})
         if: (matrix.edition != 'standard' || runner.os == 'Windows') && steps.deps-cache.outputs.cache-hit != 'true'
@@ -477,7 +481,13 @@ jobs:
           fi
           python scripts/build_deps.py --target host --edition ${{ matrix.edition }} \
             --profile ${{ matrix.profile }} --jobs "$jobs" $args
-          cat build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}/DEPS-MANIFEST.txt
+          manifest="build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}/DEPS-MANIFEST.txt"
+          if [ -f "$manifest" ]; then
+            cat "$manifest"
+          else
+            echo "::warning::no DEPS-MANIFEST.txt at $manifest; prefixes present:"
+            ls -d build/deps/*/ 2>/dev/null || true
+          fi
 
       # ---- build ----------------------------------------------------------
 
