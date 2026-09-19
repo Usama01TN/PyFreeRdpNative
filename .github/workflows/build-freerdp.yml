@@ -166,7 +166,7 @@ env:
   WINDOWS_SHADOW: ${{ (github.event_name != 'workflow_dispatch' || inputs.windows_shadow) && 'yes' || 'no' }}
   MOBILE_APPS: ${{ (github.event_name != 'workflow_dispatch' || inputs.mobile_apps) && 'yes' || 'no' }}
   WHEELS: ${{ (github.event_name != 'workflow_dispatch' || inputs.wheels) && 'yes' || 'no' }}
-  LEGACY_LINUX: ${{ inputs.legacy_linux || 'no' }}
+  LEGACY_LINUX: ${{ inputs.legacy_linux || 'yes' }}
   IOS_LINKAGE: ${{ inputs.ios_linkage || 'dynamic' }}
   ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
 
@@ -182,8 +182,10 @@ jobs:
     outputs:
       profiles: ${{ steps.sel.outputs.profiles }}
       editions: ${{ steps.sel.outputs.editions }}
-      # glibc 2.17 (manylinux2014) wheels: off unless LEGACY_LINUX says yes.
-      # The image is end-of-life; 2.28 already covers every supported distro.
+      # glibc 2.17 (manylinux2014) wheels. ON by default; set LEGACY_LINUX=no
+      # in the workflow env block to skip it. (There is no dispatch input:
+      # the event already declares 15, above GitHub's limit of 10.) The image is
+      # end-of-life, so the job may not fail the run - see continue-on-error.
       legacy_linux: ${{ steps.sel.outputs.legacy_linux }}
     steps:
       - id: sel
@@ -198,8 +200,8 @@ jobs:
             standard|ffmpeg|openh264|media) echo "editions=[\"${EDITIONS}\"]" >> "$GITHUB_OUTPUT" ;;
             *) echo 'editions=["standard","ffmpeg","openh264","media"]' >> "$GITHUB_OUTPUT" ;;
           esac
-          echo "legacy_linux=${LEGACY_LINUX:-no}" >> "$GITHUB_OUTPUT"
-          echo "building profiles: ${PROFILES:-both}, editions: ${EDITIONS:-all}, glibc2.17: ${LEGACY_LINUX:-no}"
+          echo "legacy_linux=${LEGACY_LINUX:-yes}" >> "$GITHUB_OUTPUT"
+          echo "building profiles: ${PROFILES:-both}, editions: ${EDITIONS:-all}, glibc2.17: ${LEGACY_LINUX:-yes}"
 
   # ---------------------------------------------------------------------------
   # Desktop hosts. One job per (OS, arch); each runs the script with
@@ -753,6 +755,9 @@ jobs:
     name: linux-glibc217 (${{ matrix.arch }}, ${{ matrix.profile }}/${{ matrix.edition }})
     needs: plan
     if: needs.plan.outputs.legacy_linux == 'yes'
+    # CentOS 7 is end-of-life: a failure here must not sink a run whose
+    # other three glibc floors are green.
+    continue-on-error: true
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
     strategy:
       fail-fast: false
@@ -877,7 +882,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: openssl-android-${{ matrix.abi }}
-          key: openssl-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
+          key: openssl-static-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
 
       - name: Cross-build OpenSSL for ${{ matrix.abi }}
         if: steps.ssl-cache.outputs.cache-hit != 'true'
@@ -888,8 +893,15 @@ jobs:
           tar xzf openssl.tar.gz
           export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
           cd "openssl-${OPENSSL_VERSION}"
+          # STATIC on Android. A shared libcrypto.so/libssl.so in _libs is
+          # unusable there: Android resolves DT_NEEDED by soname, and any
+          # host Python that already loaded its own libcrypto.so (Termux's
+          # does, for hashlib/ssl) owns that soname - our copy is ignored and
+          # winpr binds against the host's OpenSSL, which fails on the first
+          # symbol the two versions do not share (EVP_MAC_fetch, ...).
+          # Linked into libwinpr3.so instead, there is nothing to collide.
           ./Configure ${{ matrix.openssl_target }} -D__ANDROID_API__=${API_LEVEL} \
-            shared no-tests no-docs \
+            no-shared no-tests no-docs \
             --prefix="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}" \
             --openssldir="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/ssl"
           make -j"$(nproc)" build_libs
@@ -903,7 +915,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/deps/android-${{ matrix.abi }}-${{ matrix.edition }}
-          key: deps-v3-android-${{ matrix.abi }}-${{ matrix.edition }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}-${{ hashFiles('scripts/build_deps.py') }}
+          key: deps-v4static-android-${{ matrix.abi }}-${{ matrix.edition }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}-${{ hashFiles('scripts/build_deps.py') }}
 
       - name: Build dependencies (${{ matrix.edition }})
         if: steps.deps-cache.outputs.cache-hit != 'true'
@@ -1539,7 +1551,9 @@ jobs:
   # ---------------------------------------------------------------------------
   wheels:
     name: wheels
-    needs: [desktop, android, ios]
+    # linux-legacy is allowed to fail (end-of-life image); its wheels are
+    # then simply absent. The `if` below already requires only desktop.
+    needs: [desktop, linux-legacy, android, ios]
     outputs:
       files: ${{ steps.list.outputs.files }}
     if: |
@@ -1858,7 +1872,7 @@ jobs:
   # ---------------------------------------------------------------------------
   links:
     name: artifact links
-    needs: [desktop, android, ios, android-apk, ios-app, wheels, wheel-artifacts]
+    needs: [desktop, linux-legacy, android, ios, android-apk, ios-app, wheels, wheel-artifacts]
     if: always() && (needs.desktop.result != 'cancelled')
     runs-on: ubuntu-24.04
     permissions:
