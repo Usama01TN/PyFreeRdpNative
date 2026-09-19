@@ -38,15 +38,26 @@ PACKAGE_SCRIPT_VERSION = 4
 
 # Artifact platform name -> wheel platform tag.
 #
-# The Linux libraries are built on Ubuntu 24.04 (glibc 2.39), so that is the
-# honest floor - `auditwheel show` confirms it. A lower tag would need the
-# build to move into a manylinux container. Non-baseline system libraries
+# Linux is built twice:
+#   * on Ubuntu 24.04 (glibc 2.39) -> manylinux_2_39, the newest toolchain;
+#   * in the manylinux_2_34 container (AlmaLinux 9, glibc 2.34) -> also
+#     installs on RHEL/Alma 9, Debian 12 (2.36), Ubuntu 22.04 (2.35);
+#   * in the manylinux_2_28 container (AlmaLinux 8, glibc 2.28) -> the lowest
+#     floor pypa maintains: RHEL/Alma 8+, Ubuntu 18.04+, Debian 10+, SLES 15.
+# pip prefers the highest tag a system satisfies, so a 2.39 machine still
+# gets the 2.39 wheel. Alpine (musl) is NOT covered by any of these; that
+# needs musllinux wheels built in an Alpine toolchain.
+# `auditwheel show` confirms each floor. Non-baseline system libraries
 # (cJSON, ICU, OpenSSL, krb5, ...) are vendored into _libs at build time, so
 # the wheel depends on nothing but glibc and X11. macOS tags carry the
 # deployment target the libraries were built with (11.0).
 PLATFORM_TAGS = {
     "linux-x86_64": "manylinux_2_39_x86_64",
     "linux-aarch64": "manylinux_2_39_aarch64",
+    "linux-x86_64-glibc234": "manylinux_2_34_x86_64",
+    "linux-aarch64-glibc234": "manylinux_2_34_aarch64",
+    "linux-x86_64-glibc228": "manylinux_2_28_x86_64",
+    "linux-aarch64-glibc228": "manylinux_2_28_aarch64",
     "macos-arm64": "macosx_11_0_arm64",
     "macos-x86_64": "macosx_11_0_x86_64",
     "windows-x64": "win_amd64",

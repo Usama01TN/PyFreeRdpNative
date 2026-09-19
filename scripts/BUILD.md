@@ -19,6 +19,28 @@ from pinned sources:
 Everything is driven by `.github/workflows/build-freerdp.yml` (all platforms,
 artifacts + optional release) and `ci.yml` (Linux, every push/PR).
 
+
+## Linux: two glibc floors
+
+Linux is built three times per profile/edition:
+
+| label | where | wheel tag | installs on |
+|---|---|---|---|
+| `linux-x86_64`, `linux-aarch64` | ubuntu-24.04 runners | `manylinux_2_39_*` | glibc 2.39+ (Ubuntu 24.04, Fedora 40, Debian 13) |
+| `linux-x86_64-glibc234`, `linux-aarch64-glibc234` | `quay.io/pypa/manylinux_2_34_*` container | `manylinux_2_34_*` | glibc 2.34+ (RHEL/Alma 9, Debian 12, Ubuntu 22.04) |
+| `linux-x86_64-glibc228`, `linux-aarch64-glibc228` | `quay.io/pypa/manylinux_2_28_*` container | `manylinux_2_28_*` | glibc 2.28+ (RHEL/Alma 8, Ubuntu 18.04+, Debian 10+, SLES 15) |
+
+Not covered by any of these: musl systems (Alpine) need `musllinux` wheels
+from an Alpine toolchain, and glibc below 2.28 (CentOS 7) would need
+`manylinux2014`, whose image pypa no longer maintains.
+
+pip installs the highest tag a system satisfies, so a modern machine still
+gets the 2.39 wheel and older distributions fall back to 2.34. The container
+cells run as root with `dnf` instead of `apt`, use the image's CPython
+(`/opt/python/cp312-cp312/bin`, so `actions/setup-python` is skipped), and
+keep a separate dependency cache so a glibc-2.39 prefix is never reused for
+a 2.34 build.
+
 ## Mobile applications (aFreeRDP APK / iFreeRDP.app)
 
 Separate from the library matrix, two targets build FreeRDP's own mobile
