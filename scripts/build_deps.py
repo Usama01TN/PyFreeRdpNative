@@ -450,6 +450,12 @@ class Toolchain(object):
                     f.append("--extra-libs=-lstdc++")
         f += [
              # Deterministic, dependency-free build:
+             # The hand-written assembly references data symbols in a way
+             # lld refuses when the static archives are linked INTO a shared
+             # library ("relocation R_AARCH64_ADR_PREL_PG_HI21 ... against
+             # symbol 'ff_tx_tab_32_float'"), and --enable-pic does not cover
+             # it. Mobile builds therefore use the C paths.
+             ] + (["--disable-asm"] if self.target in ("android", "ios") else []) + [
              "--disable-autodetect", "--enable-pthreads",
              "--pkg-config-flags=--static" if not self.shared else
              "--pkg-config=pkg-config",
@@ -640,14 +646,20 @@ def fix_static_cxx_pc(tc, pc_path):
     if runtime in text:
         return
     out = []
+    seen_libs = False
     for line in text.splitlines():
-        if line.startswith("Libs.private:"):
-            line = line + " " + runtime
-        elif line.startswith("Libs:") and "Libs.private:" not in text:
-            line = line + " " + runtime
+        if line.startswith(("Libs:", "Libs.private:")):
+            # openh264 hard-codes -lstdc++; the NDK ships libc++ only, and
+            # Apple toolchains want -lc++. Swap it rather than append, or the
+            # probe still fails on the missing library.
+            line = line.replace("-lstdc++", runtime)
+            if line.startswith("Libs:"):
+                seen_libs = True
+                if runtime not in line:
+                    line = line + " " + runtime
         out.append(line)
-    if not any(l.startswith("Libs.private:") for l in out):
-        out.append("Libs.private: " + runtime)
+    if not seen_libs:
+        out.append("Libs: " + runtime)
     with open(pc_path, "w") as fh:
         fh.write("\n".join(out) + "\n")
     print("[deps] openh264.pc: added {0} for static linking".format(runtime))
