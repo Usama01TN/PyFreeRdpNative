@@ -479,7 +479,12 @@ class Toolchain(object):
                   "--nm={0}".format(self.nm), "--strip={0}".format(self.strip),
                   "--sysroot={0}".format(self.sysroot),
                   "--disable-programs",     # no place to run them on-device
-                  "--enable-jni", "--enable-mediacodec",
+                  # NOT --enable-mediacodec/--enable-jni: they make libavutil
+                  # reference ANativeWindow_* from libandroid, which then has
+                  # to be on the link line of every consumer. FreeRDP decodes
+                  # H.264 in software, so the hardware path is dead weight
+                  # ("undefined symbol: ANativeWindow_release").
+                  "--disable-mediacodec", "--disable-jni",
                   "--extra-cflags=-fPIC -O2",
                   "--extra-ldflags=-Wl,-z,max-page-size=16384"]
             if arch == "aarch64":
@@ -712,6 +717,13 @@ def build_cjson(tc, work):
 
 
 def build_ffmpeg(tc, work, with_openh264=True):
+    # On the mobile targets FFmpeg does not get the libopenh264 wrapper: its
+    # configure probes openh264 through pkg-config with a link test that has
+    # repeatedly failed to work against a cross-built static C++ library.
+    # FreeRDP uses OpenH264 directly (WITH_OPENH264) and FFmpeg keeps its own
+    # software h264 decoder, so nothing is lost.
+    if tc.target in ("android", "ios"):
+        with_openh264 = False
     if tc.target == "ios" and tc.ios_platform.startswith("SIMULATOR"):
         raise SystemExit("FFmpeg/OpenH264 are built for the iOS device SDK only; "
                          "use --edition standard for simulator targets.")
