@@ -209,6 +209,7 @@ jobs:
     name: ${{ matrix.label }} (${{ matrix.profile }}, ${{ matrix.edition }})
     needs: plan
     runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || '' }}
     # Skip cells the dispatch input did not ask for.
     strategy:
       fail-fast: false
@@ -218,7 +219,10 @@ jobs:
       # are merged into every combination - and only the first can be - so
       # the old form silently produced 2 real cells and 6 broken ones.)
       matrix:
-        label: [linux-x86_64, linux-aarch64, macos-arm64, macos-x86_64,
+        label: [linux-x86_64, linux-aarch64,
+                linux-x86_64-glibc234, linux-aarch64-glibc234,
+                linux-x86_64-glibc228, linux-aarch64-glibc228,
+                macos-arm64, macos-x86_64,
                 windows-x64, windows-x86, windows-arm64]
         profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
         edition: ${{ fromJSON(needs.plan.outputs.editions) }}
@@ -227,6 +231,25 @@ jobs:
             runner: ubuntu-24.04
           - label: linux-aarch64
             runner: ubuntu-24.04-arm
+          # manylinux_2_34 = AlmaLinux 9, glibc 2.34: wheels that also install
+          # on RHEL/Alma 9, Debian 12 (2.36) and Ubuntu 22.04 (2.35). The job
+          # runs INSIDE the container, so dnf replaces apt and there is no
+          # sudo; steps below branch on matrix.container.
+          - label: linux-x86_64-glibc234
+            runner: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_34_x86_64
+          - label: linux-aarch64-glibc234
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_34_aarch64
+          # manylinux_2_28 = AlmaLinux 8, glibc 2.28: the lowest floor pypa
+          # still maintains, and in practice every glibc distribution still
+          # supported (RHEL/Alma 8+, Ubuntu 18.04+, Debian 10+, SLES 15).
+          - label: linux-x86_64-glibc228
+            runner: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_28_x86_64
+          - label: linux-aarch64-glibc228
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
           - label: macos-arm64
             runner: macos-15
           - label: macos-x86_64
@@ -255,7 +278,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Skipped inside the manylinux container: it ships CPython at
+      # /opt/python/cp312-cp312/bin (added to PATH by the dnf step), and
+      # setup-python's downloads target the runner's glibc, not the image's.
       - uses: actions/setup-python@v6
+        if: matrix.container == ''
         with:
           python-version: "3.12"
           # Only Windows cells set this (x86 needs a 32-bit interpreter for
@@ -275,8 +302,44 @@ jobs:
 
       # ---- dependencies ---------------------------------------------------
 
+      # manylinux containers are AlmaLinux 9: dnf, no sudo, and the runner's
+      # Python lives at /opt/python/cp312-cp312/bin.
+      - name: Install build deps (dnf, manylinux container)
+        if: matrix.container != ''
+        shell: bash
+        run: |
+          set -e
+          dnf -y install epel-release || true
+          dnf -y install \
+            cmake ninja-build git pkgconfig patchelf \
+            openssl-devel zlib-devel krb5-devel libicu-devel \
+            alsa-lib-devel libpng-devel libjpeg-turbo-devel cairo-devel
+          # cJSON is not in the base repos of every image; FreeRDP falls back
+          # to its bundled copy when it is missing.
+          dnf -y install cjson-devel || echo "::notice::cjson-devel unavailable; FreeRDP will use its bundled cJSON"
+          if [ "${{ matrix.profile }}" = "full" ]; then
+            dnf -y install \
+              libX11-devel libXext-devel libXrandr-devel libXinerama-devel \
+              libXfixes-devel libXcursor-devel libXi-devel libXv-devel \
+              libxkbfile-devel libxkbcommon-devel \
+              wayland-devel wayland-protocols-devel pixman-devel \
+              nasm systemd-devel libv4l-devel xorg-x11-server-Xvfb || true
+            # GTK/WebKit (the wlfreerdp/GTK bits) and SDL are optional here.
+            dnf -y install gtk3-devel SDL2-devel SDL2_ttf-devel || \
+              echo "::notice::optional GUI packages unavailable in this image"
+          fi
+          for ch in $ENABLE_CHANNELS; do
+            case "$ch" in
+              urbdrc)  dnf -y install libusbx-devel || true ;;
+              printer) dnf -y install cups-devel || true ;;
+              rdpecam) dnf -y install libv4l-devel || true ;;
+            esac
+          done
+          echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+          echo "PYFREERDP_IN_MANYLINUX=1" >> "$GITHUB_ENV"
+
       - name: Install build deps (apt)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.container == ''
         shell: bash
         run: |
           sudo apt-get update
@@ -347,9 +410,16 @@ jobs:
         id: deps
         shell: bash
         run: |
+          # The deps prefix is per ABI+toolchain: the manylinux cells get
+          # their own label so their glibc-2.34 build is never served a
+          # cached prefix from the Ubuntu 24.04 (glibc 2.39) cells.
           case "${{ matrix.label }}" in
             linux-x86_64)  echo "label=linux-x86_64"  >> "$GITHUB_OUTPUT" ;;
             linux-aarch64) echo "label=linux-aarch64" >> "$GITHUB_OUTPUT" ;;
+            linux-x86_64-glibc234)  echo "label=linux-x86_64-glibc234"  >> "$GITHUB_OUTPUT" ;;
+            linux-aarch64-glibc234) echo "label=linux-aarch64-glibc234" >> "$GITHUB_OUTPUT" ;;
+            linux-x86_64-glibc228)  echo "label=linux-x86_64-glibc228"  >> "$GITHUB_OUTPUT" ;;
+            linux-aarch64-glibc228) echo "label=linux-aarch64-glibc228" >> "$GITHUB_OUTPUT" ;;
             macos-arm64)   echo "label=darwin-arm64"  >> "$GITHUB_OUTPUT" ;;
             macos-x86_64)  echo "label=darwin-x86_64" >> "$GITHUB_OUTPUT" ;;
             windows-*)     echo "label=windows-${{ matrix.win_arch }}" >> "$GITHUB_OUTPUT" ;;
