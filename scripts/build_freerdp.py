@@ -2643,6 +2643,15 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
         "-DANDROID_ABI={0}".format(abi),
         "-DANDROID_PLATFORM=android-{0}".format(api_level),
         "-DANDROID_STL=c++_shared",
+        # OpenH264 is C++ and is linked in statically, so libc++ must appear
+        # on the link line of the (pure C) FreeRDP libraries - otherwise lld
+        # reports undefined `operator new`, `operator delete`,
+        # `__cxa_pure_virtual`, `__cxa_guard_acquire` from libopenh264.a.
+        # It must go through CMAKE_C_STANDARD_LIBRARIES, which CMake appends
+        # to every link line: android.toolchain.cmake overwrites
+        # CMAKE_SHARED_LINKER_FLAGS (the same trap documented for
+        # ios.toolchain.cmake below).
+        "-DCMAKE_C_STANDARD_LIBRARIES=-lc++_shared",
         "-DCMAKE_INSTALL_PREFIX={0}".format(install_dir),
     ] + opts + extra + ["-G", "Ninja"]
     require_tools(["cmake", "ninja"])

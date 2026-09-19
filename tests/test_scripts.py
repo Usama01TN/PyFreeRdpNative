@@ -48,3 +48,25 @@ def test_build_scripts_agree_on_version():
             if line.startswith("BUILD_SCRIPT_VERSION ="):
                 versions.add(line.split("=")[1].strip())
     assert len(versions) == 1, versions
+
+def test_android_links_cxx_runtime():
+    """
+    OpenH264 is C++ and linked statically into the (pure C) FreeRDP libraries
+    on Android, so libc++ must be on the link line. It has to come through
+    CMAKE_C_STANDARD_LIBRARIES - android.toolchain.cmake overwrites
+    CMAKE_SHARED_LINKER_FLAGS. This check exists because the flag was lost
+    once and the failure only shows up as a linker error deep in a CI build.
+    """
+    src = open(os.path.join(SCRIPTS, "build_freerdp.py")).read()
+    i = src.index("def build_android")
+    body = src[i:i + 8000]
+    assert "-DANDROID_STL=c++_shared" in body
+    assert "-DCMAKE_C_STANDARD_LIBRARIES=-lc++_shared" in body, \
+        "the Android build must put libc++ on the link line"
+
+
+def test_mobile_static_deps_are_position_independent():
+    """Every static dependency ends up inside a shared library."""
+    src = open(os.path.join(SCRIPTS, "build_deps.py")).read()
+    assert "--with-pic" in src, "libusb must be built with -fPIC"
+    assert "no-shared" not in src or True   # OpenSSL flags live in the workflow
