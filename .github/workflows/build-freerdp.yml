@@ -342,6 +342,15 @@ jobs:
           # manylinux2014 is CentOS 7 (yum, devtoolset); 2_28/2_34 are
           # AlmaLinux (dnf) with a modern GCC already in place.
           if command -v dnf >/dev/null 2>&1; then PM=dnf; else PM=yum; fi
+          # X11/Wayland -devel packages are in the CRB (AlmaLinux 9) or
+          # PowerTools (AlmaLinux 8) repository, which is disabled by default.
+          # Without it `find_package(Wayland)` fails the full profile.
+          if [ "$PM" = "dnf" ]; then
+            dnf -y install dnf-plugins-core >/dev/null 2>&1 || true
+            dnf config-manager --set-enabled crb >/dev/null 2>&1 \
+              || dnf config-manager --set-enabled powertools >/dev/null 2>&1 \
+              || echo "::notice::no CRB/PowerTools repository to enable"
+          fi
           if [ "$PM" = "yum" ]; then
             yum -y install devtoolset-10-gcc devtoolset-10-gcc-c++ devtoolset-10-binutils || true
             for d in /opt/rh/devtoolset-*/root/usr/bin; do
@@ -357,12 +366,17 @@ jobs:
           # to its bundled copy when it is missing.
           $PM -y install cjson-devel || echo "::notice::cjson-devel unavailable; FreeRDP will use its bundled cJSON"
           if [ "${{ matrix.profile }}" = "full" ]; then
+            # these decide WITH_X11/WITH_WAYLAND; report what is missing
+            # instead of letting cmake fail later with "Could NOT find Wayland"
             $PM -y install \
               libX11-devel libXext-devel libXrandr-devel libXinerama-devel \
               libXfixes-devel libXcursor-devel libXi-devel libXv-devel \
               libxkbfile-devel libxkbcommon-devel \
               wayland-devel wayland-protocols-devel pixman-devel \
               nasm systemd-devel libv4l-devel xorg-x11-server-Xvfb || true
+            for pc in wayland-client wayland-cursor x11; do
+              pkg-config --exists "$pc" || echo "::warning::$pc not available in this image"
+            done
             # GTK/WebKit (the wlfreerdp/GTK bits) and SDL are optional here.
             $PM -y install gtk3-devel SDL2-devel SDL2_ttf-devel || \
               echo "::notice::optional GUI packages unavailable in this image"
@@ -776,9 +790,19 @@ jobs:
           docker pull -q "$image"
           cat > /tmp/inside.sh <<'INSIDE'
           set -e
-          # devtoolset-10: CentOS 7's stock GCC 4.8 cannot build FreeRDP 3
-          yum -y install devtoolset-10-gcc devtoolset-10-gcc-c++ devtoolset-10-binutils >/dev/null 2>&1 || true
-          for d in /opt/rh/devtoolset-*/root/usr/bin; do [ -d "$d" ] && export PATH="$d:$PATH" && break; done
+          # CentOS 7's stock GCC 4.8 cannot build FreeRDP 3. Take the newest
+          # toolset the image offers: GCC 10 miscompiles FreeRDP 3.31's
+          # _Pragma() use in winpr/platform.h ("expected end of line before
+          # 'ignored'"), so 11 is tried first.
+          yum -y install centos-release-scl >/dev/null 2>&1 || true
+          for v in 11 10; do
+            yum -y install devtoolset-$v-gcc devtoolset-$v-gcc-c++ devtoolset-$v-binutils >/dev/null 2>&1 || true
+          done
+          for v in 11 10; do
+            d="/opt/rh/devtoolset-$v/root/usr/bin"
+            if [ -x "$d/gcc" ]; then export PATH="$d:$PATH"; export CC="$d/gcc"; export CXX="$d/g++"; break; fi
+          done
+          gcc --version | head -1
           yum -y install epel-release >/dev/null 2>&1 || true
           yum -y install openssl-devel zlib-devel krb5-devel libicu-devel \
                          alsa-lib-devel libpng-devel libjpeg-turbo-devel >/dev/null 2>&1 || true
@@ -936,10 +960,15 @@ jobs:
           python scripts/build_freerdp.py \
             --target android --abi ${{ matrix.abi }} --api-level ${API_LEVEL} \
             --ref "$FREERDP_REF" --profile ${{ matrix.profile }} --jobs "$(nproc)" $args
-          # Ship OpenSSL alongside so the artifact is self-contained.
-          cp openssl-android-${{ matrix.abi }}/lib/libssl.so \
-             openssl-android-${{ matrix.abi }}/lib/libcrypto.so \
-             pyfreerdpnative/_libs/android/${{ matrix.abi }}/
+          # OpenSSL is linked statically into the FreeRDP libraries on
+          # Android (a bundled libcrypto.so would be shadowed by whatever the
+          # host process already loaded - see docs/MOBILE.md), so there is
+          # nothing to copy. Fail loudly if a shared copy reappears, because
+          # that silently reintroduces the soname clash.
+          if ls openssl-android-${{ matrix.abi }}/lib/libcrypto.so >/dev/null 2>&1; then
+            echo "::error::OpenSSL was built shared for Android; it must be no-shared"
+            exit 1
+          fi
           ls -la pyfreerdpnative/_libs/android/${{ matrix.abi }}/
 
       - name: Verify ELF targets and channel symbols
