@@ -790,11 +790,25 @@ jobs:
           docker pull -q "$image"
           cat > /tmp/inside.sh <<'INSIDE'
           set -e
+          # CentOS 7 is EOL: mirror.centos.org no longer resolves, so every
+          # `yum install` in this image fails. Until now those failures were
+          # hidden by `>/dev/null 2>&1 || true` and only surfaced later as
+          # "Could NOT find OpenSSL" from cmake. Point yum at the vault first.
+          sed -i -e 's/^mirrorlist=/#mirrorlist=/' \
+                 -e 's|^#\?baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|' \
+                 /etc/yum.repos.d/CentOS-*.repo 2>/dev/null || true
+          yum -y clean all >/dev/null 2>&1 || true
           # CentOS 7's stock GCC 4.8 cannot build FreeRDP 3. Take the newest
           # toolset the image offers: GCC 10 miscompiles FreeRDP 3.31's
           # _Pragma() use in winpr/platform.h ("expected end of line before
           # 'ignored'"), so 11 is tried first.
           yum -y install centos-release-scl >/dev/null 2>&1 || true
+          # centos-release-scl drops in NEW repo files that point at the dead
+          # mirror as well, so rewrite them too before installing from SCL.
+          sed -i -e 's/^mirrorlist=/#mirrorlist=/' \
+                 -e 's|^#\?baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|' \
+                 /etc/yum.repos.d/CentOS-SCLo-*.repo /etc/yum.repos.d/CentOS-*.repo 2>/dev/null || true
+          yum -y clean all >/dev/null 2>&1 || true
           for v in 11 10; do
             yum -y install devtoolset-$v-gcc devtoolset-$v-gcc-c++ devtoolset-$v-binutils >/dev/null 2>&1 || true
           done
@@ -803,9 +817,19 @@ jobs:
             if [ -x "$d/gcc" ]; then export PATH="$d:$PATH"; export CC="$d/gcc"; export CXX="$d/g++"; break; fi
           done
           gcc --version | head -1
+          case "$(gcc -dumpversion)" in
+            4.*|5.*|6.*|7.*|8.*|9.*|10.*)
+              echo "::warning::building with GCC $(gcc -dumpversion); FreeRDP 3.31 needs 11+ for its _Pragma() use in winpr/platform.h" ;;
+          esac
           yum -y install epel-release >/dev/null 2>&1 || true
-          yum -y install openssl-devel zlib-devel krb5-devel libicu-devel \
-                         alsa-lib-devel libpng-devel libjpeg-turbo-devel >/dev/null 2>&1 || true
+          # these are REQUIRED (FreeRDP will not configure without OpenSSL):
+          # let the output through and fail here rather than in cmake.
+          yum -y install openssl-devel zlib-devel || {
+            echo "::error::cannot install openssl-devel in manylinux2014 - CentOS 7 repositories unreachable"
+            exit 1
+          }
+          yum -y install krb5-devel libicu-devel alsa-lib-devel \
+                         libpng-devel libjpeg-turbo-devel >/dev/null 2>&1 || true
           if [ "$PROFILE" = "full" ]; then
             yum -y install libX11-devel libXext-devel libXrandr-devel libXinerama-devel \
                            libXfixes-devel libXcursor-devel libXi-devel libXv-devel \
@@ -906,7 +930,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: openssl-android-${{ matrix.abi }}
-          key: openssl-static-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
+          key: openssl-static-pic-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
 
       - name: Cross-build OpenSSL for ${{ matrix.abi }}
         if: steps.ssl-cache.outputs.cache-hit != 'true'
@@ -924,8 +948,12 @@ jobs:
           # winpr binds against the host's OpenSSL, which fails on the first
           # symbol the two versions do not share (EVP_MAC_fetch, ...).
           # Linked into libwinpr3.so instead, there is nothing to collide.
+          # -fPIC is required: these static archives are linked INTO shared
+          # libraries (libwinpr3.so ...), and OpenSSL does not imply it under
+          # no-shared. Without it the 32-bit ARM link fails with "relocation
+          # R_ARM_REL32 cannot be used against symbol 'OPENSSL_armcap_P'".
           ./Configure ${{ matrix.openssl_target }} -D__ANDROID_API__=${API_LEVEL} \
-            no-shared no-tests no-docs \
+            no-shared no-tests no-docs -fPIC \
             --prefix="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}" \
             --openssldir="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/ssl"
           make -j"$(nproc)" build_libs
