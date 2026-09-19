@@ -963,7 +963,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: openssl-android-${{ matrix.abi }}
-          key: openssl-staticpic2-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
+          key: openssl-staticpic3-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
 
       - name: Cross-build OpenSSL for ${{ matrix.abi }}
         if: steps.ssl-cache.outputs.cache-hit != 'true'
@@ -992,8 +992,14 @@ jobs:
           # they are assembled. Under `no-shared` OpenSSL builds the "-lib-"
           # objects without -fPIC, so it is forced here for the compiler AND
           # the assembler, and OPENSSL_PIC selects the GOT-relative asm path.
+          # armeabi-v7a additionally needs no-asm: OpenSSL's hand-written
+          # ARMv4 assembly references OPENSSL_armcap_P with R_ARM_REL32,
+          # which lld refuses inside a shared library no matter how the C
+          # files are compiled. The other ABIs keep their assembly.
+          asmopt=""
+          if [ "${{ matrix.abi }}" = "armeabi-v7a" ]; then asmopt="no-asm"; fi
           ./Configure ${{ matrix.openssl_target }} -D__ANDROID_API__=${API_LEVEL} \
-            no-shared no-tests no-docs \
+            no-shared no-tests no-docs $asmopt \
             -fPIC -DOPENSSL_PIC \
             --prefix="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}" \
             --openssldir="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/ssl"
@@ -1003,15 +1009,30 @@ jobs:
           # C files and the perlasm-generated .S files.
           make -j"$(nproc)" build_libs
           make install_sw
-          # Prove it before FreeRDP tries to link: any absolute/REL32
-          # relocation against OPENSSL_armcap_P here is the failure we hit.
-          if command -v readelf >/dev/null 2>&1; then
-            if readelf -r "$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/lib/libcrypto.a" 2>/dev/null \
-                 | grep -E "R_ARM_(ABS32|REL32).*OPENSSL_armcap_P" >/dev/null; then
-              echo "::error::libcrypto.a is not position independent; it cannot be linked into a shared library"
+          # Prove the archive can actually go into a shared library, by
+          # linking a throwaway .so against it. That is the real test - a
+          # relocation listing is not, since REL32 entries against hidden
+          # symbols appear in valid PIC archives too (my earlier check
+          # rejected good builds because of exactly that).
+          lib="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/lib"
+          cat > /tmp/piccheck.c <<'PIC'
+          #include <openssl/evp.h>
+          int piccheck(void) { return EVP_MD_get_size(EVP_sha256()); }
+          PIC
+          case "${{ matrix.abi }}" in
+            arm64-v8a)    cc="aarch64-linux-android${API_LEVEL}-clang" ;;
+            armeabi-v7a)  cc="armv7a-linux-androideabi${API_LEVEL}-clang" ;;
+            x86_64)       cc="x86_64-linux-android${API_LEVEL}-clang" ;;
+            x86)          cc="i686-linux-android${API_LEVEL}-clang" ;;
+          esac
+          "$cc" -shared -fPIC -o /tmp/piccheck.so /tmp/piccheck.c \
+            -I"$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/include" \
+            "$lib/libcrypto.a" -llog 2>/tmp/piccheck.log || {
+              echo "::error::libcrypto.a cannot be linked into a shared library:"
+              tail -20 /tmp/piccheck.log
               exit 1
-            fi
-          fi
+            }
+          echo "libcrypto.a links into a shared library: OK"
 
       # Every edition needs a dependency prefix on mobile: winpr requires a
       # JSON library from FreeRDP 3.31 on, and it must be cross-built (cJSON)
