@@ -776,7 +776,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x86_64, aarch64]
+        # x86_64 only: FreeRDP 3.31 needs GCC 11+, which on CentOS 7 comes
+        # from SCL - and SCL was never published for aarch64. An aarch64
+        # manylinux2014 build is therefore not possible; that architecture is
+        # covered by the 2.28 / 2.34 / 2.39 floors.
+        arch: [x86_64]
         profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
         edition: ${{ fromJSON(needs.plan.outputs.editions) }}
     steps:
@@ -790,42 +794,50 @@ jobs:
           docker pull -q "$image"
           cat > /tmp/inside.sh <<'INSIDE'
           set -e
-          # CentOS 7 is EOL: mirror.centos.org no longer resolves, so every
-          # `yum install` in this image fails. Until now those failures were
-          # hidden by `>/dev/null 2>&1 || true` and only surfaced later as
-          # "Could NOT find OpenSSL" from cmake. Point yum at the vault first.
-          sed -i -e 's/^mirrorlist=/#mirrorlist=/' \
-                 -e 's|^#\?baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|' \
-                 /etc/yum.repos.d/CentOS-*.repo 2>/dev/null || true
-          yum -y clean all >/dev/null 2>&1 || true
-          # CentOS 7's stock GCC 4.8 cannot build FreeRDP 3. Take the newest
-          # toolset the image offers: GCC 10 miscompiles FreeRDP 3.31's
-          # _Pragma() use in winpr/platform.h ("expected end of line before
-          # 'ignored'"), so 11 is tried first.
-          yum -y install centos-release-scl >/dev/null 2>&1 || true
-          # centos-release-scl drops in NEW repo files that point at the dead
-          # mirror as well, so rewrite them too before installing from SCL.
-          sed -i -e 's/^mirrorlist=/#mirrorlist=/' \
-                 -e 's|^#\?baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|' \
-                 /etc/yum.repos.d/CentOS-SCLo-*.repo /etc/yum.repos.d/CentOS-*.repo 2>/dev/null || true
-          yum -y clean all >/dev/null 2>&1 || true
-          for v in 11 10; do
-            yum -y install devtoolset-$v-gcc devtoolset-$v-gcc-c++ devtoolset-$v-binutils >/dev/null 2>&1 || true
-          done
-          for v in 11 10; do
-            d="/opt/rh/devtoolset-$v/root/usr/bin"
-            if [ -x "$d/gcc" ]; then export PATH="$d:$PATH"; export CC="$d/gcc"; export CXX="$d/g++"; break; fi
-          done
-          gcc --version | head -1
-          case "$(gcc -dumpversion)" in
-            4.*|5.*|6.*|7.*|8.*|9.*|10.*)
-              echo "::warning::building with GCC $(gcc -dumpversion); FreeRDP 3.31 needs 11+ for its _Pragma() use in winpr/platform.h" ;;
+          # CentOS 7 is EOL: mirror.centos.org is gone and the stock repo
+          # files (base + the SCLo ones centos-release-scl adds) have only a
+          # mirrorlist, so commenting it out leaves them with no source at
+          # all ("Cannot find a valid baseurl for repo: centos-sclo-sclo").
+          # Write explicit vault repositories instead. x86_64 lives under
+          # /7.9.2009, the other arches under /altarch/7.9.2009.
+          case "$(uname -m)" in
+            x86_64) VAULT="http://vault.centos.org/7.9.2009" ;;
+            *)      VAULT="http://vault.centos.org/altarch/7.9.2009" ;;
           esac
-          yum -y install epel-release >/dev/null 2>&1 || true
-          # these are REQUIRED (FreeRDP will not configure without OpenSSL):
-          # let the output through and fail here rather than in cmake.
+          rm -f /etc/yum.repos.d/*.repo
+          cat > /etc/yum.repos.d/vault.repo <<REPO
+          [base]
+          name=CentOS-7 - Base (vault)
+          baseurl=$VAULT/os/\$basearch/
+          gpgcheck=0
+          enabled=1
+
+          [updates]
+          name=CentOS-7 - Updates (vault)
+          baseurl=$VAULT/updates/\$basearch/
+          gpgcheck=0
+          enabled=1
+
+          [extras]
+          name=CentOS-7 - Extras (vault)
+          baseurl=$VAULT/extras/\$basearch/
+          gpgcheck=0
+          enabled=1
+
+          [sclo-rh]
+          name=CentOS-7 - SCLo rh (vault)
+          baseurl=$VAULT/sclo/\$basearch/rh/
+          gpgcheck=0
+          enabled=1
+          skip_if_unavailable=1
+          REPO
+          yum -y clean all >/dev/null 2>&1 || true
+          yum -y makecache fast >/dev/null 2>&1 || true
+
+          # REQUIRED: FreeRDP will not configure without OpenSSL. Fail here,
+          # with yum's own output, rather than 1500 lines later in cmake.
           yum -y install openssl-devel zlib-devel || {
-            echo "::error::cannot install openssl-devel in manylinux2014 - CentOS 7 repositories unreachable"
+            echo "::error::manylinux2014: cannot install openssl-devel from $VAULT"
             exit 1
           }
           yum -y install krb5-devel libicu-devel alsa-lib-devel \
@@ -835,6 +847,27 @@ jobs:
                            libXfixes-devel libXcursor-devel libXi-devel libXv-devel \
                            libxkbfile-devel libxkbcommon-devel nasm >/dev/null 2>&1 || true
           fi
+
+          # FreeRDP 3.31 needs GCC 11+: 10 (the image default) rejects its
+          # _Pragma() use in winpr/platform.h. GCC 11 comes from SCL, which
+          # CentOS 7 only ever published for x86_64 - so this floor cannot be
+          # built for other architectures. Say so immediately instead of
+          # compiling for half an hour and failing in winpr.
+          yum -y install devtoolset-11-gcc devtoolset-11-gcc-c++ devtoolset-11-binutils \
+            >/dev/null 2>&1 || true
+          if [ -x /opt/rh/devtoolset-11/root/usr/bin/gcc ]; then
+            export PATH="/opt/rh/devtoolset-11/root/usr/bin:$PATH"
+            export CC=/opt/rh/devtoolset-11/root/usr/bin/gcc
+            export CXX=/opt/rh/devtoolset-11/root/usr/bin/g++
+          fi
+          gcc --version | head -1
+          case "$(gcc -dumpversion)" in
+            4.*|5.*|6.*|7.*|8.*|9.*|10.*)
+              echo "::error::manylinux2014 on $(uname -m) offers only GCC $(gcc -dumpversion);"
+              echo "::error::FreeRDP 3.31 needs 11+ (devtoolset-11 is x86_64-only on CentOS 7)."
+              exit 1 ;;
+          esac
+
           export PATH="/opt/python/cp312-cp312/bin:$PATH"
           python --version && gcc --version | head -1 && cmake --version | head -1
           cd /work
@@ -930,7 +963,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: openssl-android-${{ matrix.abi }}
-          key: openssl-static-pic-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
+          key: openssl-staticpic2-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
 
       - name: Cross-build OpenSSL for ${{ matrix.abi }}
         if: steps.ssl-cache.outputs.cache-hit != 'true'
@@ -952,12 +985,33 @@ jobs:
           # libraries (libwinpr3.so ...), and OpenSSL does not imply it under
           # no-shared. Without it the 32-bit ARM link fails with "relocation
           # R_ARM_REL32 cannot be used against symbol 'OPENSSL_armcap_P'".
+          # These archives are linked INTO shared libraries (libwinpr3.so),
+          # so every object must be position independent - including the ARM
+          # perlasm ones (armv4cpuid, sha256-armv4, ...), which reference
+          # OPENSSL_armcap_P with R_ARM_REL32 unless __PIC__ is defined while
+          # they are assembled. Under `no-shared` OpenSSL builds the "-lib-"
+          # objects without -fPIC, so it is forced here for the compiler AND
+          # the assembler, and OPENSSL_PIC selects the GOT-relative asm path.
           ./Configure ${{ matrix.openssl_target }} -D__ANDROID_API__=${API_LEVEL} \
-            no-shared no-tests no-docs -fPIC \
+            no-shared no-tests no-docs \
+            -fPIC -DOPENSSL_PIC \
             --prefix="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}" \
             --openssldir="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/ssl"
+          # NB: no CFLAGS= on the make line - that would REPLACE the flags
+          # Configure computed (optimisation, target, sysroot). The -fPIC and
+          # -DOPENSSL_PIC above are appended by Configure and reach both the
+          # C files and the perlasm-generated .S files.
           make -j"$(nproc)" build_libs
           make install_sw
+          # Prove it before FreeRDP tries to link: any absolute/REL32
+          # relocation against OPENSSL_armcap_P here is the failure we hit.
+          if command -v readelf >/dev/null 2>&1; then
+            if readelf -r "$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/lib/libcrypto.a" 2>/dev/null \
+                 | grep -E "R_ARM_(ABS32|REL32).*OPENSSL_armcap_P" >/dev/null; then
+              echo "::error::libcrypto.a is not position independent; it cannot be linked into a shared library"
+              exit 1
+            fi
+          fi
 
       # Every edition needs a dependency prefix on mobile: winpr requires a
       # JSON library from FreeRDP 3.31 on, and it must be cross-built (cJSON)
