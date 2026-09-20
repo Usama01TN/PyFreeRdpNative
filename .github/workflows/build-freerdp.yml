@@ -1,4 +1,5 @@
 name: build-freerdp
+
 # Build the complete native stack on every platform we ship:
 #
 #   1. scripts/build_deps.py    libusb, OpenH264, FFmpeg (pinned, hashed;
@@ -1097,6 +1098,12 @@ jobs:
           $nm -D --defined-only $d/libfreerdp-server3.so | grep -q cliprdr_server_context_new
           $nm -D --defined-only $d/libfreerdp-server3.so | grep -q rdpgfx_server_context_new
           echo "server channels present"
+          # libc++_shared.so belongs to the NDK, not to Android. If it is
+          # missing the device falls back to /system, which on some phones
+          # pulls in a broken libunwind.so ("cannot locate symbol
+          # XzUnpacker_Construct").
+          ls $d/libc++_shared.so >/dev/null 2>&1 || {
+            echo "::error::libc++_shared.so missing from $d"; exit 1; }
           readelf="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           $readelf -d $d/libwinpr3.so | grep -q "libkrb5" && { echo "::error::libwinpr3 links krb5 on Android (unsupported)"; exit 1; }
           # OpenSSL, cJSON, OpenH264 and FFmpeg are linked STATICALLY into the
