@@ -1,8 +1,6 @@
 """
 Work out WHY a connection fails, layer by layer.
-
     python -m pyfreerdpnative.examples.diagnose <host> [port] [user] [password]
-
 Checks, in order:
   1. DNS resolution
   2. TCP connect (is the port reachable at all from this device?)
@@ -136,7 +134,6 @@ def main(argv=None):
     if not user:
         print("\n(no user given - stopping before the authenticated connect)")
         return 0
-
     step(5, "freerdp_connect")
     import ctypes
 
