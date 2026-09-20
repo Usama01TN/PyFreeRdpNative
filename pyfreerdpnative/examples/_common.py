@@ -51,6 +51,13 @@ def apply_settings(api, ctx, host, user, password, port, software_gdi=False):
     api.freerdp_settings_set_string(s, KEY.FreeRDP_Username, user.encode())
     api.freerdp_settings_set_string(s, KEY.FreeRDP_Password, password.encode())
     api.freerdp_settings_set_bool(s, KEY.FreeRDP_IgnoreCertificate, True)
+    # Most Windows hosts require NLA (CredSSP). Ask for it explicitly rather
+    # than relying on defaults, and allow a slow link time to handshake -
+    # the default timeouts are tight for mobile data.
+    api.freerdp_settings_set_bool(s, KEY.FreeRDP_NlaSecurity, True)
+    api.freerdp_settings_set_bool(s, KEY.FreeRDP_TlsSecurity, True)
+    api.freerdp_settings_set_uint32(s, KEY.FreeRDP_TcpConnectTimeout, 30000)
+    api.freerdp_settings_set_uint32(s, KEY.FreeRDP_TcpAckTimeout, 30000)
     if software_gdi:
         api.freerdp_settings_set_bool(s, KEY.FreeRDP_SoftwareGdi, True)
         api.freerdp_settings_set_uint32(s, KEY.FreeRDP_ColorDepth, 32)

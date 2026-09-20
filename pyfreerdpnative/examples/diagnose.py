@@ -1,6 +1,8 @@
 """
 Work out WHY a connection fails, layer by layer.
+
     python -m pyfreerdpnative.examples.diagnose <host> [port] [user] [password]
+
 Checks, in order:
   1. DNS resolution
   2. TCP connect (is the port reachable at all from this device?)
@@ -122,7 +124,24 @@ def main(argv=None):
     finally:
         sock.close()
 
-    step(4, "FreeRDP libraries")
+    step(4, "TLS handshake")
+    try:
+        import ssl
+        raw = socket.create_connection((host, port), timeout=15)
+        x224_negotiate(raw, user)                  # server switches to TLS after this
+        ctxt = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctxt.check_hostname = False
+        ctxt.verify_mode = ssl.CERT_NONE
+        tls = ctxt.wrap_socket(raw, server_hostname=host)
+        ok("{0}, cipher {1}".format(tls.version(), tls.cipher()[0]))
+        tls.close()
+    except Exception as exc:
+        fail(str(exc))
+        print("\n-> TLS to this server fails from this device. If step 2 and 3")
+        print("   passed, the link is dropping mid-handshake (common on mobile")
+        print("   data) or a middlebox is interfering. Retry on WiFi.")
+
+    step(5, "FreeRDP libraries")
     try:
         from pyfreerdpnative import load
         api = load()
@@ -134,7 +153,8 @@ def main(argv=None):
     if not user:
         print("\n(no user given - stopping before the authenticated connect)")
         return 0
-    step(5, "freerdp_connect")
+
+    step(6, "freerdp_connect")
     import ctypes
 
     from pyfreerdpnative.freerdp import client as CLIENT
@@ -151,6 +171,18 @@ def main(argv=None):
     api.freerdp_settings_set_string(st, KEY.FreeRDP_Username, user.encode())
     api.freerdp_settings_set_string(st, KEY.FreeRDP_Password, password.encode())
     api.freerdp_settings_set_bool(st, KEY.FreeRDP_IgnoreCertificate, True)
+    # This server asked for NLA (step 3). Enable the security layers
+    # explicitly and give the handshake room on a slow mobile link.
+    for key, val in ((KEY.FreeRDP_NlaSecurity, True),
+                     (KEY.FreeRDP_TlsSecurity, True),
+                     (KEY.FreeRDP_RdpSecurity, False)):
+        api.freerdp_settings_set_bool(st, key, val)
+    for key, ms in ((KEY.FreeRDP_TcpConnectTimeout, 30000),
+                    (KEY.FreeRDP_TcpAckTimeout, 30000)):
+        try:
+            api.freerdp_settings_set_uint32(st, key, ms)
+        except Exception:
+            pass
     if api.freerdp_connect(ctx.contents.instance):
         ok("connected")
         api.freerdp_disconnect(ctx.contents.instance)
