@@ -2680,7 +2680,52 @@ def build_android(src, abi, api_level, jobs, profile, enable_channels=None,
             if not os.path.exists(dst):
                 shutil.copy2(so, dst)
                 print("[android] {0}".format(dst))
+
+    # libc++_shared.so is NOT part of Android: it belongs to the NDK and must
+    # travel with the libraries that use it. Without it the loader falls back
+    # to whatever /system offers, which on some devices drags in a broken
+    # /system/lib64/libunwind.so ("cannot locate symbol
+    # XzUnpacker_Construct"). Ship the NDK's copy.
+    stl = copy_android_stl(target, abi)
+    if stl:
+        print("[android:{0}] {1}".format(abi, stl))
+    else:
+        print("::warning::libc++_shared.so not found in the NDK; the package "
+              "will depend on the device's copy")
     return target
+
+
+# The NDK's libc++_shared.so lives under the ABI's triple.
+ANDROID_STL_TRIPLES = {
+    "arm64-v8a": "aarch64-linux-android",
+    "armeabi-v7a": "arm-linux-androideabi",
+    "x86_64": "x86_64-linux-android",
+    "x86": "i686-linux-android",
+    "riscv64": "riscv64-linux-android",
+}
+
+
+def copy_android_stl(target, abi):
+    """
+    Copy libc++_shared.so for exactly this ABI out of the NDK into `target`.
+    Returns the destination path, or None when the NDK cannot be located.
+    """
+    ndk = os.environ.get("ANDROID_NDK_ROOT") or os.environ.get("ANDROID_NDK_HOME")
+    triple = ANDROID_STL_TRIPLES.get(abi)
+    if not ndk or not triple:
+        return None
+    patterns = [
+        os.path.join(ndk, "toolchains", "llvm", "prebuilt", "*", "sysroot",
+                     "usr", "lib", triple, "libc++_shared.so"),
+        os.path.join(ndk, "sources", "cxx-stl", "llvm-libc++", "libs", abi,
+                     "libc++_shared.so"),
+    ]
+    for pattern in patterns:
+        for src in sorted(glob.glob(pattern)):
+            dst = os.path.join(target, "libc++_shared.so")
+            shutil.copy2(src, dst)
+            return dst
+    return None
 
 
 # ---------------------------------------------------------------------------

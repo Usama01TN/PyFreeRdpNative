@@ -70,3 +70,14 @@ def test_mobile_static_deps_are_position_independent():
     src = open(os.path.join(SCRIPTS, "build_deps.py")).read()
     assert "--with-pic" in src, "libusb must be built with -fPIC"
     assert "no-shared" not in src or True   # OpenSSL flags live in the workflow
+
+
+def test_android_ships_the_ndk_stl():
+    """
+    libc++_shared.so must travel with the Android libraries: it is part of
+    the NDK, not of Android. Falling back to /system pulls in that device's
+    libunwind, which is broken on some phones.
+    """
+    src = open(os.path.join(SCRIPTS, "build_freerdp.py")).read()
+    assert "copy_android_stl" in src
+    assert "libc++_shared.so" in src

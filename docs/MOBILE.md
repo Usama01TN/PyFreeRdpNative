@@ -46,8 +46,10 @@ libopenh264 wrapper - FreeRDP uses OpenH264 directly and FFmpeg keeps its own
 software H.264 decoder. Every static dependency is built position
 independent (`-fPIC` / `--with-pic`), since they all end up inside a shared
 library; libusb needs `--with-pic` explicitly because libtool otherwise
-emits non-PIC objects for the static archive. `_libs` then contains only FreeRDP's own libraries plus
-`libc++_shared.so`, none of whose sonames a host process is likely to hold.
+emits non-PIC objects for the static archive. `_libs` then contains only FreeRDP's own libraries plus the NDK's
+`libc++_shared.so` (copied in by the build - Android itself does not provide
+it, and falling back to `/system` drags in some devices' broken
+`libunwind.so`), none of whose sonames a host process is likely to hold.
 
 ### Termux / Pydroid 3
 
