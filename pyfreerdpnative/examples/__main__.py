@@ -10,6 +10,7 @@ SUMMARY = {
     "send_input": "keyboard and mouse events",
     "screenshot": "save the remote desktop as screenshot.bmp",
     "list_api": "search prototypes and constants, see which library exports what",
+    "diagnose": "find out which layer a failing connection breaks at",
 }
 
 

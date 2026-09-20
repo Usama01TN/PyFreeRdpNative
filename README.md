@@ -70,7 +70,7 @@ Every build variant is its own pip package. They all provide the same
 | | Tags | Notes |
 |---|---|---|
 | Windows | `win_amd64`, `win32`, `win_arm64` | Windows 10+; 32-bit Python needs `win32` |
-| Linux | `manylinux_2_39_x86_64`, `manylinux_2_39_aarch64` | glibc 2.39+ (Ubuntu 24.04, Fedora 40, Debian 13); system libraries such as cJSON, ICU, OpenSSL, krb5 are vendored |
+| Linux | `manylinux_2_39_*`, `manylinux_2_34_*`, `manylinux_2_28_*` (x86_64 and aarch64) | three glibc floors: 2.39, 2.34 and 2.28 - pip picks the highest your system satisfies, covering every supported distribution back to RHEL 8 / Ubuntu 18.04. (glibc 2.17 is not possible: FreeRDP 3.31 needs a C23 compiler and OpenSSL 1.1+.) Alpine/musl is not covered. System libraries are vendored |
 | macOS | `macosx_11_0_arm64`, `macosx_11_0_x86_64` | |
 | Android | `android_24_arm64_v8a`, `_armeabi_v7a`, `_x86_64`, `_x86` | PEP 738 tags; installed by cross-install into an app, or retagged for Termux/Pydroid — see [docs/MOBILE.md](docs/MOBILE.md) |
 | iOS | `ios_13_0_arm64_iphoneos`, `_iphonesimulator` | PEP 730 tags; `.dylib`s to embed in a signed app bundle — see [docs/MOBILE.md](docs/MOBILE.md) |
@@ -143,6 +143,7 @@ python -m pyfreerdpnative.examples --source screenshot     # read the code
 | `send_input` | keyboard and mouse events |
 | `screenshot` | software GDI framebuffer -> BMP |
 | `list_api` | search prototypes and constants, see which library exports what |
+| `diagnose` | find out which layer a failing connection breaks at (DNS, TCP, RDP negotiation, TLS, connect) |
 
 Each is a plain module with a `main(argv)` function, so it can also be
 imported and called, or copied as a starting point:

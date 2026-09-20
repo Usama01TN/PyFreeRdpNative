@@ -14,6 +14,6 @@ Each example is a plain module with a main(argv) function; the source is the
 point, so read it with `python -m pyfreerdpnative.examples --source NAME`.
 """
 
-EXAMPLES = ("basic_connect", "send_input", "screenshot", "list_api")
+EXAMPLES = ("basic_connect", "send_input", "screenshot", "list_api", "diagnose")
 
 __all__ = ["EXAMPLES"]
