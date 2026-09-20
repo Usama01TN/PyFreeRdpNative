@@ -1,4 +1,5 @@
 name: build-freerdp
+
 # Build the complete native stack on every platform we ship:
 #
 #   1. scripts/build_deps.py    libusb, OpenH264, FFmpeg (pinned, hashed;
