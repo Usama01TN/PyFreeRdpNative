@@ -1258,28 +1258,39 @@ OPUS_FIXED_HASH = ("SHA256=9480e329e989f70d69886ded470c7f8cfe6c0667"
 
 def _patch_opus_download(src):
     """
-    client/iOS/cmake/ExternalOpus.cmake downloads
+    Make the iOS super-build's opus download verify.
 
-        https://github.com/xiph/opus/archive/refs/tags/${OPUS_VERSION}.tar.gz
+    The URL and the pinned hash have disagreed in every release so far:
 
-    with OPUS_VERSION="1.5.2" from cmake/DepVersions.cmake. xiph's tag is
-    v1.5.2 - the un-prefixed one no longer exists - so the download fails
-    with HTTP 404 ("Each download failed!"). Point it at the real tag and
-    update the pinned hash to match that tarball.
+      * 3.31.1 fetched .../archive/refs/tags/${OPUS_VERSION}.tar.gz, but
+        xiph's tag is v1.5.2, so the un-prefixed name 404s.
+      * 3.32.1 fetches .../releases/download/v${OPUS_VERSION}/opus-...tar.gz
+        and pins THAT tarball's hash - a consistent pair. The previous
+        version of this patch rewrote only the hash (to the archive's),
+        which broke the pair and made every download fail with
+        "Hash mismatch, removing... Each download failed!".
+
+    Rather than track which form this release ships, rewrite whatever opus
+    URL is there to the v-tagged archive and pin the hash of exactly that
+    tarball. Both are then guaranteed to agree.
     """
+    import re
     ext = os.path.join(src, "client", "iOS", "cmake", "ExternalOpus.cmake")
     deps = os.path.join(src, "cmake", "DepVersions.cmake")
-    if not os.path.isfile(ext) or not os.path.isfile(deps):
+    if not os.path.isfile(ext):
         return
+    wanted = "https://github.com/xiph/opus/archive/refs/tags/v${OPUS_VERSION}.tar.gz"
     with open(ext) as fh:
         text = fh.read()
-    old_url = "refs/tags/${OPUS_VERSION}.tar.gz"
-    if old_url in text:
-        text = text.replace(old_url, "refs/tags/v${OPUS_VERSION}.tar.gz", 1)
+    # any https URL that mentions opus, in whichever form this release uses
+    new_text, n = re.subn(r"https://[^\s)]*?opus[^\s)]*?\.tar\.gz", wanted, text)
+    if n and new_text != text:
         with open(ext, "w") as fh:
-            fh.write(text)
-        print("[patch] client/iOS ExternalOpus: tag -> v${OPUS_VERSION}")
-    import re
+            fh.write(new_text)
+        print("[patch] client/iOS ExternalOpus: opus URL -> v-tagged archive "
+              "({0} occurrence{1})".format(n, "" if n == 1 else "s"))
+    if not os.path.isfile(deps):
+        return
     with open(deps) as fh:
         dtext = fh.read()
     m = re.search(r'set\(OPUS_HASH "([^"]+)"\)', dtext)
@@ -1288,9 +1299,7 @@ def _patch_opus_download(src):
                               'set(OPUS_HASH "{0}")'.format(OPUS_FIXED_HASH), 1)
         with open(deps, "w") as fh:
             fh.write(dtext)
-        print("[patch] cmake/DepVersions: OPUS_HASH updated for the v-tagged "
-              "tarball")
-
+        print("[patch] cmake/DepVersions: OPUS_HASH -> the v-tagged archive's")
 
 def patch_source_tree(src, host_os, profile, windows_shadow=None):
     """
