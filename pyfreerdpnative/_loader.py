@@ -5,7 +5,7 @@ ctypes and the struct/constant definitions from the header mirror apply.
 
     from pyfreerdpnative import load
     api = load()                      # finds pyfreerdpnative/_libs automatically
-    api.freerdp_get_version_string()  # -> b'3.31.1'
+    api.freerdp_get_version_string()  # -> b'3.32.1'
     ctx = api.freerdp_client_context_new(ctypes.byref(entry))
 
 `api.<name>` resolves the function in whichever library exports it (winpr,
