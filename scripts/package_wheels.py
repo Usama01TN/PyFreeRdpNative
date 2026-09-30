@@ -6,7 +6,7 @@ Package the build-freerdp artifacts into installable wheels.
 
 `artifacts/` is where you unpacked the build-freerdp run (one directory or
 archive per platform, named like
-freerdp-3.31.1-linux-x86_64-full-media). Each becomes ONE wheel that works
+freerdp-3.32.1-linux-x86_64-full-media). Each becomes ONE wheel that works
 on every Python version, because pyfreerdpnative loads the libraries with ctypes
 rather than linking against libpython - so the wheels are tagged
 `py3-none-<platform>` instead of `cp312-cp312-<platform>`.

@@ -5,7 +5,7 @@ Two workflows; the second consumes the first.
 ## `build-freerdp.yml` — build, generate, package, release
 
 Runs on push to `main`, on release, and manually. For the FreeRDP tag it is
-given (default `3.31.1`) it:
+given (default `3.32.1`) it:
 
 1. builds the libraries for every desktop platform, Android ABI and iOS
    platform, in every `profile × edition` combination selected;

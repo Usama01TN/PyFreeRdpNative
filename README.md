@@ -44,13 +44,13 @@ so there is no per-interpreter build):
 
 ```bash
 pip install pyfreerdpnative \
-  --find-links https://github.com/Usama01TN/PyFreeRdpNative/releases/expanded_assets/freerdp-libs-3.31.1
+  --find-links https://github.com/Usama01TN/PyFreeRdpNative/releases/expanded_assets/freerdp-libs-3.32.1
 ```
 
 pip picks the wheel for your OS and architecture. Or install a file directly:
 
 ```bash
-pip install https://github.com/Usama01TN/PyFreeRdpNative/releases/download/freerdp-libs-3.31.1/pyfreerdpnative-0.2.0-py3-none-win_amd64.whl
+pip install https://github.com/Usama01TN/PyFreeRdpNative/releases/download/freerdp-libs-3.32.1/pyfreerdpnative-0.2.0-py3-none-win_amd64.whl
 ```
 
 ### Variants
@@ -119,7 +119,7 @@ whichever library exports it, with `restype`/`argtypes` from the header:
 api.library_of("freerdp_connect")          # 'freerdp3'
 api.library_of("Stream_New")               # 'winpr3'
 api.libs["freerdp-client3"]                # the raw ctypes.CDLL, if you need it
-api.version()                              # '3.31.1'
+api.version()                              # '3.32.1'
 ```
 
 Because argument types are enforced, passing a plain `int` where a
@@ -171,7 +171,7 @@ basic_connect.main(["basic_connect", "10.0.0.5", "alice", "secret"])
 pycparser, and emits Python. It handles the things a naive translation gets
 wrong — `ALIGN64` fields, `#pragma pack`, `sizeof()` in array bounds, ctypes'
 array-type caching — and the output is checked against gcc: **767 of 767 struct
-sizes match** for FreeRDP 3.31.1. CI regenerates the bindings from the pinned
+sizes match** for FreeRDP 3.32.1. CI regenerates the bindings from the pinned
 FreeRDP tag on every push and fails if the committed package differs, so
 layouts can never drift from the libraries.
 
@@ -180,7 +180,7 @@ pip install pycparser
 python scripts/gen_bindings.py \
     --include <freerdp>/include --include <freerdp>/winpr/include \
     --include <build>/include   --include <build>/winpr/include \
-    --out pyfreerdpnative --version 3.31.1
+    --out pyfreerdpnative --version 3.32.1
 ```
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -205,7 +205,7 @@ ruff check scripts tests pyfreerdpnative/examples
 ## Versioning
 
 The package version tracks the Python layer. The FreeRDP version is the
-release tag (`freerdp-libs-3.31.1`) and `api.version()` at runtime. Struct
+release tag (`freerdp-libs-3.32.1`) and `api.version()` at runtime. Struct
 layouts are specific to a FreeRDP release: never mix a wheel's `pyfreerdpnative`
 with libraries from a different FreeRDP build.
 

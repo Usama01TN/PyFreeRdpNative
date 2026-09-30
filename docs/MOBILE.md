@@ -19,7 +19,7 @@ Cross-install from a desktop into the app's Python site-packages:
 ```bash
 pip install --platform android_24_arm64_v8a --only-binary :all: \
     --target app/src/main/python pyfreerdpnative \
-    --find-links https://github.com/Usama01TN/PyFreeRdpNative/releases/expanded_assets/freerdp-libs-3.31.1
+    --find-links https://github.com/Usama01TN/PyFreeRdpNative/releases/expanded_assets/freerdp-libs-3.32.1
 ```
 
 Then `load()` finds `pyfreerdpnative/_libs` inside the app and `dlopen`s from
