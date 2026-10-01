@@ -2072,7 +2072,8 @@ jobs:
           # merged (every platform would collapse into one _libs). Each
           # artifact lands in its own folder and is zipped below. Wheels come
           # from the per-file artifacts, one file each.
-          pattern: "{freerdp-*,pyfreerdpnative-*,pyfreerdpnative_*}"
+          # libraries, wheels/sdists, the aFreeRDP APKs and the iFreeRDP app
+          pattern: "{freerdp-*,pyfreerdpnative-*,pyfreerdpnative_*,afreerdp-apk-*,ifreerdp-*}"
           path: staging/
 
       - name: Turn artifacts into release files
@@ -2094,8 +2095,12 @@ jobs:
             if [ -d "$d/_libs" ] || [ -d "$d/_bin" ]; then
               # a library package: zip the directory, named after the artifact
               (cd "$d" && zip -qr "../../release/$name.zip" .)
+            elif { has_app=false; for a in "$d"/*.app "$d"/*/*.app; do [ -d "$a" ] && has_app=true; done; $has_app; }; then
+              # the iFreeRDP .app is a directory tree: ship it as one zip
+              # (e.g. ifreerdp-3.32.1-OS64.zip), unsigned unless --sign-ios-app
+              (cd "$d" && zip -qr --symlinks "../../release/$name.zip" .)
             else
-              # a wheel / sdist / app bundle artifact: already files
+              # wheels, sdists, the aFreeRDP .apk files: already plain files
               find "$d" -maxdepth 1 -type f -exec mv {} release/ \;
             fi
           done
