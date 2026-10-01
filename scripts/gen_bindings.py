@@ -121,10 +121,8 @@ CPP_DEFINES = [
     "WINPR_PRAGMA_DIAG_IGNORED_UNKNOWN_PRAGMAS=",
     "WINPR_PRAGMA_UNROLL_LOOP(x)=",
     "WINPR_RESTRICT=", "WINPR_STATIC_INLINE=static inline",
-    "WINPR_ASSERTING_INT_CAST(t,v)=((t)(v))",
-    "WINPR_CXX_COMPAT_CAST(t,v)=((t)(v))",
+    # the winpr cast macros come from the shim winpr/cast.h (see SHIM_HEADERS)
     "WINPR_STATIC_CAST(t,v)=((t)(v))",
-    "WINPR_REINTERPRET_CAST(t,v)=((t)(v))",
     "WINPR_FUNC_ATTR_MALLOC(x,y)=",
     "WINPR_C_API_ENTRY=", "FREERDP_C_API_ENTRY=",
     # ALIGN64 fields. FreeRDP defines ALIGN64 as DECLSPEC_ALIGN(8) ->
@@ -173,6 +171,41 @@ SEPARATE_TUS = [["winpr/asn1.h"]]
 # are never emitted; struct layouts and prototypes do not depend on them.
 ENVIRONMENT_HEADERS = re.compile(r"(^|/)(freerdp|winpr)/(buildflags|build-config|config)\.h$")
 ENVIRONMENT_MACROS = re.compile(r"^(FREERDP|WINPR)_(GIT_REVISION|BUILD_CONFIG)$|^WINPR_HAVE_")
+
+# Headers REPLACED for the parser. winpr/cast.h defines its checked casts as
+# GCC statement-expressions (`__extension__({ ... })`) whenever __GNUC__ is
+# defined - which cpp always does - and FreeRDP 3.32 started using them in
+# static inline functions of public headers (winpr/stream.h). pycparser does
+# not parse statement-expressions, and the file uses #pragma once so there is
+# no guard to pre-set. A shim copy with plain casts, in an include directory
+# searched before the real ones, keeps the real file out of the translation
+# unit altogether. Layouts are unaffected: nothing here touches packing.
+SHIM_HEADERS = {
+    "winpr/cast.h": """/* gen_bindings.py shim: plain casts instead of statement-expressions */
+#pragma once
+#define WINPR_ARCH_SUPPORTED 1
+#define WINPR_CXX_COMPAT_CAST(t, val) ((t)(val))
+#define WINPR_PACKED_ALIGN_CAST(t, val) ((t)(val))
+#define WINPR_REINTERPRET_CAST(ptr, srcType, dstType) ((dstType)(ptr))
+#define WINPR_CAST_CONST_PTR_AWAY(ptr, dstType) ((dstType)(ptr))
+#define WINPR_FUNC_PTR_CAST(ptr, dstType) ((dstType)(uintptr_t)(ptr))
+#define WINPR_ASSERTING_INT_CAST(type, var) ((type)(var))
+""",
+}
+
+
+def install_shims(scratch):
+    """Write SHIM_HEADERS under <scratch>/shim and return that directory."""
+    root = os.path.join(scratch, "shim")
+    for rel, text in SHIM_HEADERS.items():
+        path = os.path.join(root, *rel.split("/"))
+        d = os.path.dirname(path)
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        with open(path, "w") as fh:
+            fh.write(text)
+    return root
+
 
 # Headers that cannot be included standalone / are not public API.
 EXCLUDE_HEADERS = re.compile(
@@ -1578,6 +1611,11 @@ def main():
     macro_files = {}
     parser = c_parser.CParser()
     scratch = tempfile.mkdtemp(prefix="gen_bindings_")
+    shim = install_shims(scratch)
+    # searched BEFORE the real include dirs so the shim headers win; it is
+    # also an include dir for origin attribution, which is harmless (the
+    # shimmed headers are not mirrored)
+    includes = [shim] + list(includes)
     for idx, headers in enumerate(tus):
         tu = PRELUDE + "\n".join("#include <{0}>".format(r) for r in headers)
         # scratch files live in a temp dir, never inside the output package

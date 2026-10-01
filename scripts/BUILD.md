@@ -1,9 +1,7 @@
 # Native build system
 
-> **FreeRDP 3.32.1.** The generated `pyfreerdpnative/` package in the
-> repository is still the 3.31.1 one until CI regenerates it: the
-> `bindings-up-to-date` job rebuilds it from the pinned tag on the first push
-> to `main` and commits the result. Nothing to do by hand.
+> **FreeRDP 3.32.1.** The generated `pyfreerdpnative/` package is the
+> 3.32.1 one. The `bindings-up-to-date` job re-checks it on every push.
 
 
 > This document covers building the **FreeRDP libraries**. The Python side

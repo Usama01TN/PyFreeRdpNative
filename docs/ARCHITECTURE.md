@@ -31,6 +31,13 @@ uses GCC extensions pycparser cannot parse), and walks the resulting AST.
 | function pointer typedef | `ctypes.CFUNCTYPE(res, args…)` |
 | `FREERDP_API R f(A, B)` | `PROTOTYPES['f'] = (R, [A, B], variadic)` |
 
+One header is replaced for the parser: `winpr/cast.h` defines its checked
+casts as GCC statement-expressions (`__extension__({ ... })`), which pycparser
+cannot parse, and FreeRDP 3.32 uses them inside `static inline` functions of
+public headers. A shim with plain casts (`SHIM_HEADERS`) sits in an include
+directory searched before the real ones; layouts are unaffected since the
+shim touches no packing or alignment.
+
 Headers that cannot coexist in one translation unit (`winpr/asn1.h` declares
 an enum `ER_TAG_BOOLEAN`; `freerdp/crypto/er.h` `#define`s the same name) are
 parsed in a separate unit and merged.
