@@ -1,0 +1,2128 @@
+name: build-freerdp
+
+# Build the complete native stack on every platform we ship:
+#
+#   1. scripts/build_deps.py    libusb, OpenH264, FFmpeg (pinned, hashed;
+#                               vcpkg manifest on Windows) -> build/deps/<label>
+#   2. scripts/build_freerdp.py libfreerdp / -client / -server / winpr with all
+#                               client+server channels, H.264 (OpenH264 +
+#                               FFmpeg), DSP audio codecs, USB + camera
+#                               redirection, and the executables
+#   3. scripts/validate_build.py cold-loads every library, checks channel
+#                               symbols, round-trips H.264/AAC through the
+#                               staged ffmpeg+openh264, probes libusb, smoke-
+#                               tests every executable, and (Linux) runs a real
+#                               sfreerdp-server <-> xfreerdp loopback session
+#
+# and publishes pyfreerdpnative/_libs (+ _bin) as downloadable artifacts.
+#
+# Every platform x architecture is built in profiles x editions:
+#
+#   editions (media stack; scripts/build_deps.py --edition):
+#     standard   FreeRDP's built-in codecs only, no third-party media libs
+#     ffmpeg     FFmpeg (LGPL): H.264/MJPEG decode, AAC/Opus, swscale; + libusb
+#     openh264   OpenH264: H.264 encode + decode; + libusb
+#     media      FFmpeg (with libopenh264) + OpenH264 + libusb
+#
+# Two independent build profiles are produced for every platform:
+#   minimal  size-optimised libraries only (MinSizeRel, stripped, SONAME-only
+#            files, no media deps, no executables) - what the wheel ships
+#   full     feature-complete: FFmpeg + OpenH264 + libusb, all channels incl.
+#            urbdrc/rdpecam, proxy + sample servers, winpr tools, platform
+#            client(s), sdl-freerdp where SDL3 is available, shadow on Linux
+# The per-platform meaning of "full" is defined once, in
+# scripts/build_freerdp.py (FULL_PLATFORM), and documented in docs/BUILD.md.
+#
+# This is NOT the wheel pipeline (see wheels.yml). It produces raw native
+# libraries - the contents of pyfreerdpnative/_libs/ - so they can be:
+#   * inspected / smoke-tested independently of Python packaging,
+#   * downloaded by users who want prebuilt FreeRDP without a wheel,
+#   * attached to a GitHub release with stable URLs.
+#
+# Triggers:
+#   * workflow_dispatch  - pick FreeRDP ref, profile, optional channel
+#                          overrides, and whether to publish a release
+#   * push to main       - only when the build scripts or this workflow
+#                          change; also refreshes the rolling pre-release
+#                          freerdp-libs-<freerdp_ref> with the new artifacts
+#   * release published  - (release.yml cuts v* releases) builds + attaches
+#                          libs to a release named freerdp-libs-<freerdp_ref>
+#
+# Targets: Linux x86_64/aarch64, macOS arm64/x86_64, Windows x64/x86/arm64,
+# Android arm64-v8a/x86_64, iOS device (arm64) + arm64 simulator.
+#
+# Every job writes its direct artifact download URL into the run's
+# Summary tab; the final `links` job collects them all into one table.
+
+on:
+  workflow_dispatch:
+    inputs:
+      freerdp_ref:
+        description: "FreeRDP git ref (tag/branch/sha) to build"
+        required: false
+        default: "3.32.1"
+      profiles:
+        description: "Which build profiles to produce"
+        required: false
+        default: "both"
+        type: choice
+        options: [both, minimal, full]
+      editions:
+        description: "Which media editions to produce"
+        required: false
+        default: "all"
+        type: choice
+        options: [all, standard, ffmpeg, openh264, media]
+      win_target:
+        description: "Minimum Windows version for the Windows builds (8.1/7 are UNTESTED)"
+        required: false
+        default: "10"
+        type: choice
+        options: ["10", "8.1", "7"]
+      win_crt:
+        description: "CRT for legacy win_target: dynamic = needs the VC++ redistributable (pair with win_toolset v142); static = self-contained DLLs, deps must match"
+        required: false
+        default: "dynamic"
+        type: choice
+        options: ["dynamic", "static"]
+      win_toolset:
+        description: "MSVC toolset for legacy win_target (v142 = VS2019, needed for loadable DLLs; blank = static .lib build)"
+        required: false
+        default: ""
+        type: string
+      apk_abis:
+        description: "Android ABIs for the APK (comma separated, or 'all' to add riscv64)"
+        required: false
+        default: "armeabi-v7a,arm64-v8a,x86,x86_64"
+        type: string
+      wheels:
+        description: "Package the built libraries into Python wheels"
+        required: false
+        default: true
+        type: boolean
+      wheel_profile:
+        description: "(unused since every variant is packaged under its own name; kept for compatibility)"
+        required: false
+        default: "full"
+        type: choice
+        options: [full, minimal]
+      wheel_edition:
+        description: "(unused since every variant is packaged under its own name; kept for compatibility)"
+        required: false
+        default: "media"
+        type: choice
+        options: [media, ffmpeg, openh264, standard]
+      ios_linkage:
+        description: "iOS library type: dynamic (.dylib, embed in a signed app / framework) or static (.a archives)"
+        required: false
+        default: "dynamic"
+        type: choice
+        options: ["dynamic", "static"]
+      mobile_apps:
+        description: "Also build the aFreeRDP APK and the iFreeRDP iOS app"
+        required: false
+        default: true
+        type: boolean
+      windows_shadow:
+        description: "Build the Windows shadow server (on by default; untick to skip the unmaintained DXGI subsystem)"
+        required: false
+        default: true
+        type: boolean
+      enable_channels:
+        description: "Extra channels to enable, space separated (e.g. 'urbdrc printer')"
+        required: false
+        default: ""
+      publish_release:
+        description: "Attach libraries to a GitHub release (freerdp-libs-<ref>)"
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - "scripts/build_freerdp.py"
+      - "scripts/build_deps.py"
+      - "scripts/validate_build.py"
+      - "scripts/vcpkg.json"
+      - ".github/workflows/build-freerdp.yml"
+  release:
+    types: [published]
+
+concurrency:
+  group: build-freerdp-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  # Keep Python's own output in order with cmake's in the job log.
+  PYTHONUNBUFFERED: "1"
+  # Defaults for non-dispatch triggers. Dispatch inputs override below.
+  FREERDP_REF: ${{ inputs.freerdp_ref || '3.32.1' }}
+  PROFILES: ${{ inputs.profiles || 'both' }}
+  EDITIONS: ${{ inputs.editions || 'all' }}
+  # Default (non-dispatch triggers, and the ticked box) is to build it.
+  WINDOWS_SHADOW: ${{ (github.event_name != 'workflow_dispatch' || inputs.windows_shadow) && 'yes' || 'no' }}
+  MOBILE_APPS: ${{ (github.event_name != 'workflow_dispatch' || inputs.mobile_apps) && 'yes' || 'no' }}
+  WHEELS: ${{ (github.event_name != 'workflow_dispatch' || inputs.wheels) && 'yes' || 'no' }}
+  # glibc 2.17 (manylinux2014 / CentOS 7) is NOT buildable for FreeRDP
+  # 3.31 - see the linux-legacy job for the two blocking reasons. Left
+  # here so it can be tried again when FreeRDP's requirements change.
+  LEGACY_LINUX: ${{ inputs.legacy_linux || 'no' }}
+  IOS_LINKAGE: ${{ inputs.ios_linkage || 'dynamic' }}
+  ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Decide which profiles to build. workflow_dispatch can pick one; every
+  # other trigger builds both. (A job-level `if:` cannot see `matrix`, so the
+  # selection is done here and fed to the matrices with fromJSON.)
+  # ---------------------------------------------------------------------------
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    outputs:
+      profiles: ${{ steps.sel.outputs.profiles }}
+      editions: ${{ steps.sel.outputs.editions }}
+      # glibc 2.17 (manylinux2014) wheels. ON by default; set LEGACY_LINUX=no
+      # in the workflow env block to skip it. (There is no dispatch input:
+      # the event already declares 15, above GitHub's limit of 10.) The image is
+      # end-of-life, so the job may not fail the run - see continue-on-error.
+      legacy_linux: ${{ steps.sel.outputs.legacy_linux }}
+    steps:
+      - id: sel
+        shell: bash
+        run: |
+          case "${PROFILES}" in
+            minimal) echo 'profiles=["minimal"]'        >> "$GITHUB_OUTPUT" ;;
+            full)    echo 'profiles=["full"]'           >> "$GITHUB_OUTPUT" ;;
+            *)       echo 'profiles=["minimal","full"]' >> "$GITHUB_OUTPUT" ;;
+          esac
+          case "${EDITIONS}" in
+            standard|ffmpeg|openh264|media) echo "editions=[\"${EDITIONS}\"]" >> "$GITHUB_OUTPUT" ;;
+            *) echo 'editions=["standard","ffmpeg","openh264","media"]' >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "legacy_linux=${LEGACY_LINUX:-yes}" >> "$GITHUB_OUTPUT"
+          echo "building profiles: ${PROFILES:-both}, editions: ${EDITIONS:-all}, glibc2.17: ${LEGACY_LINUX:-yes}"
+
+  # ---------------------------------------------------------------------------
+  # Desktop hosts. One job per (OS, arch); each runs the script with
+  # --target host and uploads pyfreerdpnative/_libs/ as an artifact.
+  #
+  # Profiles: Linux gets the requested profile (default full = shadow +
+  # proxy too). macOS and Windows are capped at 'minimal' (client + server
+  # libraries, no shadow/proxy) because upstream's shadow/platform servers
+  # don't build cleanly there; that's all the Python binding loads anyway.
+  # ---------------------------------------------------------------------------
+  desktop:
+    name: ${{ matrix.label }} (${{ matrix.profile }}, ${{ matrix.edition }})
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container || '' }}
+    # Skip cells the dispatch input did not ask for.
+    strategy:
+      fail-fast: false
+      # `label` is a real matrix axis so the product label x profile x edition
+      # is generated; the include entries are keyed by label and only attach
+      # runner/arch data. (Include entries with keys outside the base matrix
+      # are merged into every combination - and only the first can be - so
+      # the old form silently produced 2 real cells and 6 broken ones.)
+      matrix:
+        label: [linux-x86_64, linux-aarch64,
+                linux-x86_64-glibc234, linux-aarch64-glibc234,
+                linux-x86_64-glibc228, linux-aarch64-glibc228,
+                macos-arm64, macos-x86_64,
+                windows-x64, windows-x86, windows-arm64]
+        profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
+        edition: ${{ fromJSON(needs.plan.outputs.editions) }}
+        include:
+          - label: linux-x86_64
+            runner: ubuntu-24.04
+          - label: linux-aarch64
+            runner: ubuntu-24.04-arm
+          # manylinux_2_34 = AlmaLinux 9, glibc 2.34: wheels that also install
+          # on RHEL/Alma 9, Debian 12 (2.36) and Ubuntu 22.04 (2.35). The job
+          # runs INSIDE the container, so dnf replaces apt and there is no
+          # sudo; steps below branch on matrix.container.
+          - label: linux-x86_64-glibc234
+            runner: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_34_x86_64
+          - label: linux-aarch64-glibc234
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_34_aarch64
+          # manylinux_2_28 = AlmaLinux 8, glibc 2.28: the lowest floor pypa
+          # still maintains, and in practice every glibc distribution still
+          # supported (RHEL/Alma 8+, Ubuntu 18.04+, Debian 10+, SLES 15).
+          - label: linux-x86_64-glibc228
+            runner: ubuntu-24.04
+            container: quay.io/pypa/manylinux_2_28_x86_64
+          - label: linux-aarch64-glibc228
+            runner: ubuntu-24.04-arm
+            container: quay.io/pypa/manylinux_2_28_aarch64
+          - label: macos-arm64
+            runner: macos-15
+          - label: macos-x86_64
+            # macos-13 was retired Dec 2025; macos-15-intel is the last
+            # Intel image GitHub provides (until Aug 2027).
+            runner: macos-15-intel
+          # Windows: x64 is native; x86 and arm64 are cross-compiled on the
+          # same VS 2022 image (-A Win32 / -A ARM64 + matching vcpkg triplet).
+          - label: windows-x64
+            runner: windows-2022
+            win_arch: x64
+            vcpkg_triplet: x64-windows
+          - label: windows-x86
+            runner: windows-2022
+            win_arch: x86
+            vcpkg_triplet: x86-windows
+            python_arch: x86      # 32-bit Python so the load test is real
+          - label: windows-arm64
+            runner: windows-2022
+            win_arch: arm64
+            vcpkg_triplet: arm64-windows
+            # cross build on x64; loaded natively in verify-windows-arm64
+    # Matrix jobs can't emit per-cell outputs, so each cell writes its
+    # link into the step summary and the `links` job re-reads the run's
+    # artifact list via the API.
+    steps:
+      - uses: actions/checkout@v6
+
+      # The manylinux images ship CPython under /opt/python/<tag>/bin and no
+      # `python` on the default PATH. This must run BEFORE any step that uses
+      # python (the version handshake right below does), and GITHUB_PATH only
+      # affects LATER steps - hence its own step here, not a line in the
+      # dependency step further down.
+      - name: Use the container's Python (manylinux)
+        if: matrix.container != ''
+        shell: bash
+        run: |
+          set -e
+          py=""
+          for cand in /opt/python/cp312-cp312/bin /opt/python/cp311-cp311/bin /opt/python/cp313-cp313/bin; do
+            if [ -x "$cand/python" ]; then py="$cand"; break; fi
+          done
+          if [ -z "$py" ]; then
+            py=$(dirname "$(command -v python3)")
+          fi
+          test -n "$py" || { echo "::error::no Python in this container image"; exit 1; }
+          echo "$py" >> "$GITHUB_PATH"
+          "$py/python" --version
+          # some images have python3 but no `python`
+          [ -x "$py/python" ] || ln -sf "$py/python3" "$py/python"
+
+      # Skipped inside the manylinux container: it ships CPython at
+      # /opt/python/cp312-cp312/bin (added to PATH by the dnf step), and
+      # setup-python's downloads target the runner's glibc, not the image's.
+      - uses: actions/setup-python@v6
+        if: matrix.container == ''
+        with:
+          python-version: "3.12"
+          # Only Windows cells set this (x86 needs a 32-bit interpreter for
+          # the load test). An empty value lets setup-python pick the
+          # runner's own architecture - forcing 'x64' here downloads an
+          # x86_64 Python onto the aarch64 runner (Exec format error).
+          architecture: ${{ matrix.python_arch }}
+
+      - name: Check build scripts are the expected version
+        shell: bash
+        run: |
+          # Fails fast (with an explanation) if scripts/ is stale relative to
+          # this workflow, instead of dying deep inside a CMake configure.
+          for s in build_freerdp build_deps validate_build; do
+            python scripts/$s.py --require-version 43
+          done
+
+      # ---- dependencies ---------------------------------------------------
+
+      # manylinux containers are AlmaLinux 9: dnf, no sudo, and the runner's
+      # Python lives at /opt/python/cp312-cp312/bin.
+      - name: Install build deps (dnf/yum, manylinux container)
+        if: matrix.container != ''
+        shell: bash
+        run: |
+          set -e
+          # manylinux2014 is CentOS 7 (yum, devtoolset); 2_28/2_34 are
+          # AlmaLinux (dnf) with a modern GCC already in place.
+          if command -v dnf >/dev/null 2>&1; then PM=dnf; else PM=yum; fi
+          # X11/Wayland -devel packages are in the CRB (AlmaLinux 9) or
+          # PowerTools (AlmaLinux 8) repository, which is disabled by default.
+          # Without it `find_package(Wayland)` fails the full profile.
+          if [ "$PM" = "dnf" ]; then
+            dnf -y install dnf-plugins-core >/dev/null 2>&1 || true
+            dnf config-manager --set-enabled crb >/dev/null 2>&1 \
+              || dnf config-manager --set-enabled powertools >/dev/null 2>&1 \
+              || echo "::notice::no CRB/PowerTools repository to enable"
+          fi
+          if [ "$PM" = "yum" ]; then
+            yum -y install devtoolset-10-gcc devtoolset-10-gcc-c++ devtoolset-10-binutils || true
+            for d in /opt/rh/devtoolset-*/root/usr/bin; do
+              [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH" && break
+            done
+          fi
+          $PM -y install epel-release || true
+          $PM -y install \
+            cmake ninja-build git pkgconfig patchelf \
+            openssl-devel zlib-devel krb5-devel libicu-devel \
+            alsa-lib-devel libpng-devel libjpeg-turbo-devel cairo-devel
+          # cJSON is not in the base repos of every image; FreeRDP falls back
+          # to its bundled copy when it is missing.
+          $PM -y install cjson-devel || echo "::notice::cjson-devel unavailable; FreeRDP will use its bundled cJSON"
+          if [ "${{ matrix.profile }}" = "full" ]; then
+            # these decide WITH_X11/WITH_WAYLAND; report what is missing
+            # instead of letting cmake fail later with "Could NOT find Wayland"
+            $PM -y install \
+              libX11-devel libXext-devel libXrandr-devel libXinerama-devel \
+              libXfixes-devel libXcursor-devel libXi-devel libXv-devel \
+              libxkbfile-devel libxkbcommon-devel \
+              wayland-devel wayland-protocols-devel pixman-devel \
+              nasm systemd-devel libv4l-devel xorg-x11-server-Xvfb || true
+            for pc in wayland-client wayland-cursor x11; do
+              pkg-config --exists "$pc" || echo "::warning::$pc not available in this image"
+            done
+            # GTK/WebKit (the wlfreerdp/GTK bits) and SDL are optional here.
+            $PM -y install gtk3-devel SDL2-devel SDL2_ttf-devel || \
+              echo "::notice::optional GUI packages unavailable in this image"
+          fi
+          for ch in $ENABLE_CHANNELS; do
+            case "$ch" in
+              urbdrc)  $PM -y install libusbx-devel || true ;;
+              printer) $PM -y install cups-devel || true ;;
+              rdpecam) $PM -y install libv4l-devel || true ;;
+            esac
+          done
+          echo "PYFREERDP_IN_MANYLINUX=1" >> "$GITHUB_ENV"
+
+      - name: Install build deps (apt)
+        if: runner.os == 'Linux' && matrix.container == ''
+        shell: bash
+        run: |
+          sudo apt-get update
+          # Core toolchain + what libwinpr/libfreerdp need in every profile.
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git pkg-config patchelf \
+            libssl-dev zlib1g-dev libkrb5-dev libcjson-dev libicu-dev \
+            libasound2-dev libpng-dev libjpeg-dev libcairo2-dev
+          if [ "${{ matrix.profile }}" = "full" ]; then
+            # GUI clients, media dependency builds, camera/USB, loopback test.
+            sudo apt-get install -y --no-install-recommends \
+              libx11-dev libxext-dev libxrandr-dev libxinerama-dev \
+              libxfixes-dev libxcursor-dev libxi-dev libxv-dev \
+              libxkbfile-dev libxkbcommon-dev \
+              libwayland-dev wayland-protocols libpixman-1-dev \
+              libgtk-3-dev libwebkit2gtk-4.1-dev \
+              nasm libudev-dev libv4l-dev xvfb
+            # Optional: the sdl-freerdp client. SDL3 where the distro has it
+            # (Ubuntu 25.04+), otherwise FreeRDP's deprecated SDL2 client.
+            # Never fail the build over these - the client is a bonus.
+            for pkg in libsdl3-dev libsdl3-ttf-dev libsdl2-dev libsdl2-ttf-dev; do
+              sudo apt-get install -y --no-install-recommends "$pkg" \
+                || echo "::notice::optional package $pkg not available on this runner"
+            done
+          fi
+          # Optional channel deps, only if the user asked for them.
+          extra=""
+          for ch in $ENABLE_CHANNELS; do
+            case "$ch" in
+              urbdrc)  extra="$extra libusb-1.0-0-dev" ;;
+              printer) extra="$extra libcups2-dev" ;;
+              rdpecam) extra="$extra libavcodec-dev libavutil-dev libswscale-dev libv4l-dev" ;;
+              tsmf)    extra="$extra libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev" ;;
+            esac
+          done
+          if [ -n "$extra" ]; then sudo apt-get install -y --no-install-recommends $extra; fi
+
+      - name: Install build deps (brew)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew update >/dev/null
+          # cairo = image scaler (WITH_CAIRO), openssl@3 = TLS.
+          brew install cmake ninja pkg-config openssl@3 cairo libpng jpeg-turbo
+          if [ "${{ matrix.profile }}" = "full" ]; then
+            # nasm: FFmpeg/OpenH264 asm; sdl3 + sdl3_ttf: sdl-freerdp client
+            brew install nasm sdl3 sdl3_ttf
+          fi
+          echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+
+      - name: Export GitHub Actions cache vars for vcpkg
+        if: runner.os == 'Windows'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Set vcpkg triplet
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "VCPKG_DEFAULT_TRIPLET=${{ matrix.vcpkg_triplet }}" >> "$GITHUB_ENV"
+
+      # ---- dependencies: libusb, OpenH264, FFmpeg (+ OpenSSL/zlib on Windows)
+
+      - name: Compute deps label
+        id: deps
+        shell: bash
+        run: |
+          # `label` MUST equal the directory build_deps.py derives from the
+          # machine itself (it names build/deps/<label>-<edition>), so the
+          # manylinux cells keep the plain platform name. The glibc floor
+          # goes into `abi` instead, which only distinguishes the CACHE KEY -
+          # a glibc-2.39 prefix must never be restored into a 2.34 build.
+          abi=""
+          case "${{ matrix.label }}" in
+            linux-x86_64*)  echo "label=linux-x86_64"  >> "$GITHUB_OUTPUT" ;;
+            linux-aarch64*) echo "label=linux-aarch64" >> "$GITHUB_OUTPUT" ;;
+            macos-arm64)   echo "label=darwin-arm64"  >> "$GITHUB_OUTPUT" ;;
+            macos-x86_64)  echo "label=darwin-x86_64" >> "$GITHUB_OUTPUT" ;;
+            windows-*)     echo "label=windows-${{ matrix.win_arch }}" >> "$GITHUB_OUTPUT" ;;
+          esac
+          case "${{ matrix.label }}" in
+            *-glibc234) abi="glibc234" ;;
+            *-glibc228) abi="glibc228" ;;
+            *-glibc217) abi="glibc217" ;;
+          esac
+          echo "abi=$abi" >> "$GITHUB_OUTPUT"
+
+      # The standard edition needs no built dependencies on Linux/macOS
+      # (system OpenSSL); on Windows every edition takes OpenSSL/zlib/cJSON
+      # from vcpkg. The media editions build FFmpeg/OpenH264/libusb (+ SDL3
+      # on Windows for the full profile).
+      - name: Cache dependency prefix
+        id: deps-cache
+        if: matrix.edition != 'standard' || runner.os == 'Windows'
+        uses: actions/cache@v6
+        with:
+          path: build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}
+          key: deps-v3-${{ matrix.edition }}-${{ matrix.profile }}-${{ steps.deps.outputs.label }}${{ steps.deps.outputs.abi && format('-{0}', steps.deps.outputs.abi) || '' }}-${{ hashFiles('scripts/build_deps.py', 'scripts/vcpkg.json') }}
+
+      - name: Build dependencies (${{ matrix.edition }})
+        if: (matrix.edition != 'standard' || runner.os == 'Windows') && steps.deps-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then jobs=$(sysctl -n hw.ncpu);
+          elif [ "$RUNNER_OS" = "Windows" ]; then jobs=$NUMBER_OF_PROCESSORS;
+          else jobs=$(nproc); fi
+          args=""
+          if [ -n "${{ matrix.win_arch }}" ]; then args="--arch ${{ matrix.win_arch }}"; fi
+          if [ "$RUNNER_OS" = "Windows" ] && [ -n "${{ inputs.win_target }}" ] \
+             && [ "${{ inputs.win_target }}" != "10" ] \
+             && [ "${{ inputs.win_crt }}" = "static" ]; then
+            args="$args --win-crt static"
+          fi
+          python scripts/build_deps.py --target host --edition ${{ matrix.edition }} \
+            --profile ${{ matrix.profile }} --jobs "$jobs" $args
+          manifest="build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}/DEPS-MANIFEST.txt"
+          if [ -f "$manifest" ]; then
+            cat "$manifest"
+          else
+            echo "::warning::no DEPS-MANIFEST.txt at $manifest; prefixes present:"
+            ls -d build/deps/*/ 2>/dev/null || true
+          fi
+
+      # ---- build ----------------------------------------------------------
+
+      - name: Show channel plan
+        shell: bash
+        run: |
+          args=""
+          for ch in $ENABLE_CHANNELS; do args="$args --enable-channel $ch"; done
+          if [ -n "${{ matrix.win_arch }}" ]; then args="$args --arch ${{ matrix.win_arch }}"; fi
+          python scripts/build_freerdp.py --list-channels \
+            --profile "${{ matrix.profile }}" --edition "${{ matrix.edition }}" $args
+
+      - name: Build FreeRDP ${{ env.FREERDP_REF }}
+        shell: bash
+        run: |
+          args=""
+          for ch in $ENABLE_CHANNELS; do args="$args --enable-channel $ch"; done
+          if [ "$RUNNER_OS" = "macOS" ]; then jobs=$(sysctl -n hw.ncpu);
+          elif [ "$RUNNER_OS" = "Windows" ]; then jobs=$NUMBER_OF_PROCESSORS;
+          else jobs=$(nproc); fi
+          if [ -n "${{ matrix.win_arch }}" ]; then args="$args --arch ${{ matrix.win_arch }}"; fi
+          # media editions take their libraries from the deps prefix; on
+          # Windows the standard edition also uses it (OpenSSL/zlib/cJSON).
+          if [ "${{ matrix.edition }}" != "standard" ] || [ "$RUNNER_OS" = "Windows" ]; then
+            args="$args --deps-prefix build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}"
+          fi
+          # Windows shadow is on by default in the full profile; only pass a
+          # flag to turn it OFF when the dispatch box was unticked.
+          if [ "$RUNNER_OS" = "Windows" ] && [ "$WINDOWS_SHADOW" = "no" ]; then
+            args="$args --no-windows-shadow"
+          fi
+          # Legacy Windows targets: arm64 has no such thing, so skip it there.
+          if [ "$RUNNER_OS" = "Windows" ] && [ -n "${{ inputs.win_target }}" ] \
+             && [ "${{ inputs.win_target }}" != "10" ] \
+             && [ "${{ matrix.win_arch }}" != "arm64" ]; then
+            args="$args --win-target ${{ inputs.win_target }}"
+            if [ -n "${{ inputs.win_toolset }}" ]; then
+              args="$args --win-toolset ${{ inputs.win_toolset }}"
+            fi
+            if [ -n "${{ inputs.win_crt }}" ]; then
+              args="$args --win-crt ${{ inputs.win_crt }}"
+            fi
+          fi
+          python scripts/build_freerdp.py \
+            --target host \
+            --ref "$FREERDP_REF" \
+            --profile "${{ matrix.profile }}" \
+            --edition "${{ matrix.edition }}" \
+            --jobs "$jobs" $args
+
+      # ---- verify ---------------------------------------------------------
+
+      - name: Verify PE machine type (Windows)
+        # A legacy win_target without a toolset is a static .lib build: no
+        # DLLs to inspect or load.
+        if: runner.os == 'Windows' && (inputs.win_target == null || inputs.win_target == '10' || inputs.win_toolset != '')
+        shell: bash
+        run: |
+          python - <<'PY'
+          import glob, struct, sys
+          want = {"x64": 0x8664, "x86": 0x14C, "arm64": 0xAA64}["${{ matrix.win_arch }}"]
+          names = {0x8664: "x64", 0x14C: "x86", 0xAA64: "arm64"}
+          bad = []
+          for dll in glob.glob("pyfreerdpnative/_libs/*.dll"):
+              with open(dll, "rb") as fh:
+                  data = fh.read(4096)
+              off = struct.unpack_from("<I", data, 0x3C)[0]
+              machine = struct.unpack_from("<H", data, off + 4)[0]
+              print("%-40s %s" % (dll, names.get(machine, hex(machine))))
+              if machine != want:
+                  bad.append(dll)
+          if bad:
+              sys.exit("wrong machine type: %s" % bad)
+          print("all DLLs are ${{ matrix.win_arch }}")
+          PY
+
+      - name: Verify libraries load and channels are present
+        # The arm64 Windows DLLs are cross-compiled and can't be loaded on
+        # this x64 runner; a separate job loads them on windows-11-arm.
+        # Static (legacy win_target) builds have no loadable libraries.
+        if: matrix.win_arch != 'arm64' && (runner.os != 'Windows' || inputs.win_target == null || inputs.win_target == '10' || inputs.win_toolset != '')
+        shell: bash
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/pyfreerdpnative/_libs
+          DYLD_LIBRARY_PATH: ${{ github.workspace }}/pyfreerdpnative/_libs
+        run: |
+          set -e
+          ls -la pyfreerdpnative/_libs/
+          python - <<'PY'
+          import ctypes, glob, os, platform, sys
+          libs = "pyfreerdpnative/_libs"
+          ext = {"Windows": ".dll", "Darwin": ".dylib"}.get(platform.system(), ".so")
+          def find(stem):
+              hits = sorted(p for p in glob.glob(os.path.join(libs, "*%s*" % stem))
+                            if ext in p and os.path.isfile(p))
+              assert hits, "missing %s" % stem
+              return hits[0]
+          if platform.system() == "Windows":
+              os.add_dll_directory(os.path.abspath(libs))
+          for stem in ("winpr3", "freerdp3", "freerdp-client3", "freerdp-server3"):
+              path = find(stem)
+              lib = ctypes.CDLL(path)
+              print("loaded", os.path.basename(path))
+          srv = ctypes.CDLL(find("freerdp-server3"))
+          # A few server-side channel entry points that must exist when
+          # WITH_SERVER_CHANNELS built everything.
+          for sym in ("cliprdr_server_context_new", "rdpsnd_server_context_new",
+                      "rdpgfx_server_context_new", "rail_server_context_new",
+                      "drdynvc_server_context_new", "disp_server_context_new"):
+              getattr(srv, sym)
+              print("server channel ok:", sym)
+          print("OK")
+          PY
+
+      - name: Validate (media, executables, loopback)
+        # Skipped for static .lib builds (nothing to load at runtime).
+        # Cross-compiled Windows arm64 can't run here; verify-windows-arm64
+        # loads it natively instead.
+        if: matrix.win_arch != 'arm64' && (runner.os != 'Windows' || inputs.win_target == null || inputs.win_target == '10' || inputs.win_toolset != '')
+        shell: bash
+        run: |
+          extra="--edition ${{ matrix.edition }}"
+          if [ "${{ matrix.edition }}" != "standard" ]; then extra="$extra --media"; fi
+          if [ "${{ matrix.profile }}" = "full" ]; then
+            extra="$extra --executables"
+            if [ "$RUNNER_OS" = "Linux" ]; then extra="$extra --loopback"; fi
+          fi
+          # Kerberos: Linux -> krb5 backend must be live; Windows -> native
+          # SSPI; macOS -> compiled out (FreeRDP rejects Apple's shim and
+          # upstream CI builds macOS with WITH_KRB5=OFF; Homebrew MIT krb5 is
+          # opt-in via build_freerdp.py --with-krb5).
+          case "$RUNNER_OS" in
+            Linux|Windows) extra="$extra --kerberos on" ;;
+            macOS)         extra="$extra --kerberos off" ;;
+          esac
+          # GitHub runners expose no USB bus; the libusb library test still
+          # runs, only the device enumeration is allowed to report none.
+          python scripts/validate_build.py --profile "${{ matrix.profile }}" $extra
+
+      # ---- package + upload -----------------------------------------------
+
+      - name: Package libraries
+        id: pkg
+        shell: bash
+        run: |
+          name="freerdp-${FREERDP_REF}-${{ matrix.label }}-${{ matrix.profile }}-${{ matrix.edition }}"
+          # arm64 is always a plain Windows 10 build (legacy targets are
+          # rejected there), so it never carries a win* suffix.
+          if [ "$RUNNER_OS" = "Windows" ] && [ -n "${{ inputs.win_target }}" ] \
+             && [ "${{ inputs.win_target }}" != "10" ] \
+             && [ "${{ matrix.win_arch }}" != "arm64" ]; then
+            crt="${{ inputs.win_crt }}"; crt="${crt:-dynamic}"
+            name="$name-win${{ inputs.win_target }}-$crt"
+            if [ -n "${{ inputs.win_toolset }}" ]; then
+              name="$name-${{ inputs.win_toolset }}"
+            fi
+          fi
+          mkdir -p out
+          {
+            echo "FreeRDP ref:  $FREERDP_REF"
+            echo "Profile:      ${{ matrix.profile }}"
+            echo "Edition:      ${{ matrix.edition }}"
+            echo "Platform:     ${{ matrix.label }} ($RUNNER_OS, $(uname -m 2>/dev/null || echo x64))"
+            echo "Extra chans:  ${ENABLE_CHANNELS:-none}"
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              echo "Runtime:      third-party DLLs (OpenSSL, zlib) are bundled;"
+              echo "              the VC++ 2015-2022 redistributable must be present"
+              echo "              (it ships with Python on Windows)."
+            fi
+            echo "Repo commit:  $GITHUB_SHA"
+            echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            case "${{ matrix.edition }}" in
+              standard) echo "Media:        none (built-in codecs only)" ;;
+              ffmpeg)   echo "Media:        FFmpeg (H.264/MJPEG decode, AAC/Opus DSP, swscale; no H.264 encoder), libusb (urbdrc, camera)" ;;
+              openh264) echo "Media:        OpenH264 (H.264 encode + decode), libusb (urbdrc)" ;;
+              media)    echo "Media:        FFmpeg + OpenH264 (H.264 encode/decode, AAC/Opus DSP, swscale), libusb (urbdrc, camera)" ;;
+            esac
+            case "$RUNNER_OS" in
+              Linux)   if [ "${{ matrix.profile }}" = "full" ]; then echo "Kerberos:     MIT krb5, bundled (libkrb5, libk5crypto, libcom_err, libkrb5support)";
+                       else echo "Kerberos:     MIT krb5 via the system krb5 libraries (installed by default on mainstream distros)"; fi ;;
+              Windows) echo "Kerberos:     native Windows SSPI (secur32)" ;;
+              macOS)   echo "Kerberos:     not built (upstream: unsupported on macOS; opt-in with --with-krb5 + Homebrew krb5)" ;;
+            esac
+            echo
+            echo "Files (libraries and executables together):"
+            ls -l pyfreerdpnative/_libs
+          } > pyfreerdpnative/_libs/BUILD-INFO.txt
+          cp build/deps/${{ steps.deps.outputs.label }}-${{ matrix.edition }}/DEPS-MANIFEST.txt pyfreerdpnative/_libs/ 2>/dev/null || true
+          # upload-artifact zips whatever it is given, so hand it the plain
+          # directory: pre-archiving would nest an archive inside the .zip.
+          # Staging already resolved every symlink into a real file, so the
+          # only thing a zip loses is the executable bit - scripts/
+          # package_wheels.py restores it, and `chmod +x _libs/*` does the
+          # same by hand.
+          mkdir -p "out/$name"
+          cp -r pyfreerdpnative/_libs "out/$name/"
+          echo "file=out/$name" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          ls -lh out/
+
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: ${{ steps.pkg.outputs.file }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: diagnostics-${{ matrix.label }}-${{ matrix.profile }}-${{ matrix.edition }}
+          path: |
+            build/diagnostics/
+            build/deps/*/DEPS-MANIFEST.txt
+            build/deps/*/manifest/vcpkg.json
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish artifact link to job summary
+        shell: bash
+        run: |
+          {
+            echo "### ${{ matrix.label }} — FreeRDP $FREERDP_REF (${{ matrix.profile }}, ${{ matrix.edition }})"
+            echo
+            echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+            echo
+            echo "Artifact id: \`${{ steps.upload.outputs.artifact-id }}\`  ·  file: \`$(basename ${{ steps.pkg.outputs.file }})\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Android. Cross-compiles with the NDK preinstalled on the Ubuntu runner.
+  # OpenSSL isn't in the NDK, so we cross-build it first and hand its prefix
+  # to the script via PYFREERDP_EXTRA_CMAKE.
+  # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # glibc 2.17 (manylinux2014). The job canNOT use `container:`: that image is
+  # CentOS 7, and every JS action (checkout, setup-python, cache,
+  # upload-artifact) runs on Node, which needs glibc >= 2.28. So the job stays
+  # on the runner - where the actions work - and only the BUILD runs in the
+  # image, through `docker run`. The image is end-of-life and ships GCC 4.8,
+  # which cannot compile FreeRDP 3, so devtoolset-10 is enabled inside.
+  # ---------------------------------------------------------------------------
+  linux-legacy:
+    name: linux-glibc217 (${{ matrix.arch }}, ${{ matrix.profile }}/${{ matrix.edition }})
+    needs: plan
+    if: needs.plan.outputs.legacy_linux == 'yes'
+    # DISABLED by default (LEGACY_LINUX=no). Two hard blockers, both proven
+    # by build logs, neither fixable from this repository:
+    #   1. FreeRDP 3.31 sources use the C23 keyword `nullptr`, which needs
+    #      GCC 13+ / clang 16+. CentOS 7's newest toolchain is devtoolset-11
+    #      (GCC 11.2), which fails on it - and on the _Pragma() expansions in
+    #      winpr/platform.h that surround the same code.
+    #   2. CentOS 7 ships OpenSSL 1.0.2. FreeRDP 3.31 calls 1.1.0+ APIs
+    #      (X509_get0_pubkey, RSA_set0_key, EVP_PKEY_get0_RSA), so even with
+    #      a newer compiler the crypto layer will not build against it.
+    # manylinux_2_28 (glibc 2.28, GCC 12+, OpenSSL 1.1.1) is the lowest floor
+    # FreeRDP 3.31 can actually target, and it already covers every
+    # distribution still receiving support.
+    continue-on-error: true
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # x86_64 only: FreeRDP 3.31 needs GCC 11+, which on CentOS 7 comes
+        # from SCL - and SCL was never published for aarch64. An aarch64
+        # manylinux2014 build is therefore not possible; that architecture is
+        # covered by the 2.28 / 2.34 / 2.39 floors.
+        arch: [x86_64]
+        profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
+        edition: ${{ fromJSON(needs.plan.outputs.editions) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build inside manylinux2014
+        shell: bash
+        run: |
+          set -e
+          image="quay.io/pypa/manylinux2014_${{ matrix.arch }}"
+          docker pull -q "$image"
+          cat > /tmp/inside.sh <<'INSIDE'
+          set -e
+          # CentOS 7 is EOL: mirror.centos.org is gone and the stock repo
+          # files (base + the SCLo ones centos-release-scl adds) have only a
+          # mirrorlist, so commenting it out leaves them with no source at
+          # all ("Cannot find a valid baseurl for repo: centos-sclo-sclo").
+          # Write explicit vault repositories instead. x86_64 lives under
+          # /7.9.2009, the other arches under /altarch/7.9.2009.
+          case "$(uname -m)" in
+            x86_64) VAULT="http://vault.centos.org/7.9.2009" ;;
+            *)      VAULT="http://vault.centos.org/altarch/7.9.2009" ;;
+          esac
+          rm -f /etc/yum.repos.d/*.repo
+          cat > /etc/yum.repos.d/vault.repo <<REPO
+          [base]
+          name=CentOS-7 - Base (vault)
+          baseurl=$VAULT/os/\$basearch/
+          gpgcheck=0
+          enabled=1
+
+          [updates]
+          name=CentOS-7 - Updates (vault)
+          baseurl=$VAULT/updates/\$basearch/
+          gpgcheck=0
+          enabled=1
+
+          [extras]
+          name=CentOS-7 - Extras (vault)
+          baseurl=$VAULT/extras/\$basearch/
+          gpgcheck=0
+          enabled=1
+
+          [sclo-rh]
+          name=CentOS-7 - SCLo rh (vault)
+          baseurl=$VAULT/sclo/\$basearch/rh/
+          gpgcheck=0
+          enabled=1
+          skip_if_unavailable=1
+          REPO
+          yum -y clean all >/dev/null 2>&1 || true
+          yum -y makecache fast >/dev/null 2>&1 || true
+
+          # REQUIRED: FreeRDP will not configure without OpenSSL. Fail here,
+          # with yum's own output, rather than 1500 lines later in cmake.
+          yum -y install openssl-devel zlib-devel || {
+            echo "::error::manylinux2014: cannot install openssl-devel from $VAULT"
+            exit 1
+          }
+          yum -y install krb5-devel libicu-devel alsa-lib-devel \
+                         libpng-devel libjpeg-turbo-devel >/dev/null 2>&1 || true
+          if [ "$PROFILE" = "full" ]; then
+            yum -y install libX11-devel libXext-devel libXrandr-devel libXinerama-devel \
+                           libXfixes-devel libXcursor-devel libXi-devel libXv-devel \
+                           libxkbfile-devel libxkbcommon-devel nasm >/dev/null 2>&1 || true
+          fi
+
+          # FreeRDP 3.31 needs GCC 11+: 10 (the image default) rejects its
+          # _Pragma() use in winpr/platform.h. GCC 11 comes from SCL, which
+          # CentOS 7 only ever published for x86_64 - so this floor cannot be
+          # built for other architectures. Say so immediately instead of
+          # compiling for half an hour and failing in winpr.
+          yum -y install devtoolset-11-gcc devtoolset-11-gcc-c++ devtoolset-11-binutils \
+            >/dev/null 2>&1 || true
+          if [ -x /opt/rh/devtoolset-11/root/usr/bin/gcc ]; then
+            export PATH="/opt/rh/devtoolset-11/root/usr/bin:$PATH"
+            export CC=/opt/rh/devtoolset-11/root/usr/bin/gcc
+            export CXX=/opt/rh/devtoolset-11/root/usr/bin/g++
+          fi
+          gcc --version | head -1
+          case "$(gcc -dumpversion)" in
+            4.*|5.*|6.*|7.*|8.*|9.*|10.*)
+              echo "::error::manylinux2014 on $(uname -m) offers only GCC $(gcc -dumpversion);"
+              echo "::error::FreeRDP 3.31 needs 11+ (devtoolset-11 is x86_64-only on CentOS 7)."
+              exit 1 ;;
+          esac
+
+          export PATH="/opt/python/cp312-cp312/bin:$PATH"
+          python --version && gcc --version | head -1 && cmake --version | head -1
+          cd /work
+          if [ "$EDITION" != "standard" ]; then
+            python scripts/build_deps.py --target host --edition "$EDITION" \
+              --profile "$PROFILE" --jobs "$(nproc)"
+            extra="--deps-prefix build/deps/linux-$ARCH-$EDITION"
+          else
+            extra=""
+          fi
+          python scripts/build_freerdp.py --target host --profile "$PROFILE" \
+            --edition "$EDITION" --jobs "$(nproc)" --ref "$FREERDP_REF" $extra
+          python scripts/validate_build.py --profile "$PROFILE" --edition "$EDITION" || \
+            echo "::warning::validation reported problems on the glibc 2.17 build"
+          chown -R "$HOST_UID:$HOST_GID" build dist 2>/dev/null || true
+          INSIDE
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e PROFILE="${{ matrix.profile }}" -e EDITION="${{ matrix.edition }}" \
+            -e ARCH="${{ matrix.arch }}" -e FREERDP_REF="$FREERDP_REF" \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -v /tmp/inside.sh:/tmp/inside.sh:ro \
+            "$image" bash /tmp/inside.sh
+
+      - name: Locate the output directory
+        id: out
+        shell: bash
+        run: |
+          dir=$(find build -maxdepth 2 -type d -name "_libs" | head -1)
+          test -n "$dir" || { echo "::error::no _libs produced"; find build -maxdepth 2 -type d | head -20; exit 1; }
+          echo "dir=$(dirname "$dir")" >> "$GITHUB_OUTPUT"
+          ls -la "$dir" | head -10
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: freerdp-${{ env.FREERDP_REF }}-linux-${{ matrix.arch }}-glibc217-${{ matrix.profile }}-${{ matrix.edition }}
+          path: ${{ steps.out.outputs.dir }}
+          if-no-files-found: error
+
+  android:
+    name: android-${{ matrix.abi }} (${{ matrix.profile }}, ${{ matrix.edition }})
+    needs: plan
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86_64, x86]
+        profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
+        edition: ${{ fromJSON(needs.plan.outputs.editions) }}
+        include:
+          - abi: arm64-v8a
+            openssl_target: android-arm64
+          - abi: armeabi-v7a
+            openssl_target: android-arm
+          - abi: x86_64
+            openssl_target: android-x86_64
+          - abi: x86
+            openssl_target: android-x86
+    env:
+      API_LEVEL: "24"
+      OPENSSL_VERSION: "3.3.2"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check build scripts are the expected version
+        shell: bash
+        run: |
+          # Fails fast (with an explanation) if scripts/ is stale relative to
+          # this workflow, instead of dying deep inside a CMake configure.
+          for s in build_freerdp build_deps validate_build; do
+            python scripts/$s.py --require-version 43
+          done
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build git perl
+
+      - name: Locate NDK
+        id: ndk
+        run: |
+          ndk="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          test -f "$ndk/build/cmake/android.toolchain.cmake"
+          echo "ANDROID_NDK_ROOT=$ndk" >> "$GITHUB_ENV"
+          rev=$(grep -oP 'Pkg.Revision\s*=\s*\K.*' "$ndk/source.properties")
+          echo "revision=$rev" >> "$GITHUB_OUTPUT"
+          echo "Using NDK $rev at $ndk"
+
+      - name: Cache cross-built OpenSSL
+        id: ssl-cache
+        uses: actions/cache@v6
+        with:
+          path: openssl-android-${{ matrix.abi }}
+          key: openssl-staticpic3-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
+
+      - name: Cross-build OpenSSL for ${{ matrix.abi }}
+        if: steps.ssl-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          curl -fsSL -o openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          tar xzf openssl.tar.gz
+          export PATH="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH"
+          cd "openssl-${OPENSSL_VERSION}"
+          # STATIC on Android. A shared libcrypto.so/libssl.so in _libs is
+          # unusable there: Android resolves DT_NEEDED by soname, and any
+          # host Python that already loaded its own libcrypto.so (Termux's
+          # does, for hashlib/ssl) owns that soname - our copy is ignored and
+          # winpr binds against the host's OpenSSL, which fails on the first
+          # symbol the two versions do not share (EVP_MAC_fetch, ...).
+          # Linked into libwinpr3.so instead, there is nothing to collide.
+          # -fPIC is required: these static archives are linked INTO shared
+          # libraries (libwinpr3.so ...), and OpenSSL does not imply it under
+          # no-shared. Without it the 32-bit ARM link fails with "relocation
+          # R_ARM_REL32 cannot be used against symbol 'OPENSSL_armcap_P'".
+          # These archives are linked INTO shared libraries (libwinpr3.so),
+          # so every object must be position independent - including the ARM
+          # perlasm ones (armv4cpuid, sha256-armv4, ...), which reference
+          # OPENSSL_armcap_P with R_ARM_REL32 unless __PIC__ is defined while
+          # they are assembled. Under `no-shared` OpenSSL builds the "-lib-"
+          # objects without -fPIC, so it is forced here for the compiler AND
+          # the assembler, and OPENSSL_PIC selects the GOT-relative asm path.
+          # armeabi-v7a additionally needs no-asm: OpenSSL's hand-written
+          # ARMv4 assembly references OPENSSL_armcap_P with R_ARM_REL32,
+          # which lld refuses inside a shared library no matter how the C
+          # files are compiled. The other ABIs keep their assembly.
+          asmopt=""
+          if [ "${{ matrix.abi }}" = "armeabi-v7a" ]; then asmopt="no-asm"; fi
+          ./Configure ${{ matrix.openssl_target }} -D__ANDROID_API__=${API_LEVEL} \
+            no-shared no-tests no-docs $asmopt \
+            -fPIC -DOPENSSL_PIC \
+            --prefix="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}" \
+            --openssldir="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/ssl"
+          # NB: no CFLAGS= on the make line - that would REPLACE the flags
+          # Configure computed (optimisation, target, sysroot). The -fPIC and
+          # -DOPENSSL_PIC above are appended by Configure and reach both the
+          # C files and the perlasm-generated .S files.
+          make -j"$(nproc)" build_libs
+          make install_sw
+          # Prove the archive can actually go into a shared library, by
+          # linking a throwaway .so against it. That is the real test - a
+          # relocation listing is not, since REL32 entries against hidden
+          # symbols appear in valid PIC archives too (my earlier check
+          # rejected good builds because of exactly that).
+          lib="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/lib"
+          cat > /tmp/piccheck.c <<'PIC'
+          #include <openssl/evp.h>
+          int piccheck(void) { return EVP_MD_get_size(EVP_sha256()); }
+          PIC
+          case "${{ matrix.abi }}" in
+            arm64-v8a)    cc="aarch64-linux-android${API_LEVEL}-clang" ;;
+            armeabi-v7a)  cc="armv7a-linux-androideabi${API_LEVEL}-clang" ;;
+            x86_64)       cc="x86_64-linux-android${API_LEVEL}-clang" ;;
+            x86)          cc="i686-linux-android${API_LEVEL}-clang" ;;
+          esac
+          "$cc" -shared -fPIC -o /tmp/piccheck.so /tmp/piccheck.c \
+            -I"$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/include" \
+            "$lib/libcrypto.a" -llog 2>/tmp/piccheck.log || {
+              echo "::error::libcrypto.a cannot be linked into a shared library:"
+              tail -20 /tmp/piccheck.log
+              exit 1
+            }
+          echo "libcrypto.a links into a shared library: OK"
+
+      # Every edition needs a dependency prefix on mobile: winpr requires a
+      # JSON library from FreeRDP 3.31 on, and it must be cross-built (cJSON)
+      # rather than picked up from the host.
+      - name: Cache dependency prefix
+        id: deps-cache
+        uses: actions/cache@v6
+        with:
+          path: build/deps/android-${{ matrix.abi }}-${{ matrix.edition }}
+          key: deps-v4static-android-${{ matrix.abi }}-${{ matrix.edition }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}-${{ hashFiles('scripts/build_deps.py') }}
+
+      - name: Build dependencies (${{ matrix.edition }})
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y --no-install-recommends nasm
+          python scripts/build_deps.py --target android --abi ${{ matrix.abi }} \
+            --edition ${{ matrix.edition }} --api-level ${API_LEVEL} --jobs "$(nproc)"
+
+      - name: Build FreeRDP ${{ env.FREERDP_REF }} for ${{ matrix.abi }}
+        env:
+          # CMAKE_FIND_ROOT_PATH is needed because the NDK toolchain
+          # restricts find_package to the sysroot.
+          PYFREERDP_EXTRA_CMAKE: >-
+            -DOPENSSL_ROOT_DIR=${{ github.workspace }}/openssl-android-${{ matrix.abi }}
+            -DCMAKE_FIND_ROOT_PATH=${{ github.workspace }}/openssl-android-${{ matrix.abi }}
+        run: |
+          args="--edition ${{ matrix.edition }} --deps-prefix build/deps/android-${{ matrix.abi }}-${{ matrix.edition }}"
+          python scripts/build_freerdp.py \
+            --target android --abi ${{ matrix.abi }} --api-level ${API_LEVEL} \
+            --ref "$FREERDP_REF" --profile ${{ matrix.profile }} --jobs "$(nproc)" $args
+          # OpenSSL is linked statically into the FreeRDP libraries on
+          # Android (a bundled libcrypto.so would be shadowed by whatever the
+          # host process already loaded - see docs/MOBILE.md), so there is
+          # nothing to copy. Fail loudly if a shared copy reappears, because
+          # that silently reintroduces the soname clash.
+          if ls openssl-android-${{ matrix.abi }}/lib/libcrypto.so >/dev/null 2>&1; then
+            echo "::error::OpenSSL was built shared for Android; it must be no-shared"
+            exit 1
+          fi
+          ls -la pyfreerdpnative/_libs/android/${{ matrix.abi }}/
+
+      - name: Verify ELF targets and channel symbols
+        run: |
+          set -e
+          d=pyfreerdpnative/_libs/android/${{ matrix.abi }}
+          for f in $d/*.so; do
+            file "$f" | grep -q "ELF" || { echo "::error::$f is not an ELF"; exit 1; }
+          done
+          nm="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          $nm -D --defined-only $d/libfreerdp-server3.so | grep -q cliprdr_server_context_new
+          $nm -D --defined-only $d/libfreerdp-server3.so | grep -q rdpgfx_server_context_new
+          echo "server channels present"
+          # libc++_shared.so belongs to the NDK, not to Android. If it is
+          # missing the device falls back to /system, which on some phones
+          # pulls in a broken libunwind.so ("cannot locate symbol
+          # XzUnpacker_Construct").
+          ls $d/libc++_shared.so >/dev/null 2>&1 || {
+            echo "::error::libc++_shared.so missing from $d"; exit 1; }
+          readelf="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          $readelf -d $d/libwinpr3.so | grep -q "libkrb5" && { echo "::error::libwinpr3 links krb5 on Android (unsupported)"; exit 1; }
+          # OpenSSL, cJSON, OpenH264 and FFmpeg are linked STATICALLY into the
+          # FreeRDP libraries on Android (see docs/MOBILE.md): _libs holds only
+          # FreeRDP's own libraries. Verify the code is really in there
+          # instead of looking for shared objects that no longer exist.
+          case "${{ matrix.edition }}" in
+            ffmpeg|media) $nm -D --defined-only $d/libfreerdp3.so | grep -q avcodec_ \
+              || { echo "::error::libfreerdp3 has no FFmpeg symbols"; exit 1; } ;;
+          esac
+          case "${{ matrix.edition }}" in
+            openh264|media) $nm --defined-only $d/libfreerdp3.so 2>/dev/null | grep -qi welsCreateSVCEncoder \
+              || echo "::notice::openh264 symbols are hidden (expected: static link with hidden visibility)" ;;
+          esac
+          echo "edition ${{ matrix.edition }}: libraries linked and shipped"
+
+      - name: Package
+        id: pkg
+        run: |
+          name="freerdp-${FREERDP_REF}-android-${{ matrix.abi }}-${{ matrix.profile }}-${{ matrix.edition }}"
+          mkdir -p out
+          {
+            echo "FreeRDP ref:  $FREERDP_REF"
+            echo "Platform:     android ${{ matrix.abi }} (API ${API_LEVEL}, OpenSSL ${OPENSSL_VERSION})"
+            echo "Repo commit:  $GITHUB_SHA"
+            echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > pyfreerdpnative/_libs/android/${{ matrix.abi }}/BUILD-INFO.txt
+          mkdir -p "out/$name"
+          cp -r pyfreerdpnative/_libs/android/${{ matrix.abi }} "out/$name/_libs"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "file=out/$name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: ${{ steps.pkg.outputs.file }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: diagnostics-android-${{ matrix.abi }}-${{ matrix.profile }}-${{ matrix.edition }}
+          path: |
+            build/diagnostics/
+            build/deps/*/DEPS-MANIFEST.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish artifact link to job summary
+        run: |
+          {
+            echo "### android-${{ matrix.abi }} — FreeRDP $FREERDP_REF (${{ matrix.profile }}, ${{ matrix.edition }})"
+            echo
+            echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Load-test the cross-compiled Windows arm64 DLLs on a real arm64 runner.
+  # windows-11-arm is a free public-preview runner for public repos.
+  # ---------------------------------------------------------------------------
+  verify-windows-arm64:
+    name: verify windows-arm64 on windows-11-arm
+    needs: desktop
+    if: always() && needs.desktop.result != 'cancelled'
+    runs-on: windows-11-arm
+    continue-on-error: true   # preview runner; don't fail the run if it's unavailable
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: freerdp-*-windows-arm64-*
+          path: dl/
+          # No merge-multiple: each artifact keeps its own directory, so the
+          # minimal and full packages do not overwrite each other.
+
+      - name: Unpack and load (every arm64 package)
+        shell: pwsh
+        run: |
+          # Windows artifacts are uploaded as plain directories (GitHub zips
+          # them once), so after download each is dl/<name>/_libs.
+          $pkgs = Get-ChildItem dl -Directory -ErrorAction SilentlyContinue
+          if (-not $pkgs) { throw "no windows-arm64 artifacts found" }
+          foreach ($pkg in $pkgs) {
+            $libs = Join-Path $pkg.FullName "_libs"
+            if (-not (Test-Path $libs)) {
+              # Older layout: a single archive inside the artifact.
+              $arch = Get-ChildItem $pkg.FullName -Filter *.zip | Select-Object -First 1
+              if ($arch) {
+                Expand-Archive $arch.FullName -DestinationPath $pkg.FullName
+                $libs = Join-Path $pkg.FullName "_libs"
+              }
+            }
+            if (-not (Test-Path $libs)) { throw "no _libs in $($pkg.Name)" }
+            $libs = (Resolve-Path $libs).Path
+            Write-Host "=== $($pkg.Name)"
+            Get-ChildItem $libs | Select-Object -ExpandProperty Name
+            $env:PATH = "$libs;$env:PATH"
+            python -c @"
+          import ctypes, os, sys, glob
+          libs = sys.argv[1]
+          os.add_dll_directory(libs)
+          for name in ('winpr3.dll', 'freerdp3.dll', 'freerdp-client3.dll', 'freerdp-server3.dll'):
+              ctypes.CDLL(os.path.join(libs, name)); print('loaded', name)
+          srv = ctypes.CDLL(os.path.join(libs, 'freerdp-server3.dll'))
+          for sym in ('cliprdr_server_context_new', 'rdpgfx_server_context_new', 'rail_server_context_new'):
+              getattr(srv, sym); print('server channel ok:', sym)
+          cli = ctypes.CDLL(os.path.join(libs, 'freerdp-client3.dll'))
+          fn = cli.freerdp_channels_load_static_addin_entry
+          fn.restype = ctypes.c_void_p; fn.argtypes = [ctypes.c_char_p]*3 + [ctypes.c_uint32]
+          for ch, flags in (('cliprdr', 0x9000), ('rdpgfx', 0x2000), ('drive', 0x4000)):
+              assert fn(ch.encode(), None, None, flags), ch; print('client channel ok:', ch)
+          winpr = ctypes.WinDLL(os.path.join(libs, 'winpr3.dll'))   # SEC_ENTRY = __stdcall
+          class Pkg(ctypes.Structure):
+              _fields_ = [('fCapabilities', ctypes.c_uint32), ('wVersion', ctypes.c_uint16), ('wRPCID', ctypes.c_uint16), ('cbMaxToken', ctypes.c_uint32), ('Name', ctypes.c_char_p), ('Comment', ctypes.c_char_p)]
+          ENUM = ctypes.WINFUNCTYPE(ctypes.c_int32, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.POINTER(Pkg)))
+          class Table(ctypes.Structure):
+              _fields_ = [('dwVersion', ctypes.c_uint32), ('EnumerateSecurityPackagesA', ENUM)]
+          winpr.InitSecurityInterfaceExA.restype = ctypes.POINTER(Table)
+          n = ctypes.c_uint32(); arr = ctypes.POINTER(Pkg)()
+          assert winpr.InitSecurityInterfaceExA(0).contents.EnumerateSecurityPackagesA(ctypes.byref(n), ctypes.byref(arr)) == 0
+          names = [arr[i].Name.decode() for i in range(n.value)]
+          assert 'Kerberos' in names, names; print('Kerberos SSPI package present (native):', names)
+          has_media = bool(glob.glob(os.path.join(libs, 'avcodec*.dll')) or glob.glob(os.path.join(libs, 'openh264*.dll')))
+          if has_media:
+              core = ctypes.CDLL(os.path.join(libs, 'freerdp3.dll'))
+              core.h264_context_new.restype = ctypes.c_void_p
+              ctx = core.h264_context_new(0); assert ctx, 'h264_context_new (decoder) failed'
+              core.h264_context_free(ctypes.c_void_p(ctx)); print('H.264 decoder backend OK')
+          print('OK')
+          "@ $libs
+            if ($LASTEXITCODE -ne 0) { throw "load test failed for $($pkg.Name)" }
+            if (Test-Path "$libs\ffmpeg.exe") {
+              & "$libs\ffmpeg.exe" -hide_banner -version | Select-Object -First 1
+              if ($LASTEXITCODE -ne 0) { throw "ffmpeg does not run" }
+            }
+            if (Test-Path "$libs\wfreerdp.exe") {
+              & "$libs\wfreerdp.exe" /version
+              & "$libs\winpr-makecert.exe" -rdp -silent -path $pkg.FullName -n test
+              if (-not (Test-Path (Join-Path $pkg.FullName "test.crt"))) { throw "winpr-makecert produced no certificate" }
+            }
+          }
+
+      - name: Note in summary
+        shell: bash
+        run: echo "### windows-arm64 (all profiles/editions) — loaded natively on windows-11-arm ✅" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # iOS. Static archives (libfreerdp3.a, libfreerdp-client3.a,
+  # libfreerdp-server3.a, libwinpr3.a) for the arm64 device and the arm64
+  # simulator. OpenSSL is cross-built first with its ios64-xcrun /
+  # iossimulator-arm64-xcrun targets and shipped alongside as .a files.
+  # ---------------------------------------------------------------------------
+  ios:
+    name: ios-${{ matrix.label }} (${{ matrix.profile }}, ${{ matrix.edition }})
+    needs: plan
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [OS64, SIMULATORARM64]
+        profile: ${{ fromJSON(needs.plan.outputs.profiles) }}
+        edition: ${{ fromJSON(needs.plan.outputs.editions) }}
+        include:
+          - platform: OS64
+            label: arm64
+            openssl_target: ios64-xcrun
+          - platform: SIMULATORARM64
+            label: simulator-arm64
+            openssl_target: iossimulator-arm64-xcrun
+        # OpenH264/FFmpeg only build for the device SDK on arm64: the
+        # simulator gets the minimal profile of the standard edition only.
+        exclude:
+          - platform: SIMULATORARM64
+            profile: full
+          - platform: SIMULATORARM64
+            edition: ffmpeg
+          - platform: SIMULATORARM64
+            edition: openh264
+          - platform: SIMULATORARM64
+            edition: media
+    env:
+      OPENSSL_VERSION: "3.3.2"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check build scripts are the expected version
+        shell: bash
+        run: |
+          # Fails fast (with an explanation) if scripts/ is stale relative to
+          # this workflow, instead of dying deep inside a CMake configure.
+          for s in build_freerdp build_deps validate_build; do
+            python scripts/$s.py --require-version 43
+          done
+
+      - name: Install host tools
+        run: |
+          brew update >/dev/null
+          brew install cmake ninja
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Cache cross-built OpenSSL
+        id: ssl-cache
+        uses: actions/cache@v6
+        with:
+          path: openssl-ios-${{ matrix.platform }}
+          key: openssl-${{ env.OPENSSL_VERSION }}-ios-${{ matrix.platform }}-xcode${{ hashFiles('/Applications/Xcode.app/Contents/version.plist') }}
+
+      - name: Cross-build OpenSSL (${{ matrix.openssl_target }})
+        if: steps.ssl-cache.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          curl -fsSL -o openssl.tar.gz \
+            "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz"
+          tar xzf openssl.tar.gz
+          cd "openssl-${OPENSSL_VERSION}"
+          ./Configure ${{ matrix.openssl_target }} \
+            no-shared no-tests no-docs no-dso no-engine \
+            --prefix="$GITHUB_WORKSPACE/openssl-ios-${{ matrix.platform }}" \
+            --openssldir="$GITHUB_WORKSPACE/openssl-ios-${{ matrix.platform }}/ssl"
+          make -j"$(sysctl -n hw.ncpu)" build_libs
+          make install_dev
+          lipo -info "$GITHUB_WORKSPACE/openssl-ios-${{ matrix.platform }}/lib/libssl.a"
+
+      # Every edition needs a dependency prefix on mobile (cross-built cJSON
+      # for winpr's JSON support; see the Android job).
+      - name: Cache dependency prefix
+        id: deps-cache
+        uses: actions/cache@v6
+        with:
+          path: build/deps/ios-${{ matrix.platform }}-${{ matrix.edition }}
+          key: deps-v3-ios-${{ matrix.platform }}-${{ matrix.edition }}-xcode${{ hashFiles('/Applications/Xcode.app/Contents/version.plist') }}-${{ hashFiles('scripts/build_deps.py') }}
+
+      - name: Build dependencies (${{ matrix.edition }}, static)
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          brew install nasm
+          python scripts/build_deps.py --target ios --ios-platform ${{ matrix.platform }} \
+            --edition ${{ matrix.edition }} --jobs "$(sysctl -n hw.ncpu)"
+
+      - name: Build FreeRDP ${{ env.FREERDP_REF }} for iOS ${{ matrix.platform }}
+        env:
+          PYFREERDP_EXTRA_CMAKE: >-
+            -DOPENSSL_ROOT_DIR=${{ github.workspace }}/openssl-ios-${{ matrix.platform }}
+            -DOPENSSL_USE_STATIC_LIBS=ON
+            -DCMAKE_FIND_ROOT_PATH=${{ github.workspace }}/openssl-ios-${{ matrix.platform }}
+            -DCMAKE_PREFIX_PATH=${{ github.workspace }}/openssl-ios-${{ matrix.platform }}
+        run: |
+          args="--edition ${{ matrix.edition }} --deps-prefix build/deps/ios-${{ matrix.platform }}-${{ matrix.edition }}"
+          if [ "$IOS_LINKAGE" = "static" ]; then args="$args --ios-static"; fi
+          python scripts/build_freerdp.py \
+            --target ios --ios-platform ${{ matrix.platform }} \
+            --ref "$FREERDP_REF" --profile ${{ matrix.profile }} --jobs "$(sysctl -n hw.ncpu)" $args
+          if [ "$IOS_LINKAGE" = "static" ]; then
+            # Static archives: consumers link OpenSSL themselves, so ship it.
+            # (In the dynamic build OpenSSL is already inside the dylibs.)
+            cp openssl-ios-${{ matrix.platform }}/lib/libssl.a \
+               openssl-ios-${{ matrix.platform }}/lib/libcrypto.a \
+               pyfreerdpnative/_libs/ios/${{ matrix.platform }}/
+          fi
+          ls -la pyfreerdpnative/_libs/ios/${{ matrix.platform }}/
+
+      - name: Verify architecture and channel symbols
+        run: |
+          set -e
+          d=pyfreerdpnative/_libs/ios/${{ matrix.platform }}
+          if [ "$IOS_LINKAGE" = "static" ]; then
+            # .a archives: every library is a separate file, media deps too.
+            for a in $d/*.a; do
+              lipo -info "$a" | grep -q arm64 || { echo "::error::$a is not arm64"; exit 1; }
+            done
+            for lib in libwinpr3 libfreerdp3 libfreerdp-client3 libfreerdp-server3; do
+              test -f "$d/$lib.a" || { echo "::error::$lib.a missing from $d"; exit 1; }
+            done
+            nm "$d/libfreerdp-server3.a" | grep -q " T _cliprdr_server_context_new"
+            nm "$d/libfreerdp-client3.a" | grep -q "_cliprdr_VirtualChannelEntryEx"
+            for f in $need; do ls $d/$f*.a >/dev/null 2>&1 || { echo "::error::$f.a missing from $d"; exit 1; }; done
+            if [ -n "$sym" ]; then nm "$d/libfreerdp3.a" | grep -q "$sym" || { echo "::error::libfreerdp3 has no $sym reference"; exit 1; }; fi
+            echo "arm64 static archives with client + server channels present (${{ matrix.profile }}, ${{ matrix.edition }})"
+          else
+            # .dylib: the media deps (static archives) are linked INTO the
+            # FreeRDP dylibs, so check for their symbols inside libfreerdp3
+            # rather than for separate files.
+            for lib in libwinpr3 libfreerdp3 libfreerdp-client3 libfreerdp-server3; do
+              ls $d/$lib*.dylib >/dev/null 2>&1 || { echo "::error::$lib.dylib missing from $d"; exit 1; }
+            done
+            for dy in $d/*.dylib; do
+              lipo -info "$dy" | grep -q arm64 || { echo "::error::$dy is not arm64"; exit 1; }
+            done
+            core=$(ls $d/libfreerdp3*.dylib | head -1)
+            server=$(ls $d/libfreerdp-server3*.dylib | head -1)
+            client=$(ls $d/libfreerdp-client3*.dylib | head -1)
+            nm "$server" | grep -q " T _cliprdr_server_context_new" || { echo "::error::server channels missing"; exit 1; }
+            nm "$client" | grep -q "_cliprdr_VirtualChannelEntryEx" || { echo "::error::client channels missing"; exit 1; }
+            if [ -n "$sym" ]; then nm "$core" | grep -q "$sym" || { echo "::error::libfreerdp3 has no $sym reference (media deps not linked in)"; exit 1; }; fi
+            echo "--- install names / dependencies of $core:"
+            otool -L "$core" | head -12
+            # Nothing may point at the build machine: every non-system
+            # dependency must be @rpath-relative.
+            if otool -L "$core" | tail -n +2 | grep -vE "@rpath|/usr/lib/|/System/Library/"; then
+              echo "::error::libfreerdp3 references an absolute path from the build host"; exit 1
+            fi
+            echo "arm64 dylibs with client + server channels present (${{ matrix.profile }}, ${{ matrix.edition }})"
+          fi
+
+      - name: Package
+        id: pkg
+        run: |
+          name="freerdp-${FREERDP_REF}-ios-${{ matrix.label }}-${{ matrix.profile }}-${{ matrix.edition }}"
+          [ "$IOS_LINKAGE" = "static" ] && name="$name-static"
+          mkdir -p out
+          {
+            echo "FreeRDP ref:  $FREERDP_REF"
+            echo "Platform:     iOS ${{ matrix.platform }} (static, OpenSSL ${OPENSSL_VERSION}, $(xcodebuild -version | head -1))"
+            echo "Repo commit:  $GITHUB_SHA"
+            echo "Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Link order: freerdp-client3 / freerdp-server3, freerdp3, winpr3, openh264, avcodec, avformat, swscale, swresample, avutil, ssl, crypto, (libc++)"
+            echo "Frameworks: Foundation, Security, CoreFoundation, SystemConfiguration"
+          } > pyfreerdpnative/_libs/ios/${{ matrix.platform }}/BUILD-INFO.txt
+          mkdir -p "out/$name"
+          cp -r pyfreerdpnative/_libs/ios/${{ matrix.platform }} "out/$name/_libs"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "file=out/$name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: ${{ steps.pkg.outputs.file }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: diagnostics-ios-${{ matrix.label }}-${{ matrix.profile }}-${{ matrix.edition }}
+          path: |
+            build/diagnostics/
+            build/deps/*/DEPS-MANIFEST.txt
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish artifact link to job summary
+        run: |
+          {
+            echo "### ios-${{ matrix.label }} — FreeRDP $FREERDP_REF (${{ matrix.profile }}, ${{ matrix.edition }}, ${IOS_LINKAGE})"
+            echo
+            echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # aFreeRDP (Android APK). client/Android/Studio is a Gradle project whose
+  # CMake build compiles FreeRDP and every dependency (OpenSSL, FFmpeg,
+  # OpenH264, cJSON, opus, jpeg, png, webp, uriparser) from source, so it is
+  # independent of the library matrix above - and correspondingly slow.
+  # ---------------------------------------------------------------------------
+  android-apk:
+    name: aFreeRDP APK
+    # NB: `inputs.x == null` is true when x is *false* (GitHub coerces
+    # null to false), so gate on the event type instead.
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.mobile_apps }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check build scripts are the expected version
+        shell: bash
+        run: |
+          for s in build_freerdp build_deps validate_build; do
+            python scripts/$s.py --require-version 43
+          done
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install native build tools
+        run: |
+          # The gradle native build compiles FFmpeg/OpenSSL/OpenH264 itself;
+          # the x86_64 ABI enables FFmpeg's x86 assembly, which needs nasm.
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nasm yasm
+
+      # NB: no android-actions/setup-android here. Its default package list
+      # includes the obsolete "tools" package, which Google removed from the
+      # repository - the action then fails with "Failed to find package
+      # 'tools'". The runner image already ships the SDK; all that is needed
+      # is accepting the licences so Gradle can fetch the NDK/CMake it wants.
+      - name: Prepare the Android SDK
+        run: |
+          set -e
+          test -n "$ANDROID_HOME" || { echo "::error::ANDROID_HOME is not set"; exit 1; }
+          echo "SDK: $ANDROID_HOME"
+          sdkmanager="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)"
+          yes | "$sdkmanager" --licenses >/dev/null 2>&1 || true
+          "$sdkmanager" --list_installed | head -20
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build the APK
+        run: |
+          python scripts/build_freerdp.py --target android-apk \
+            --apk-abis "${{ inputs.apk_abis || 'armeabi-v7a,arm64-v8a,x86,x86_64' }}" \
+            --ref "$FREERDP_REF" --jobs "$(nproc)"
+
+      - name: Inspect and verify the APKs
+        run: |
+          set -e
+          ls -lh build/android-apk/
+          # Newest build-tools has apksigner/aapt2.
+          BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+          echo "build-tools: $BT"
+          {
+            echo "| APK | ABI(s) | minSdk | signed |"
+            echo "|---|---|---|---|"
+          } > /tmp/apk-table.md
+          fail=0
+          for apk in build/android-apk/*.apk; do
+            name=$(basename "$apk")
+            echo "=== $name"
+            abis=$(unzip -l "$apk" | sed -n "s|.*lib/\([^/]*\)/.*|\1|p" | sort -u | paste -sd, -)
+            [ -n "$abis" ] || { echo "::error::$name has no native libraries"; fail=1; }
+            unzip -l "$apk" | grep -qE "lib/.*/libfreerdp" \
+              || { echo "::error::$name contains no FreeRDP native library"; fail=1; }
+            minsdk=$("$BT/aapt2" dump badging "$apk" 2>/dev/null \
+                     | sed -n "s/.*sdkVersion:'\([0-9]*\)'.*/\1/p" | head -1)
+            if "$BT/apksigner" verify --print-certs "$apk" >/tmp/sig.txt 2>&1; then
+              signed=yes
+              grep -m1 "Signer #1 certificate DN" /tmp/sig.txt || true
+            else
+              signed="NO"
+              echo "::error::$name is not correctly signed and will fail to install"
+              fail=1
+            fi
+            echo "| \`$name\` | ${abis:-none} | ${minsdk:-?} | $signed |" >> /tmp/apk-table.md
+          done
+          cat /tmp/apk-table.md
+          # A single-ABI result means the ABI list did not reach gradle.
+          count=$(ls build/android-apk/*.apk | wc -l | tr -d " ")
+          test "$count" -ge 2 || { echo "::error::only $count APK produced - expected per-ABI splits + universal"; fail=1; }
+          ls build/android-apk/ | grep -q universal || echo "::warning::no universal APK was produced"
+          test "$fail" = 0
+
+      - name: Upload APK
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: afreerdp-apk-${{ env.FREERDP_REF }}
+          path: build/android-apk/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: diagnostics-android-apk
+          path: |
+            build/diagnostics/
+            client/Android/Studio/**/build/reports/
+            /tmp/pyfreerdpnative-build/FreeRDP/client/Android/Studio/**/build/reports/
+            /tmp/pyfreerdpnative-build/FreeRDP/client/Android/Studio/**/.cxx/**/*.log
+            /tmp/pyfreerdpnative-build/FreeRDP/client/Android/Studio/**/.cxx/**/*.txt
+            /tmp/pyfreerdpnative-build/FreeRDP/client/Android/Studio/**/.cxx/**/*.cmake
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish artifact link to job summary
+        run: |
+          {
+            echo "### aFreeRDP APK — FreeRDP $FREERDP_REF"
+            echo
+            echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+            echo
+            cat /tmp/apk-table.md
+            echo
+            echo "Install \`aFreeRDP-universal-release.apk\` if unsure which ABI your device uses."
+            echo "These are signed with a build-generated key, so uninstall any existing aFreeRDP first."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # iFreeRDP (iOS app). client/iOS is a standalone CMake super-build in
+  # FreeRDP 3.28+ (there is no WITH_CLIENT_IOS option any more); it builds
+  # FreeRDP and its dependencies itself. The bundle is left unsigned - a
+  # provisioning profile would be needed to run it on a device.
+  # ---------------------------------------------------------------------------
+  ios-app:
+    name: iFreeRDP app (${{ matrix.platform }})
+    # NB: `inputs.x == null` is true when x is *false* (GitHub coerces
+    # null to false), so gate on the event type instead.
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.mobile_apps }}
+    runs-on: macos-15
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Device SDK only: the super-build's OpenH264 step is hardcoded to
+        # OS=ios ARCH=arm64 (iphoneos), so a simulator build would link a
+        # device-SDK static library.
+        platform: [OS64]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check build scripts are the expected version
+        shell: bash
+        run: |
+          for s in build_freerdp build_deps validate_build; do
+            python scripts/$s.py --require-version 43
+          done
+      - name: Show toolchain
+        run: |
+          xcodebuild -version
+          cmake --version | head -1
+
+      - name: Build the app
+        run: |
+          python scripts/build_freerdp.py --target ios-app \
+            --ios-platform ${{ matrix.platform }} \
+            --ref "$FREERDP_REF" --jobs "$(sysctl -n hw.ncpu)"
+
+      - name: Inspect the bundle
+        run: |
+          app=$(find build/ios-app -maxdepth 2 -name "*.app" | head -1)
+          test -n "$app" || { echo "::error::no .app produced"; exit 1; }
+          echo "=== $app"
+          ls "$app"
+          bin="$app/$(basename "${app%.app}")"
+          test -f "$bin" && lipo -info "$bin"
+
+      - name: Package the app
+        id: pkg
+        run: |
+          name="ifreerdp-${FREERDP_REF}-${{ matrix.platform }}"
+          mkdir -p out
+          mkdir -p "out/$name"
+          cp -r build/ios-app/${{ matrix.platform }}/. "out/$name/"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Upload app
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: out/${{ steps.pkg.outputs.name }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: diagnostics-ios-app-${{ matrix.platform }}
+          path: |
+            build/diagnostics/
+            /tmp/pyfreerdpnative-build/FreeRDP/build-ios-app-*/**/*-stamp/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Publish artifact link to job summary
+        run: |
+          {
+            echo "### iFreeRDP app (${{ matrix.platform }}, unsigned) — FreeRDP $FREERDP_REF"
+            echo
+            echo "**Download:** ${{ steps.upload.outputs.artifact-url }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Package the library artifacts into wheels: one per platform, tagged
+  # py3-none-<platform>. pyfreerdpnative loads its libraries with ctypes and never
+  # links libpython, so a single wheel serves every Python version - no
+  # per-interpreter matrix needed. Android/iOS get PEP 738 / PEP 730 tags.
+  # ---------------------------------------------------------------------------
+  wheels:
+    name: wheels
+    # linux-legacy is allowed to fail (end-of-life image); its wheels are
+    # then simply absent. The `if` below already requires only desktop.
+    needs: [desktop, linux-legacy, android, ios]
+    outputs:
+      files: ${{ steps.list.outputs.files }}
+    if: |
+      always()
+      && (github.event_name != 'workflow_dispatch' || inputs.wheels)
+      && needs.desktop.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Check build scripts are the expected version
+        shell: bash
+        run: |
+          for s in build_freerdp build_deps validate_build; do
+            python scripts/$s.py --require-version 43
+          done
+
+      - name: Check the packaging script is the expected version
+        run: python scripts/package_wheels.py --require-version 4
+
+      - name: Install packaging tools
+        run: |
+          python -m pip install --upgrade build wheel auditwheel pycparser
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends \
+            cmake gcc libssl-dev zlib1g-dev libcjson-dev
+
+      # -------------------------------------------------------------------
+      # ctypes bindings generated from the SAME FreeRDP checkout the
+      # libraries were built from, so struct layouts, settings key ids and
+      # prototypes match the DLLs/.so files in every wheel exactly.
+      # -------------------------------------------------------------------
+      - name: Generate ctypes bindings from the FreeRDP headers
+        run: |
+          set -e
+          git clone -q --depth=1 --branch "$FREERDP_REF" https://github.com/FreeRDP/FreeRDP.git /tmp/freerdp-src
+          # configure only (no build): produces settings_keys.h, version.h,
+          # config.h and the winpr equivalents the public headers include
+          cmake -S /tmp/freerdp-src -B /tmp/freerdp-cfg -DWITH_CLIENT=OFF -DWITH_SERVER=ON \
+            -DWITH_SAMPLE=OFF -DWITH_MANPAGES=OFF -DBUILD_TESTING=OFF -DWITH_X11=OFF \
+            -DWITH_WAYLAND=OFF -DWITH_FFMPEG=OFF -DWITH_SWSCALE=OFF -DWITH_DSP_FFMPEG=OFF \
+            -DWITH_CAIRO=OFF -DWITH_OPENH264=OFF -DWITH_INTERNAL_MD4=ON -DWITH_INTERNAL_MD5=ON \
+            -DWITH_INTERNAL_RC4=ON -DWITH_KRB5=OFF -DWITH_PROXY=OFF -DWITH_SHADOW=OFF \
+            -DWITH_CHANNELS=OFF -DWITH_FUSE=OFF -DWITH_PULSE=OFF -DWITH_ALSA=OFF \
+            -DWITH_CUPS=OFF -DWITH_PCSC=OFF > /tmp/freerdp-cfg.log 2>&1 \
+            || { tail -30 /tmp/freerdp-cfg.log; exit 1; }
+          # Generate into a FRESH directory, then move the result into the
+          # package. Never point --out at the existing package: besides
+          # keeping scratch files out of it, this sidesteps an old generator
+          # bug (relative #include of a scratch file) that only triggered
+          # when the output directory already existed.
+          rm -rf "$RUNNER_TEMP/regen"
+          python scripts/gen_bindings.py \
+            --include /tmp/freerdp-src/include --include /tmp/freerdp-src/winpr/include \
+            --include /tmp/freerdp-cfg/include --include /tmp/freerdp-cfg/winpr/include \
+            --out "$RUNNER_TEMP/regen" --version "$FREERDP_REF"
+          find pyfreerdpnative -mindepth 1 -maxdepth 1 ! -name _libs ! -name examples -exec rm -rf {} + || true
+          cp -r "$RUNNER_TEMP/regen/." pyfreerdpnative/
+          find pyfreerdpnative -name __pycache__ -type d -prune -exec rm -rf {} + || true
+          rm -f pyfreerdpnative/*.c pyfreerdpnative/*.expand.c
+          # Prove the output imports and carries the anchors everything else relies on.
+          python - <<'PY'
+          import ctypes, importlib, os, sys
+          sys.path.insert(0, ".")
+          import pyfreerdpnative as g
+          # every mirrored header module must import
+          root = os.path.dirname(g.__file__); n = 0
+          for d, _, files in os.walk(root):
+              for f in files:
+                  if f.endswith(".py"):
+                      rel = os.path.relpath(os.path.join(d, f[:-3]), root).replace(os.sep, ".")
+                      importlib.import_module("pyfreerdpnative." + (rel[:-9] if rel.endswith(".__init__") else rel)); n += 1
+          # the anchors the rest of the package relies on, read from the mirror
+          from pyfreerdpnative.freerdp import freerdp, client, settings_keys, scancode
+          from pyfreerdpnative.freerdp.codec import color
+          assert freerdp.rdpContext.settings.offset % 8 == 0 and ctypes.sizeof(freerdp.rdpContext) >= 1000
+          assert ctypes.sizeof(client.RDP_CLIENT_ENTRY_POINTS_V1) == 72
+          assert "freerdp_connect" in freerdp.FUNCTIONS and "freerdp_client_context_new" in client.FUNCTIONS
+          for m, name in ((settings_keys, "FreeRDP_ColorDepth"), (color, "PIXEL_FORMAT_BGRX32"), (scancode, "RDP_SCANCODE_RETURN")):
+              assert hasattr(m, name), name
+          print("generated bindings OK: %d modules, %d prototypes, rdpContext=%d bytes, settings@%d" % (
+              n, len(g.PROTOTYPES), ctypes.sizeof(freerdp.rdpContext), freerdp.rdpContext.settings.offset))
+          PY
+
+      - name: Download the library artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: freerdp-*
+          path: artifacts/
+          # Each artifact keeps its own directory; the packager reads the
+          # platform out of the directory name.
+
+      - name: Show what was downloaded
+        run: ls -1 artifacts/
+
+      - name: Build the wheels
+        run: |
+          # Every (profile, edition) build becomes its own pip package:
+          #   pyfreerdpnative            full/media     (default)
+          #   pyfreerdpnative-minimal    minimal/standard
+          #   pyfreerdpnative-<edition>  full/<edition>
+          #   pyfreerdpnative-minimal-<edition>
+          # A wheel filename has no slot for the variant, so distinct names
+          # are the only way pip can offer more than one.
+          # --android-api must match the API_LEVEL the libraries were built
+          # with, otherwise the tag over-promises compatibility.
+          python scripts/package_wheels.py artifacts/ -o dist/ \
+            --all-variants \
+            --android-api 24 --ios-version 13.0
+
+      - name: Verify each wheel installs and loads
+        run: |
+          set -e
+          ls -lh dist/
+          # Only the Linux wheel can be installed on this runner; the rest are
+          # checked for structure (correct tag, libraries present).
+          for whl in dist/*.whl; do
+            name=$(basename "$whl")
+            tag=$(unzip -p "$whl" "*/WHEEL" | sed -n 's/^Tag: //p' | tr -d '\r')
+            plat=${tag#py3-none-}          # platform part only, e.g. manylinux_2_39_aarch64
+            # arch = everything after manylinux_<major>_<minor>_ (x86_64 has
+            # its own underscore, so a plain ${plat##*_} would give "64").
+            arch=$(echo "$plat" | sed -E 's/^manylinux_[0-9]+_[0-9]+_//')
+            files=$(unzip -l "$whl" | grep -c "pyfreerdpnative/_libs/" || true)
+            echo "$name  tag=$tag  libs=$files"
+            [ "$files" -gt 0 ] || { echo "::error::$name ships no libraries"; exit 1; }
+            case "$name" in
+              *manylinux*)
+                # The tag must be honest. auditwheel can fully verify a wheel
+                # of the runner's own architecture (glibc floor AND that every
+                # non-baseline library is vendored). For a foreign
+                # architecture it cannot resolve the in-wheel libraries, so it
+                # mislabels vendored ones as external - but the glibc floor
+                # it computes is still right, so we check that the tag it
+                # derives matches the tag we stamped.
+                # Audit the LIBRARIES only. GUI executables (sdl-freerdp with
+                # WebKitGTK, xfreerdp) legitimately depend on the desktop
+                # stack of the machine they run on; that is not vendorable and
+                # not what Python loads. Make a scratch copy without them via
+                # wheel unpack/pack so RECORD stays valid (auditwheel walks it)
+                # and the filename - which carries the architecture - is kept.
+                rm -rf /tmp/audit && mkdir -p /tmp/audit
+                python -m wheel unpack "$whl" -d /tmp/audit/u >/dev/null
+                root=$(ls -d /tmp/audit/u/*/)
+                find "$root/pyfreerdpnative/_libs" -maxdepth 1 -type f \
+                  ! -name "*.so*" ! -name "*.txt" ! -name "*.cfg" ! -name "*.pc" -delete
+                python -m wheel pack "$root" -d /tmp/audit >/dev/null
+                report=$(python -m auditwheel show /tmp/audit/*.whl 2>&1 || true)
+                echo "$report" | tail -8
+                # auditwheel wraps its prose at ~70 columns, so a long wheel
+                # name can split "is consistent" across two lines. Judge the
+                # report with whitespace collapsed, never line by line.
+                flat=$(echo "$report" | tr -s '[:space:]' ' ')
+                # Independent, precise diagnosis: which NEEDED sonames of the
+                # shipped libraries are satisfied neither by a file in _libs
+                # nor by the manylinux whitelist? This is the question
+                # auditwheel answers with "is consistent"; printing the
+                # answer directly beats guessing from a truncated report.
+                python - "$root/pyfreerdpnative/_libs" <<'PY'
+          import json, os, subprocess, sys, glob
+          import auditwheel
+          libs = sys.argv[1]
+          pol = json.load(open(os.path.join(os.path.dirname(auditwheel.__file__), "policy", "manylinux-policy.json")))
+          allowed = set()
+          for p in pol:
+              allowed.update(p.get("lib_whitelist", []))
+          shipped = set(os.listdir(libs))
+          missing = {}
+          for fn in sorted(shipped):
+              if ".so" not in fn:
+                  continue                     # executables are not audited
+              path = os.path.join(libs, fn)
+              try:
+                  out = subprocess.check_output(["readelf", "-d", path], stderr=subprocess.DEVNULL).decode()
+              except Exception:
+                  continue
+              for line in out.splitlines():
+                  if "(NEEDED)" in line:
+                      so = line.split("[", 1)[1].rstrip("]")
+                      if so not in shipped and so not in allowed and not so.startswith(("ld-linux", "linux-vdso")):
+                          missing.setdefault(so, []).append(fn)
+          if missing:
+              print("UNRESOLVED NEEDED (soname -> needed by):")
+              for so, by in sorted(missing.items()):
+                  print("  {0:<32} {1}".format(so, ", ".join(by[:4]) + (" ..." if len(by) > 4 else "")))
+          else:
+              print("every NEEDED soname is shipped in _libs or on the manylinux whitelist")
+          PY
+                derived=$(echo "$flat" | sed -n 's/.*constrains the platform tag to "\([^"]*\)".*/\1/p' | tail -1)
+                if [ -z "$derived" ]; then
+                  derived=$(echo "$flat" | sed -n 's/.*is consistent with the following platform tag: "\([^"]*\)".*/\1/p' | tail -1)
+                fi
+                # auditwheel reports the platform part only. The rule is that
+                # our tag must not OVER-promise: the glibc floor auditwheel
+                # derives may be equal to or LOWER than the one we stamped
+                # (e.g. a minimal build only needs 2.38 while we stamp 2.39 -
+                # conservative, still honest), but never higher. The
+                # architecture must match exactly.
+                [ -n "$derived" ] || { echo "::error::$name: auditwheel derived no platform tag"; echo "$report"; exit 1; }
+                d_arch=$(echo "$derived" | sed -E 's/^manylinux_[0-9]+_[0-9]+_//')
+                [ "$d_arch" = "$arch" ] \
+                  || { echo "::error::$name is tagged for $arch but auditwheel derives $derived"; exit 1; }
+                s_ver=$(echo "$plat"    | sed -nE 's/^manylinux_([0-9]+)_([0-9]+)_.*/\1 \2/p')
+                d_ver=$(echo "$derived" | sed -nE 's/^manylinux_([0-9]+)_([0-9]+)_.*/\1 \2/p')
+                set -- $s_ver; s_maj=$1; s_min=$2
+                set -- $d_ver; d_maj=$1; d_min=$2
+                if [ "$d_maj" -gt "$s_maj" ] || { [ "$d_maj" -eq "$s_maj" ] && [ "$d_min" -gt "$s_min" ]; }; then
+                  echo "::error::$name is tagged $plat but actually requires $derived (tag over-promises)"; exit 1
+                fi
+                if [ "$derived" != "$plat" ]; then
+                  echo "($name: real floor is $derived, tag $plat is stricter - OK)"
+                fi
+                if [ "$arch" = "$(uname -m)" ]; then
+                  echo "$flat" | grep -q "is consistent with the following platform tag" \
+                    || { echo "--- full auditwheel report:"; echo "$report"; echo "::error::$name leaves system libraries external on $arch"; exit 1; }
+                  echo "($name: tag verified and all system libraries vendored)"
+                else
+                  echo "($name: tag verified; the external-library check needs an $arch runner)"
+                fi
+                ;;
+            esac
+            case "$name" in
+              *manylinux*x86_64*)
+                python -m venv /tmp/wv && /tmp/wv/bin/pip install -q "$whl"
+                # Run from /tmp, not the repo: the checkout has a pyfreerdpnative/
+                # source directory that would shadow the installed package
+                # (cwd is first on sys.path) and the check would inspect the
+                # wrong thing.
+                (cd /tmp && /tmp/wv/bin/python -c "
+          import ctypes, glob, os, pyfreerdpnative
+          pkg = os.path.dirname(pyfreerdpnative.__file__)
+          assert 'site-packages' in pkg, 'imported the source tree, not the wheel: ' + pkg
+          d = os.path.join(pkg, '_libs')
+          hits = sorted(glob.glob(os.path.join(d, '*freerdp3.so*')))
+          assert hits, 'no libfreerdp3 in ' + d + ': ' + repr(sorted(os.listdir(d))[:10])
+          f = ctypes.CDLL(hits[0], mode=ctypes.RTLD_GLOBAL)
+          f.freerdp_get_version_string.restype = ctypes.c_char_p
+          print('installed wheel loads FreeRDP', f.freerdp_get_version_string().decode())
+          ")
+                rm -rf /tmp/wv
+                ;;
+            esac
+          done
+
+      - name: List the wheels for the per-file upload job
+        id: list
+        run: |
+          files=$(cd dist && ls *.whl *.tar.gz | jq -R . | jq -s -c .)
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+          echo "$files"
+
+      # Staging only: the wheel-artifacts job re-publishes every file as its
+      # own artifact so each wheel can be downloaded on its own.
+      - name: Upload wheels (staging)
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-staging-${{ env.FREERDP_REF }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Publish links to the job summary
+        run: |
+          {
+            echo "### Python wheels — FreeRDP $FREERDP_REF"
+            echo
+            echo "Each wheel is published as its own artifact (see the run's Artifacts list) and attached to the release individually."
+            echo
+            echo "| File | Size |"
+            echo "|---|---|"
+            for f in dist/*; do
+              printf "| \`%s\` | %s |\n" "$(basename "$f")" "$(du -h "$f" | cut -f1)"
+            done
+            echo
+            echo "One wheel per platform, valid for every Python version (ctypes, no libpython link)."
+            echo "One pip package per build variant: \`pyfreerdpnative\` (full/media), \`pyfreerdpnative-minimal\` (minimal/standard),"
+            echo "\`pyfreerdpnative-<edition>\`, \`pyfreerdpnative-minimal-<edition>\`. Install only one - they all provide the \`pyfreerdpnative\` module."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # One artifact per wheel, named after the file, so a single platform's
+  # wheel can be downloaded without the others.
+  # ---------------------------------------------------------------------------
+  wheel-artifacts:
+    name: ${{ matrix.file }}
+    needs: wheels
+    if: always() && needs.wheels.result == 'success'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        file: ${{ fromJSON(needs.wheels.outputs.files) }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: wheels-staging-${{ env.FREERDP_REF }}
+          path: dist/
+      - name: Upload ${{ matrix.file }}
+        uses: actions/upload-artifact@v7
+        with:
+          # Artifact names may not contain / \ : * ? " < > | - wheel
+          # filenames are fine as they are.
+          name: ${{ matrix.file }}
+          path: dist/${{ matrix.file }}
+          if-no-files-found: error
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  # Collect every artifact link into one table, and optionally attach the
+  # files to a GitHub release so the URLs outlive the 30-day artifact TTL.
+  # ---------------------------------------------------------------------------
+  links:
+    name: artifact links
+    needs: [desktop, linux-legacy, android, ios, android-apk, ios-app, wheels, wheel-artifacts]
+    if: always() && (needs.desktop.result != 'cancelled')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # only used when publishing a release
+      actions: read     # list artifacts of this run
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: List artifacts of this run
+        id: list
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts" \
+            --jq '.artifacts[] | select(.expired == false) | [.name, .id, .size_in_bytes] | @tsv' \
+            | sort > artifacts.tsv
+          cat artifacts.tsv
+          echo "count=$(wc -l < artifacts.tsv)" >> "$GITHUB_OUTPUT"
+
+      - name: Write summary table
+        run: |
+          base="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "## FreeRDP ${FREERDP_REF} — prebuilt libraries"
+            echo
+            echo "Built from \`${GITHUB_SHA:0:7}\` · [workflow run]($base)"
+            echo
+            echo "| Platform | Size | Download |"
+            echo "|---|---|---|"
+            while IFS=$'\t' read -r name id size; do
+              plat="${name#freerdp-${FREERDP_REF}-}"
+              mb=$(awk -v b="$size" 'BEGIN{printf "%.1f MB", b/1048576}')
+              echo "| \`$plat\` | $mb | [$name.zip]($base/artifacts/$id) |"
+            done < artifacts.tsv
+            echo
+            echo "Artifacts expire after 30 days. Windows artifacts unzip straight to \`_libs/\`;"
+            echo "other platforms contain a .tar.gz, which preserves symlinks and executable bits."
+            if [ "${{ needs.desktop.result }}" != "success" ] || [ "${{ needs.android.result }}" != "success" ] || [ "${{ needs.ios.result }}" != "success" ]; then
+              echo
+              echo "> ⚠️ Some build legs failed (desktop: ${{ needs.desktop.result }}, android: ${{ needs.android.result }}, ios: ${{ needs.ios.result }}). Missing platforms are absent from the table."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Download all artifacts
+        if: |
+          (github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
+          github.event_name == 'release' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        uses: actions/download-artifact@v8
+        with:
+          # Library artifacts are plain _libs directories, so they must NOT be
+          # merged (every platform would collapse into one _libs). Each
+          # artifact lands in its own folder and is zipped below. Wheels come
+          # from the per-file artifacts, one file each.
+          pattern: "{freerdp-*,pyfreerdpnative-*,pyfreerdpnative_*}"
+          path: staging/
+
+      - name: Turn artifacts into release files
+        shell: bash
+        run: |
+          set -e
+          mkdir -p release
+          for d in staging/*/; do
+            name=$(basename "$d")
+            if [ -d "$d/_libs" ] || [ -d "$d/_bin" ]; then
+              # a library package: zip the directory, named after the artifact
+              (cd "$d" && zip -qr "../../release/$name.zip" .)
+            else
+              # a wheel / sdist / app bundle artifact: already files
+              find "$d" -maxdepth 1 -type f -exec mv {} release/ \;
+            fi
+          done
+          # Nothing but regular files may be uploaded as a release asset.
+          find release -mindepth 1 -maxdepth 1 ! -type f -exec rm -rf {} +
+          ls -lh release/
+
+      - name: Attach to GitHub release
+        if: |
+          (github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
+          github.event_name == 'release' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="freerdp-libs-${FREERDP_REF}"
+          ls -lh release/
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber
+          else
+            gh release create "$tag" release/* \
+              --title "FreeRDP $FREERDP_REF prebuilt libraries" \
+              --prerelease \
+              --target "$GITHUB_SHA" \
+              --notes "Prebuilt libfreerdp / libfreerdp-client / libfreerdp-server / libwinpr with all client and server virtual channels, built by scripts/build_freerdp.py from FreeRDP ${FREERDP_REF}.
+
+          Built from commit ${GITHUB_SHA} — workflow run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          Unpack the archive for your platform and drop the contents into \`pyfreerdpnative/_libs/\` (Android: \`pyfreerdpnative/_libs/android/<abi>/\`). See BUILD-INFO.txt inside each archive."
+          fi
+          {
+            echo
+            echo "### Release"
+            echo
+            echo "Permanent download URLs: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${tag}"
+            for f in release/*; do
+              echo "- ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${tag}/$(basename "$f")"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
