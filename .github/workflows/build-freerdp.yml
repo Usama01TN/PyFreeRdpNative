@@ -2076,11 +2076,20 @@ jobs:
           path: staging/
 
       - name: Turn artifacts into release files
+        # same gate as the download above: on a pull request or a feature
+        # branch nothing was downloaded and there is nothing to convert
+        if: |
+          (github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
+          github.event_name == 'release' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main')
         shell: bash
         run: |
           set -e
-          mkdir -p release
+          shopt -s nullglob          # an empty staging/ must not leave a literal glob
+          mkdir -p release staging
+          count=0
           for d in staging/*/; do
+            count=$((count + 1))
             name=$(basename "$d")
             if [ -d "$d/_libs" ] || [ -d "$d/_bin" ]; then
               # a library package: zip the directory, named after the artifact
@@ -2092,13 +2101,18 @@ jobs:
           done
           # Nothing but regular files may be uploaded as a release asset.
           find release -mindepth 1 -maxdepth 1 ! -type f -exec rm -rf {} +
-          ls -lh release/
+          if [ "$count" -eq 0 ]; then
+            echo "::warning::no artifacts matched the download pattern; nothing to release"
+            echo "release_empty=true" >> "$GITHUB_ENV"
+          fi
+          ls -lh release/ || true
 
       - name: Attach to GitHub release
         if: |
+          env.release_empty != 'true' && (
           (github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
           github.event_name == 'release' ||
-          (github.event_name == 'push' && github.ref == 'refs/heads/main')
+          (github.event_name == 'push' && github.ref == 'refs/heads/main'))
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
