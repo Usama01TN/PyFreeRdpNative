@@ -435,6 +435,40 @@ jobs:
           done
           if [ -n "$extra" ]; then sudo apt-get install -y --no-install-recommends $extra; fi
 
+      # FreeRDP 3.31+ is C23 code (`nullptr`, used across winpr/freerdp), and
+      # Apple clang only accepts that from Xcode 16. The Intel and arm64
+      # images do not always default to the same Xcode, so pick the newest
+      # one installed explicitly - otherwise every Intel cell can fail at
+      # compile time while arm64 passes, whatever the profile or edition.
+      - name: Select Xcode (C23-capable clang)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -e
+          clang_major() { clang --version | sed -nE 's/.*clang version ([0-9]+).*/\1/p' | head -1; }
+          echo "host: $(uname -m), macOS $(sw_vers -productVersion)"
+          echo "default: $(xcodebuild -version | head -1), $(clang --version | head -1)"
+          if [ "$(clang_major)" -lt 16 ]; then
+            # Only now switch: the newest RELEASE Xcode (names like
+            # Xcode_16.4.app; betas are named differently and excluded).
+            best=$(ls -d /Applications/Xcode_*.app 2>/dev/null \
+                     | grep -E '/Xcode_[0-9]+(\.[0-9]+)*\.app$' \
+                     | sed -E 's|.*/Xcode_([0-9.]+)\.app|\1 &|' \
+                     | sort -t. -k1,1n -k2,2n -k3,3n | tail -1 | cut -d' ' -f2)
+            if [ -n "$best" ]; then
+              sudo xcode-select -s "$best/Contents/Developer"
+              echo "switched to: $(xcodebuild -version | head -1), $(clang --version | head -1)"
+            fi
+          fi
+          if [ "$(clang_major)" -lt 16 ]; then
+            echo "::error::Apple clang $(clang_major) cannot compile FreeRDP 3.31+ (C23 nullptr); this runner has no Xcode 16+"
+            exit 1
+          fi
+          # tell CMake explicitly which toolchain and SDK to use
+          echo "CC=$(xcrun -f clang)" >> "$GITHUB_ENV"
+          echo "CXX=$(xcrun -f clang++)" >> "$GITHUB_ENV"
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+
       - name: Install build deps (brew)
         if: runner.os == 'macOS'
         shell: bash

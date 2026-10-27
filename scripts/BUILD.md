@@ -30,6 +30,17 @@ matching feature off with a warning when they are absent (FreeRDP's
 `uwac/CMakeLists.txt` otherwise treats Wayland as required and
 hard-fails, which is what happened on manylinux2014).
 
+## macOS: toolchain
+
+FreeRDP 3.31+ is C23 code (`nullptr` appears in ~270 winpr source files
+alone), and Apple clang accepts that only from **Xcode 16**. The workflow's
+*Select Xcode* step keeps the runner image's default Xcode when it is already
+16+, switches to the newest release Xcode otherwise (betas excluded), and
+fails immediately with a clear message if the runner has none - instead of
+every file failing to compile. It also exports `CC`, `CXX` and `SDKROOT`, so
+the Intel (`macos-15-intel`) and arm64 (`macos-15`) cells build with an
+explicitly identical toolchain.
+
 ## Linux: two glibc floors
 
 Linux is built four times per profile/edition:
