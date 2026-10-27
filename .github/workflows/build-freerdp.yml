@@ -170,6 +170,9 @@ env:
   # 3.31 - see the linux-legacy job for the two blocking reasons. Left
   # here so it can be tried again when FreeRDP's requirements change.
   LEGACY_LINUX: ${{ inputs.legacy_linux || 'no' }}
+  # Android: "yes" renames vendored libraries to unique sonames (see the
+  # android job); default keeps the original names, like the aFreeRDP APK.
+  ANDROID_UNIQUE_SONAMES: "no"
   IOS_LINKAGE: ${{ inputs.ios_linkage || 'dynamic' }}
   ENABLE_CHANNELS: ${{ inputs.enable_channels || '' }}
 
@@ -435,15 +438,31 @@ jobs:
       - name: Install build deps (brew)
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_ENV_HINTS: "1"
         run: |
-          brew update >/dev/null
-          # cairo = image scaler (WITH_CAIRO), openssl@3 = TLS.
-          brew install cmake ninja pkg-config openssl@3 cairo libpng jpeg-turbo
+          set -e
+          # The Intel image (macos-15-intel) and the arm64 one differ in
+          # Homebrew prefix (/usr/local vs /opt/homebrew) and in which
+          # bottles exist. Nothing below hard-codes a prefix; required
+          # packages are installed one by one so a failure names the package,
+          # and the optional GUI ones are allowed to be missing.
+          brew update >/dev/null 2>&1 || echo "::notice::brew update failed; using the image's formulae"
+          for pkg in cmake ninja pkg-config openssl@3 libpng jpeg-turbo; do
+            brew list --versions "$pkg" >/dev/null 2>&1 || brew install "$pkg" \
+              || { echo "::error::brew install $pkg failed on $(uname -m)"; exit 1; }
+          done
+          # cairo: optional image scaler (WITH_CAIRO auto-detected)
+          brew install cairo || echo "::warning::cairo unavailable; WITH_CAIRO will be OFF"
           if [ "${{ matrix.profile }}" = "full" ]; then
-            # nasm: FFmpeg/OpenH264 asm; sdl3 + sdl3_ttf: sdl-freerdp client
-            brew install nasm sdl3 sdl3_ttf
+            brew install nasm || echo "::warning::nasm unavailable"
+            # sdl3 + sdl3_ttf: the sdl-freerdp client, auto-detected
+            brew install sdl3 sdl3_ttf || echo "::warning::sdl3 unavailable; the SDL client is skipped"
           fi
           echo "OPENSSL_ROOT_DIR=$(brew --prefix openssl@3)" >> "$GITHUB_ENV"
+          echo "homebrew prefix: $(brew --prefix) ($(uname -m)), openssl: $(brew --prefix openssl@3)"
 
       - name: Export GitHub Actions cache vars for vcpkg
         if: runner.os == 'Windows'
@@ -1086,7 +1105,13 @@ jobs:
           cp openssl-android-${{ matrix.abi }}/lib/libssl.so \
              openssl-android-${{ matrix.abi }}/lib/libcrypto.so \
              pyfreerdpnative/_libs/android/${{ matrix.abi }}/
-          python scripts/build_freerdp.py --uniquify-sonames pyfreerdpnative/_libs/android/${{ matrix.abi }}
+          # Libraries keep their ORIGINAL names (libcrypto.so, libavcodec.so,
+          # ...) - the same layout as the aFreeRDP APK. ANDROID_UNIQUE_SONAMES=yes
+          # renames them to unique sonames (libcrypto-pyfrdp.so) for host
+          # processes that already loaded their own copies (Termux Python).
+          if [ "${ANDROID_UNIQUE_SONAMES:-no}" = "yes" ]; then
+            python scripts/build_freerdp.py --uniquify-sonames pyfreerdpnative/_libs/android/${{ matrix.abi }}
+          fi
           ls -la pyfreerdpnative/_libs/android/${{ matrix.abi }}/
 
       - name: Verify ELF targets and channel symbols
@@ -1104,8 +1129,8 @@ jobs:
           # missing the device falls back to /system, which on some phones
           # pulls in a broken libunwind.so ("cannot locate symbol
           # XzUnpacker_Construct").
-          ls $d/libc++_shared-pyfrdp.so >/dev/null 2>&1 || {
-            echo "::error::libc++_shared-pyfrdp.so missing from $d"; exit 1; }
+          ls $d/libc++_shared*.so >/dev/null 2>&1 || {
+            echo "::error::libc++_shared.so missing from $d"; exit 1; }
           readelf="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           $readelf -d $d/libwinpr3.so | grep -q "libkrb5" && { echo "::error::libwinpr3 links krb5 on Android (unsupported)"; exit 1; }
           # Vendored dependencies are shipped as shared libraries (like the
@@ -1113,22 +1138,28 @@ jobs:
           # library the host process already loaded. Check both halves: the
           # renamed files exist, and no FreeRDP library still asks for a
           # generic vendor soname.
-          for f in libcrypto-pyfrdp.so libssl-pyfrdp.so libcjson-pyfrdp.so libc++_shared-pyfrdp.so; do
-            [ -f "$d/$f" ] || { echo "::error::$f missing from $d"; exit 1; }
+          # Vendored dependencies are shipped as shared libraries, like the
+          # aFreeRDP APK. With ANDROID_UNIQUE_SONAMES=yes they carry a
+          # "-pyfrdp" suffix; otherwise their original names.
+          sfx=""; [ "${ANDROID_UNIQUE_SONAMES:-no}" = "yes" ] && sfx="-pyfrdp"
+          for f in libcrypto libssl libcjson libc++_shared; do
+            [ -f "$d/$f$sfx.so" ] || { echo "::error::$f$sfx.so missing from $d"; exit 1; }
           done
           case "${{ matrix.edition }}" in
             ffmpeg|media)  for f in libavcodec libavutil libswresample; do
-                             ls $d/$f-pyfrdp.so >/dev/null 2>&1 || { echo "::error::$f-pyfrdp.so missing"; exit 1; }; done ;;
+                             ls $d/$f$sfx.so >/dev/null 2>&1 || { echo "::error::$f$sfx.so missing"; exit 1; }; done ;;
           esac
           case "${{ matrix.edition }}" in
-            openh264|media) ls $d/libopenh264-pyfrdp.so >/dev/null 2>&1 || { echo "::error::libopenh264-pyfrdp.so missing"; exit 1; } ;;
+            openh264|media) ls $d/libopenh264$sfx.so >/dev/null 2>&1 || { echo "::error::libopenh264$sfx.so missing"; exit 1; } ;;
           esac
-          for lib in $d/libfreerdp3.so $d/libwinpr3.so $d/libfreerdp-client3.so; do
-            if $readelf -d "$lib" | grep -E "NEEDED.*\[(libcrypto|libssl|libcjson|libav[a-z]*|libopenh264|libc\+\+_shared)\.so\]"; then
-              echo "::error::$(basename $lib) still needs a generic vendor soname (uniquify_sonames did not run?)"; exit 1
-            fi
-          done
-          echo "vendored sonames uniquified"
+          if [ -n "$sfx" ]; then
+            for lib in $d/libfreerdp3.so $d/libwinpr3.so $d/libfreerdp-client3.so; do
+              if $readelf -d "$lib" | grep -E "NEEDED.*\[(libcrypto|libssl|libcjson|libav[a-z]*|libopenh264|libc\+\+_shared)\.so\]"; then
+                echo "::error::$(basename $lib) still needs a generic vendor soname"; exit 1
+              fi
+            done
+          fi
+          echo "vendored libraries present ($([ -n "$sfx" ] && echo unique sonames || echo original names))"
           echo "edition ${{ matrix.edition }}: libraries linked and shipped"
 
       - name: Package

@@ -28,26 +28,24 @@ storage.
 
 ### How the Android dependencies are shipped
 
-Android's linker resolves `DT_NEEDED` by **soname only** - it never looks in
-the directory a library came from, and a soname already loaded by the process
-wins. Termux's Python loads its own `libcrypto.so` for `hashlib`/`ssl`, so a
-vendored `libcrypto.so` with the standard soname would be ignored and WinPR
-would bind against the host's OpenSSL, failing on the first symbol the two
-versions do not share (`cannot locate symbol "EVP_MAC_fetch"`).
+The wheel ships the dependencies exactly like the aFreeRDP APK does: as
+shared libraries under their **original names** - `libcrypto.so`,
+`libssl.so`, `libcjson.so`, `libopenh264.so`, the FFmpeg libraries and the
+NDK's `libc++_shared.so` next to FreeRDP's own. That is the configuration
+FreeRDP itself tests, and `load()` opens them bottom-up by absolute path in
+the order their `DT_NEEDED` entries dictate, so Android's linker never has
+to search for them.
 
-The wheel therefore ships the dependencies the same way the aFreeRDP APK does
-- as shared libraries, the configuration FreeRDP itself tests - but **renamed
-to unique sonames**, exactly as auditwheel does for Linux wheels:
-
-    libcrypto.so  ->  libcrypto-pyfrdp.so        (file and DT_SONAME)
-    libwinpr3.so:     NEEDED libcrypto.so  ->  NEEDED libcrypto-pyfrdp.so
-
-(`scripts/build_freerdp.py --uniquify-sonames`, using patchelf.) The same
-applies to `libssl`, `libcjson`, `libopenh264`, the FFmpeg libraries and the
-NDK's `libc++_shared.so`, so nothing in `_libs` can collide with anything a
-host process holds - including Termux's own libc++ and the broken
-`/system/lib64/libunwind.so` some devices pull in through it. The loader
-reads each library's `DT_NEEDED` and opens them bottom-up by absolute path.
+**One known trap: a host process that already loaded a library of the same
+soname.** Android resolves `DT_NEEDED` by soname only, and the copy already
+in the process wins. Termux's Python loads its own `libcrypto.so` for
+`hashlib`/`ssl`, so inside Termux WinPR binds to *that* OpenSSL and fails on
+the first symbol the versions do not share (`cannot locate symbol
+"EVP_MAC_fetch"`). For that environment build with
+`ANDROID_UNIQUE_SONAMES=yes` in the workflow env: the vendored libraries are
+then renamed to unique sonames (`libcrypto-pyfrdp.so`) and every `DT_NEEDED`
+rewritten to match - what auditwheel does for Linux wheels. Inside an app
+(Briefcase, Chaquopy) the default original names are the right choice.
 
 ### Termux / Pydroid 3
 
