@@ -60,7 +60,7 @@ on:
       freerdp_ref:
         description: "FreeRDP git ref (tag/branch/sha) to build"
         required: false
-        default: "3.32.1"
+        default: "3.32.2"
       profiles:
         description: "Which build profiles to produce"
         required: false
@@ -159,7 +159,7 @@ env:
   # Keep Python's own output in order with cmake's in the job log.
   PYTHONUNBUFFERED: "1"
   # Defaults for non-dispatch triggers. Dispatch inputs override below.
-  FREERDP_REF: ${{ inputs.freerdp_ref || '3.32.1' }}
+  FREERDP_REF: ${{ inputs.freerdp_ref || '3.32.2' }}
   PROFILES: ${{ inputs.profiles || 'both' }}
   EDITIONS: ${{ inputs.editions || 'all' }}
   # Default (non-dispatch triggers, and the ticked box) is to build it.
@@ -959,7 +959,7 @@ jobs:
       - name: Install host tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake ninja-build git perl
+          sudo apt-get install -y --no-install-recommends cmake ninja-build git perl patchelf
 
       - name: Locate NDK
         id: ndk
@@ -976,7 +976,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: openssl-android-${{ matrix.abi }}
-          key: openssl-staticpic3-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
+          key: openssl-shared2-${{ env.OPENSSL_VERSION }}-${{ matrix.abi }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}
 
       - name: Cross-build OpenSSL for ${{ matrix.abi }}
         if: steps.ssl-cache.outputs.cache-hit != 'true'
@@ -1011,8 +1011,12 @@ jobs:
           # files are compiled. The other ABIs keep their assembly.
           asmopt=""
           if [ "${{ matrix.abi }}" = "armeabi-v7a" ]; then asmopt="no-asm"; fi
+          # SHARED, like the aFreeRDP APK. The resulting libcrypto.so /
+          # libssl.so are renamed to unique sonames when the package is
+          # assembled (uniquify_sonames), which is what makes shipping them
+          # safe next to a host Python that loaded its own OpenSSL.
           ./Configure ${{ matrix.openssl_target }} -D__ANDROID_API__=${API_LEVEL} \
-            no-shared no-tests no-docs $asmopt \
+            shared no-tests no-docs $asmopt \
             -fPIC -DOPENSSL_PIC \
             --prefix="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}" \
             --openssldir="$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/ssl"
@@ -1040,12 +1044,12 @@ jobs:
           esac
           "$cc" -shared -fPIC -o /tmp/piccheck.so /tmp/piccheck.c \
             -I"$GITHUB_WORKSPACE/openssl-android-${{ matrix.abi }}/include" \
-            "$lib/libcrypto.a" -llog 2>/tmp/piccheck.log || {
-              echo "::error::libcrypto.a cannot be linked into a shared library:"
+            -L"$lib" -lcrypto -llog 2>/tmp/piccheck.log || {
+              echo "::error::libcrypto.so cannot be linked against:"
               tail -20 /tmp/piccheck.log
               exit 1
             }
-          echo "libcrypto.a links into a shared library: OK"
+          echo "libcrypto.so links: OK"
 
       # Every edition needs a dependency prefix on mobile: winpr requires a
       # JSON library from FreeRDP 3.31 on, and it must be cross-built (cJSON)
@@ -1055,7 +1059,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: build/deps/android-${{ matrix.abi }}-${{ matrix.edition }}
-          key: deps-v4static-android-${{ matrix.abi }}-${{ matrix.edition }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}-${{ hashFiles('scripts/build_deps.py') }}
+          key: deps-v5shared-android-${{ matrix.abi }}-${{ matrix.edition }}-api${{ env.API_LEVEL }}-ndk${{ steps.ndk.outputs.revision }}-${{ hashFiles('scripts/build_deps.py') }}
 
       - name: Build dependencies (${{ matrix.edition }})
         if: steps.deps-cache.outputs.cache-hit != 'true'
@@ -1076,15 +1080,13 @@ jobs:
           python scripts/build_freerdp.py \
             --target android --abi ${{ matrix.abi }} --api-level ${API_LEVEL} \
             --ref "$FREERDP_REF" --profile ${{ matrix.profile }} --jobs "$(nproc)" $args
-          # OpenSSL is linked statically into the FreeRDP libraries on
-          # Android (a bundled libcrypto.so would be shadowed by whatever the
-          # host process already loaded - see docs/MOBILE.md), so there is
-          # nothing to copy. Fail loudly if a shared copy reappears, because
-          # that silently reintroduces the soname clash.
-          if ls openssl-android-${{ matrix.abi }}/lib/libcrypto.so >/dev/null 2>&1; then
-            echo "::error::OpenSSL was built shared for Android; it must be no-shared"
-            exit 1
-          fi
+          # Ship OpenSSL alongside, as the APK does. build_freerdp.py then
+          # renames every vendored library to a unique soname and rewrites
+          # DT_NEEDED accordingly, so nothing here can collide with the host.
+          cp openssl-android-${{ matrix.abi }}/lib/libssl.so \
+             openssl-android-${{ matrix.abi }}/lib/libcrypto.so \
+             pyfreerdpnative/_libs/android/${{ matrix.abi }}/
+          python scripts/build_freerdp.py --uniquify-sonames pyfreerdpnative/_libs/android/${{ matrix.abi }}
           ls -la pyfreerdpnative/_libs/android/${{ matrix.abi }}/
 
       - name: Verify ELF targets and channel symbols
@@ -1102,22 +1104,31 @@ jobs:
           # missing the device falls back to /system, which on some phones
           # pulls in a broken libunwind.so ("cannot locate symbol
           # XzUnpacker_Construct").
-          ls $d/libc++_shared.so >/dev/null 2>&1 || {
-            echo "::error::libc++_shared.so missing from $d"; exit 1; }
+          ls $d/libc++_shared-pyfrdp.so >/dev/null 2>&1 || {
+            echo "::error::libc++_shared-pyfrdp.so missing from $d"; exit 1; }
           readelf="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           $readelf -d $d/libwinpr3.so | grep -q "libkrb5" && { echo "::error::libwinpr3 links krb5 on Android (unsupported)"; exit 1; }
-          # OpenSSL, cJSON, OpenH264 and FFmpeg are linked STATICALLY into the
-          # FreeRDP libraries on Android (see docs/MOBILE.md): _libs holds only
-          # FreeRDP's own libraries. Verify the code is really in there
-          # instead of looking for shared objects that no longer exist.
+          # Vendored dependencies are shipped as shared libraries (like the
+          # aFreeRDP APK) under UNIQUE sonames, so nothing can collide with a
+          # library the host process already loaded. Check both halves: the
+          # renamed files exist, and no FreeRDP library still asks for a
+          # generic vendor soname.
+          for f in libcrypto-pyfrdp.so libssl-pyfrdp.so libcjson-pyfrdp.so libc++_shared-pyfrdp.so; do
+            [ -f "$d/$f" ] || { echo "::error::$f missing from $d"; exit 1; }
+          done
           case "${{ matrix.edition }}" in
-            ffmpeg|media) $nm -D --defined-only $d/libfreerdp3.so | grep -q avcodec_ \
-              || { echo "::error::libfreerdp3 has no FFmpeg symbols"; exit 1; } ;;
+            ffmpeg|media)  for f in libavcodec libavutil libswresample; do
+                             ls $d/$f-pyfrdp.so >/dev/null 2>&1 || { echo "::error::$f-pyfrdp.so missing"; exit 1; }; done ;;
           esac
           case "${{ matrix.edition }}" in
-            openh264|media) $nm --defined-only $d/libfreerdp3.so 2>/dev/null | grep -qi welsCreateSVCEncoder \
-              || echo "::notice::openh264 symbols are hidden (expected: static link with hidden visibility)" ;;
+            openh264|media) ls $d/libopenh264-pyfrdp.so >/dev/null 2>&1 || { echo "::error::libopenh264-pyfrdp.so missing"; exit 1; } ;;
           esac
+          for lib in $d/libfreerdp3.so $d/libwinpr3.so $d/libfreerdp-client3.so; do
+            if $readelf -d "$lib" | grep -E "NEEDED.*\[(libcrypto|libssl|libcjson|libav[a-z]*|libopenh264|libc\+\+_shared)\.so\]"; then
+              echo "::error::$(basename $lib) still needs a generic vendor soname (uniquify_sonames did not run?)"; exit 1
+            fi
+          done
+          echo "vendored sonames uniquified"
           echo "edition ${{ matrix.edition }}: libraries linked and shipped"
 
       - name: Package
@@ -2097,7 +2108,7 @@ jobs:
               (cd "$d" && zip -qr "../../release/$name.zip" .)
             elif { has_app=false; for a in "$d"/*.app "$d"/*/*.app; do [ -d "$a" ] && has_app=true; done; $has_app; }; then
               # the iFreeRDP .app is a directory tree: ship it as one zip
-              # (e.g. ifreerdp-3.32.1-OS64.zip), unsigned unless --sign-ios-app
+              # (e.g. ifreerdp-3.32.2-OS64.zip), unsigned unless --sign-ios-app
               (cd "$d" && zip -qr --symlinks "../../release/$name.zip" .)
             else
               # wheels, sdists, the aFreeRDP .apk files: already plain files

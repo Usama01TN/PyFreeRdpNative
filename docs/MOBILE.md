@@ -19,37 +19,35 @@ Cross-install from a desktop into the app's Python site-packages:
 ```bash
 pip install --platform android_24_arm64_v8a --only-binary :all: \
     --target app/src/main/python pyfreerdpnative \
-    --find-links https://github.com/Usama01TN/PyFreeRdpNative/releases/expanded_assets/freerdp-libs-3.32.1
+    --find-links https://github.com/Usama01TN/PyFreeRdpNative/releases/expanded_assets/freerdp-libs-3.32.2
 ```
 
 Then `load()` finds `pyfreerdpnative/_libs` inside the app and `dlopen`s from
 there — Android permits loading native libraries from the app's private
 storage.
 
-### Why the Android libraries bundle no OpenSSL
+### How the Android dependencies are shipped
 
 Android's linker resolves `DT_NEEDED` by **soname only** - it never looks in
 the directory a library came from, and a soname already loaded by the process
 wins. Termux's Python loads its own `libcrypto.so` for `hashlib`/`ssl`, so a
-bundled `libcrypto.so` next to `libwinpr3.so` is ignored and WinPR binds
-against the host's OpenSSL. When the two versions differ the load fails on the
-first symbol they do not share (`cannot locate symbol "EVP_MAC_fetch"`).
+vendored `libcrypto.so` with the standard soname would be ignored and WinPR
+would bind against the host's OpenSSL, failing on the first symbol the two
+versions do not share (`cannot locate symbol "EVP_MAC_fetch"`).
 
-OpenSSL, cJSON and the other third-party dependencies are therefore linked
-**statically** into the FreeRDP libraries on Android (as they already were on
-iOS), built with `-fPIC -DOPENSSL_PIC` so they can go inside a shared
-library; `armeabi-v7a` additionally uses `no-asm`, because OpenSSL's ARMv4
-assembly references `OPENSSL_armcap_P` with a relocation lld rejects there.
-FFmpeg is built without its assembly (same class of relocation problem),
-without MediaCodec/JNI (they pull in `libandroid`), and without the
-libopenh264 wrapper - FreeRDP uses OpenH264 directly and FFmpeg keeps its own
-software H.264 decoder. Every static dependency is built position
-independent (`-fPIC` / `--with-pic`), since they all end up inside a shared
-library; libusb needs `--with-pic` explicitly because libtool otherwise
-emits non-PIC objects for the static archive. `_libs` then contains only FreeRDP's own libraries plus the NDK's
-`libc++_shared.so` (copied in by the build - Android itself does not provide
-it, and falling back to `/system` drags in some devices' broken
-`libunwind.so`), none of whose sonames a host process is likely to hold.
+The wheel therefore ships the dependencies the same way the aFreeRDP APK does
+- as shared libraries, the configuration FreeRDP itself tests - but **renamed
+to unique sonames**, exactly as auditwheel does for Linux wheels:
+
+    libcrypto.so  ->  libcrypto-pyfrdp.so        (file and DT_SONAME)
+    libwinpr3.so:     NEEDED libcrypto.so  ->  NEEDED libcrypto-pyfrdp.so
+
+(`scripts/build_freerdp.py --uniquify-sonames`, using patchelf.) The same
+applies to `libssl`, `libcjson`, `libopenh264`, the FFmpeg libraries and the
+NDK's `libc++_shared.so`, so nothing in `_libs` can collide with anything a
+host process holds - including Termux's own libc++ and the broken
+`/system/lib64/libunwind.so` some devices pull in through it. The loader
+reads each library's `DT_NEEDED` and opens them bottom-up by absolute path.
 
 ### Termux / Pydroid 3
 

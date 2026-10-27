@@ -4,7 +4,7 @@ build_freerdp.py - fetch + compile FreeRDP (client + server), copy artifacts
                    into pyfreerdpnative/_libs/.
 
 Usage:
-    python -m pyfreerdpnative.scripts.build_freerdp [--ref v3.32.1]
+    python -m pyfreerdpnative.scripts.build_freerdp [--ref v3.32.2]
                                               [--prefix /opt/freerdp]
                                               [--target {host,android,ios}]
                                               [--abi arm64-v8a]
@@ -79,7 +79,7 @@ import sys
 import tempfile
 
 REPO_URL = "https://github.com/FreeRDP/FreeRDP.git"
-DEFAULT_REF = "3.32.1"  # old version: "3.16.0"
+DEFAULT_REF = "3.32.2"  # old version: "3.16.0"
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +172,7 @@ def fetch_source(ref, dest):
 # ---------------------------------------------------------------------------
 
 # Channel table, taken from channels/*/ChannelOptions.cmake in FreeRDP
-# 3.32.1. Keys are the CMake channel names (CHANNEL_<NAME> after upper()).
+# 3.32.2. Keys are the CMake channel names (CHANNEL_<NAME> after upper()).
 #
 #   type    : "static" (goes over the MCS/static virtual channel layer),
 #             "dynamic" (needs drdynvc), "device" (needs rdpdr).
@@ -389,11 +389,11 @@ def expected_libs(profile, host_os, windows_shadow=None):
     return libs
 
 
-# WebView backends the FreeRDP 3.32.1 SDL client can use for the AAD/Entra ID
+# WebView backends the FreeRDP 3.32.2 SDL client can use for the AAD/Entra ID
 # login popup (client/SDL/common/aad, option WITH_WEBVIEW). The webview
 # library itself is pulled in with FetchContent at configure time, so the
 # build host needs network access. NB: WITH_WEBVIEW_QT does not exist in
-# 3.32.1 - it is a newer upstream addition.
+# 3.32.2 - it is a newer upstream addition.
 LINUX_WEBVIEW_PC = ("webkit2gtk-4.1", "webkit2gtk-4.0", "webkitgtk-6.0")
 
 
@@ -411,7 +411,7 @@ def webview_available(host_os):
 def sdl_available(host_os, deps_prefix=None):
     """
     Which SDL the sdl-freerdp client can be built against: "sdl3", "sdl2" or
-    False. FreeRDP 3.32.1 prefers SDL3 and keeps a deprecated SDL2 client as a
+    False. FreeRDP 3.32.2 prefers SDL3 and keeps a deprecated SDL2 client as a
     fallback (client/SDL/CMakeLists.txt auto-detects both); distributions
     older than SDL3 - Ubuntu 24.04, for instance - only ship SDL2.
     """
@@ -830,7 +830,7 @@ def media_channels(deps_prefix, host_os, target="host"):
     if deps_has(deps_prefix, "libusb-1.0") and target != "ios":
         chans.append("urbdrc")
     # rdpecam client: needs swscale and a capture backend; only Linux has
-    # one (V4L) in FreeRDP 3.32.1. Server side is always on.
+    # one (V4L) in FreeRDP 3.32.2. Server side is always on.
     if host_os == "Linux" and target == "host" and deps_has_ffmpeg(deps_prefix):
         chans.append("rdpecam")
     return chans
@@ -1264,7 +1264,7 @@ def _patch_opus_download(src):
 
       * 3.31.1 fetched .../archive/refs/tags/${OPUS_VERSION}.tar.gz, but
         xiph's tag is v1.5.2, so the un-prefixed name 404s.
-      * 3.32.1 fetches .../releases/download/v${OPUS_VERSION}/opus-...tar.gz
+      * 3.32.2 fetches .../releases/download/v${OPUS_VERSION}/opus-...tar.gz
         and pins THAT tarball's hash - a consistent pair. The previous
         version of this patch rewrote only the hash (to the archive's),
         which broke the pair and made every download fail with
@@ -1494,7 +1494,7 @@ def build_sample_client(src, prefix, host_os, arch, deps_prefix, jobs,
     client/CMakeLists.txt only adds it in the non-WIN32 branch (wfreerdp
     takes that slot), so we build it separately. client/Sample supports
     standalone builds via find_package(WinPR/FreeRDP/FreeRDP-Client), but
-    3.32.1 forgets to include InstallFreeRDPDesktop.cmake, which is why
+    3.32.2 forgets to include InstallFreeRDPDesktop.cmake, which is why
     CMAKE_PROJECT_sfreerdp_INCLUDE points at it.
     """
     sample_src = os.path.join(src, "client", "Sample")
@@ -2714,6 +2714,68 @@ ANDROID_STL_TRIPLES = {
 }
 
 
+# Libraries that are OURS: they keep their names. Everything else in an
+# Android _libs is a vendored dependency and gets a unique soname.
+OWN_LIB_PREFIXES = ("libfreerdp", "libwinpr", "libuwac", "librdtk")
+SONAME_SUFFIX = "-pyfrdp"
+
+
+def uniquify_sonames(libs_dir, suffix=SONAME_SUFFIX):
+    """
+    Give every vendored library in `libs_dir` a unique soname and rewrite
+    the DT_NEEDED entries of all libraries there to match - what auditwheel
+    does for Linux wheels.
+
+    Android's linker resolves DT_NEEDED by soname only, and a soname already
+    loaded by the process wins. Termux's Python loads its own libcrypto.so
+    for hashlib/ssl, so a vendored libcrypto.so with the standard soname is
+    silently ignored and FreeRDP binds to the host's OpenSSL, failing on the
+    first symbol the versions do not share. With libcrypto-pyfrdp.so there
+    is nothing to collide with, and the aFreeRDP APK's proven shared-library
+    layout can be shipped as is.
+
+        libcrypto.so     -> libcrypto-pyfrdp.so     (file AND DT_SONAME)
+        libwinpr3.so: NEEDED libcrypto.so -> NEEDED libcrypto-pyfrdp.so
+
+    Returns the {old: new} mapping. Needs patchelf.
+    """
+    require_tools(["patchelf"])
+    libs = sorted(f for f in os.listdir(libs_dir) if f.endswith(".so"))
+    mapping = {}
+    for name in libs:
+        if name.startswith(OWN_LIB_PREFIXES) or suffix in name:
+            continue
+        mapping[name] = name[:-3] + suffix + ".so"
+    if not mapping:
+        print("[sonames] nothing to rename in {0}".format(libs_dir))
+        return mapping
+    for old, new in mapping.items():
+        src, dst = os.path.join(libs_dir, old), os.path.join(libs_dir, new)
+        os.rename(src, dst)
+        run(["patchelf", "--set-soname", new, dst])
+        print("[sonames] {0} -> {1}".format(old, new))
+    for name in sorted(os.listdir(libs_dir)):
+        if not name.endswith(".so"):
+            continue
+        path = os.path.join(libs_dir, name)
+        needed = subprocess.run(["patchelf", "--print-needed", path], stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE).stdout.decode().split()
+        for old, new in mapping.items():
+            if old in needed:
+                run(["patchelf", "--replace-needed", old, new, path])
+    leftovers = []
+    for name in sorted(os.listdir(libs_dir)):
+        if not name.endswith(".so"):
+            continue
+        needed = subprocess.run(["patchelf", "--print-needed", os.path.join(libs_dir, name)],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().split()
+        leftovers += [(name, d) for d in needed if d in mapping]
+    if leftovers:
+        raise SystemExit("[sonames] DT_NEEDED still references renamed libraries: {0}".format(leftovers))
+    print("[sonames] {0} vendored libraries uniquified; all DT_NEEDED rewritten".format(len(mapping)))
+    return mapping
+
+
 def copy_android_stl(target, abi):
     """
     Copy libc++_shared.so for exactly this ABI out of the NDK into `target`.
@@ -3285,6 +3347,9 @@ def main():
     p.add_argument("--ref", default=DEFAULT_REF, help="Git ref to build")
     p.add_argument("--prefix", default=None,
                    help="Install prefix for host builds (default: temp dir)")
+    p.add_argument("--uniquify-sonames", metavar="DIR",
+                   help="give the vendored libraries in DIR unique sonames and "
+                        "rewrite DT_NEEDED (Android _libs); then exit")
     p.add_argument("--target",
                    choices=("host", "android", "ios", "android-apk", "ios-app"),
                    default="host")
@@ -3398,7 +3463,7 @@ def main():
                         "Linux, WebKit on macOS, Edge WebView2 on Windows. "
                         "The webview library is fetched at configure time, so "
                         "the host needs network access. (WITH_WEBVIEW_QT does "
-                        "not exist in FreeRDP 3.32.1.)")
+                        "not exist in FreeRDP 3.32.2.)")
     p.add_argument("--no-webview", dest="webview", action="store_false",
                    help="Build the SDL client without the AAD login WebView.")
     p.add_argument("--with-windows-shadow", dest="with_windows_shadow",
@@ -3438,6 +3503,9 @@ def main():
     p.add_argument("--skip-verify", action="store_true",
                    help="Skip post-install library verification")
     args = p.parse_args()
+    if getattr(args, "uniquify_sonames", None):
+        uniquify_sonames(args.uniquify_sonames)
+        return
 
     if args.print_version:
         print(BUILD_SCRIPT_VERSION)

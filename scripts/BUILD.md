@@ -1,7 +1,7 @@
 # Native build system
 
-> **FreeRDP 3.32.1.** The generated `pyfreerdpnative/` package is the
-> 3.32.1 one. The `bindings-up-to-date` job re-checks it on every push.
+> **FreeRDP 3.32.2.** The generated `pyfreerdpnative/` package is the
+> 3.32.2 one. The `bindings-up-to-date` job re-checks it on every push.
 
 
 > This document covers building the **FreeRDP libraries**. The Python side
@@ -82,7 +82,7 @@ opus, jpeg, png, webp, uriparser) from source, so they ignore
 ```bash
 # aFreeRDP APK  (needs a JDK and ANDROID_HOME; the NDK comes from the SDK
 # manager at the version client/Android/Studio/build.gradle asks for)
-python scripts/build_freerdp.py --target android-apk --ref 3.32.1
+python scripts/build_freerdp.py --target android-apk --ref 3.32.2
 #   -> build/android-apk/*.apk   (per-ABI splits + a universal APK)
 
 # iFreeRDP app  (macOS + Xcode)
@@ -258,7 +258,7 @@ The webview library itself is pulled in by CMake `FetchContent` at configure
 time, so the build host needs network access. Disable with `--no-webview`;
 force on with `--with-webview`. The minimal profile never builds it.
 
-**`WITH_WEBVIEW_QT` does not exist in FreeRDP 3.32.1** - it is a newer
+**`WITH_WEBVIEW_QT` does not exist in FreeRDP 3.32.2** - it is a newer
 upstream option. If you move to a FreeRDP version that has it, it would be a
 one-line addition next to `WITH_WEBVIEW` in `profile_options()`.
 
@@ -385,7 +385,7 @@ Summary. Additionally the `links` job attaches every artifact to the rolling
 pre-release `freerdp-libs-<freerdp_ref>` on each push to `main`, on
 `workflow_dispatch` with `publish_release`, and on `release: published`, so
 there are permanent download URLs of the form
-`https://github.com/<owner>/<repo>/releases/download/freerdp-libs-3.32.1/freerdp-3.32.1-<platform>-<profile>.tar.gz`
+`https://github.com/<owner>/<repo>/releases/download/freerdp-libs-3.32.2/freerdp-3.32.2-<platform>-<profile>.tar.gz`
 (`.zip` on Windows).
 
 ## Reproducibility
@@ -393,7 +393,7 @@ there are permanent download URLs of the form
 Sources are pinned by version and SHA-256 (`KNOWN_HASHES`); `vcpkg.json` pins
 a registry baseline (resolved at build time against the runner's vcpkg clone,
 falling back to its HEAD if the pinned commit is absent - the chosen commit is
-printed and stored in the diagnostics); FreeRDP is pinned by tag (`--ref`, default 3.32.1). CI
+printed and stored in the diagnostics); FreeRDP is pinned by tag (`--ref`, default 3.32.2). CI
 caches `build/deps/<label>` keyed on the hash of `build_deps.py` +
 `vcpkg.json`, so a dependency change rebuilds everything and nothing else does.
 To bump a dependency: change the version in `SOURCES`, run
@@ -404,7 +404,7 @@ To bump a dependency: change the version in `SOURCES`, run
 * Windows `arm64` and `x86` FreeRDP builds are cross-compiled; the workflow
   load-tests arm64 natively on `windows-11-arm` and x86 with a 32-bit Python.
 * `rdpecam`'s client half has a capture backend only on Linux (V4L) in FreeRDP
-  3.32.1; the server half is built everywhere.
+  3.32.2; the server half is built everywhere.
 * GSM 6.10, MS-ADPCM, G.723.1 and A-law/µ-law audio go through FreeRDP's
   built-in codecs, not FFmpeg (upstream filters them out of the FFmpeg backend
   unless `WITH_DSP_EXPERIMENTAL`).

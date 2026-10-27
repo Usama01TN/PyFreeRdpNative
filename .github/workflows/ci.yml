@@ -97,7 +97,7 @@ jobs:
         shell: bash
         run: |
           set -e
-          # build-freerdp.yml: FREERDP_REF: ${{ inputs.freerdp_ref || '3.32.1' }} -> the default
+          # build-freerdp.yml: FREERDP_REF: ${{ inputs.freerdp_ref || '3.32.2' }} -> the default
           ref=$(grep -oE "freerdp_ref \|\| '[^']+'" .github/workflows/build-freerdp.yml | head -1 | grep -oE "'[^']+'" | tr -d "'")
           test -n "$ref" || { echo "::error::could not read the FreeRDP tag from build-freerdp.yml"; exit 1; }
           echo "FreeRDP tag: $ref"

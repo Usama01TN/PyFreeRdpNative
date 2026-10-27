@@ -322,14 +322,13 @@ class Toolchain(object):
         if target in ("android", "ios"):
             self.env["PKG_CONFIG_LIBDIR"] = self.env["PKG_CONFIG_PATH"]
             self.env["PKG_CONFIG_SYSROOT_DIR"] = ""
-        # Static third-party libraries on the mobile targets. iOS forbids
-        # shared libraries outside an app bundle; Android resolves DT_NEEDED
-        # by SONAME only, so a bundled libcrypto.so / libssl.so / libcjson.so
-        # is shadowed by any copy the host process already loaded (Termux's
-        # Python loads its own OpenSSL for hashlib/ssl) - and then FreeRDP
-        # binds to the wrong version and fails on the first symbol they do
-        # not share. Linked in, there is nothing to collide with.
-        self.shared = target not in ("ios", "android")
+        # Shared third-party libraries everywhere but iOS (an app bundle may
+        # not contain them). On Android they are shipped exactly like the
+        # aFreeRDP APK ships them - the configuration FreeRDP itself tests -
+        # and then given UNIQUE sonames (see build_freerdp.uniquify_sonames),
+        # so a host process that already loaded its own libcrypto.so (Termux
+        # Python does, for hashlib/ssl) can never shadow ours.
+        self.shared = target != "ios"
         self._setup()
 
     # -- per-target ---------------------------------------------------------
@@ -455,7 +454,8 @@ class Toolchain(object):
              # library ("relocation R_AARCH64_ADR_PREL_PG_HI21 ... against
              # symbol 'ff_tx_tab_32_float'"), and --enable-pic does not cover
              # it. Mobile builds therefore use the C paths.
-             ] + (["--disable-asm"] if self.target in ("android", "ios") else []) + [
+             ] + (["--disable-asm"] if self.target == "ios" or
+                  (self.target == "android" and not self.shared) else []) + [
              "--disable-autodetect", "--enable-pthreads",
              "--pkg-config-flags=--static" if not self.shared else
              "--pkg-config=pkg-config",

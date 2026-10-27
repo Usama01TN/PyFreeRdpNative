@@ -81,3 +81,28 @@ def test_android_ships_the_ndk_stl():
     src = open(os.path.join(SCRIPTS, "build_freerdp.py")).read()
     assert "copy_android_stl" in src
     assert "libc++_shared.so" in src
+
+def test_uniquify_sonames_rewrites_vendored_deps(tmp_path):
+    """
+    Android: vendored libraries get unique sonames and every DT_NEEDED is
+    rewritten, so a host process that already loaded e.g. libcrypto.so can
+    never shadow ours. Uses real ELF files built with gcc; skipped without
+    gcc/patchelf.
+    """
+    import shutil
+    if not (shutil.which("gcc") and shutil.which("patchelf")):
+        import pytest
+        pytest.skip("gcc/patchelf not available")
+    d = tmp_path
+    (d / "c.c").write_text("int EVP_MAC_fetch(void){return 1;}")
+    (d / "w.c").write_text("extern int EVP_MAC_fetch(void); int w(void){return EVP_MAC_fetch();}")
+    subprocess.check_call(["gcc", "-shared", "-fPIC", "-Wl,-soname,libcrypto.so", "-o", str(d / "libcrypto.so"), str(d / "c.c")])
+    subprocess.check_call(["gcc", "-shared", "-fPIC", "-Wl,-soname,libwinpr3.so", "-o", str(d / "libwinpr3.so"),
+                           str(d / "w.c"), "-L" + str(d), "-lcrypto"])
+    out = subprocess.check_output([sys.executable, os.path.join(SCRIPTS, "build_freerdp.py"),
+                                   "--uniquify-sonames", str(d)], stderr=subprocess.STDOUT).decode()
+    assert "uniquified" in out
+    assert (d / "libcrypto-pyfrdp.so").exists() and not (d / "libcrypto.so").exists()
+    needed = subprocess.check_output(["patchelf", "--print-needed", str(d / "libwinpr3.so")]).decode().split()
+    assert "libcrypto-pyfrdp.so" in needed and "libcrypto.so" not in needed
+    assert subprocess.check_output(["patchelf", "--print-soname", str(d / "libcrypto-pyfrdp.so")]).decode().strip() == "libcrypto-pyfrdp.so"
