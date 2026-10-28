@@ -348,6 +348,31 @@ jobs:
           # manylinux2014 is CentOS 7 (yum, devtoolset); 2_28/2_34 are
           # AlmaLinux (dnf) with a modern GCC already in place.
           if command -v dnf >/dev/null 2>&1; then PM=dnf; else PM=yum; fi
+          # Mirror hiccups are routine ("repomd.xml parser error ... Document
+          # is empty" = a mirror caught mid-sync). The mirrorlist hands out a
+          # random mirror per run, so retry, drop the cached metadata, and
+          # after the second failure stop using mirrors altogether: point
+          # every repo at the official repo.almalinux.org baseurl.
+          PMOPTS="--setopt=retries=10 --setopt=timeout=60"
+          pin_official_repos() {
+            for f in /etc/yum.repos.d/almalinux*.repo; do
+              [ -f "$f" ] || continue
+              sed -i -e 's/^mirrorlist=/#mirrorlist=/' \
+                     -e 's|^# *baseurl=|baseurl=|' "$f"
+            done
+            echo "::notice::pinned AlmaLinux repositories to repo.almalinux.org"
+          }
+          pm_install() {
+            for attempt in 1 2 3 4; do
+              $PM -y $PMOPTS install "$@" && return 0
+              echo "::warning::$PM install failed (attempt $attempt of 4): $*"
+              $PM clean all >/dev/null 2>&1 || true
+              rm -rf /var/cache/dnf /var/cache/yum 2>/dev/null || true
+              [ "$attempt" -eq 2 ] && [ "$PM" = dnf ] && pin_official_repos
+              sleep $((attempt * 15))
+            done
+            return 1
+          }
           # X11/Wayland -devel packages are in the CRB (AlmaLinux 9) or
           # PowerTools (AlmaLinux 8) repository, which is disabled by default.
           # Without it `find_package(Wayland)` fails the full profile.
@@ -363,18 +388,20 @@ jobs:
               [ -d "$d" ] && echo "$d" >> "$GITHUB_PATH" && break
             done
           fi
-          $PM -y install epel-release || true
-          $PM -y install \
+          pm_install epel-release || true
+          pm_install \
             cmake ninja-build git pkgconfig patchelf \
             openssl-devel zlib-devel krb5-devel libicu-devel \
-            alsa-lib-devel libpng-devel libjpeg-turbo-devel cairo-devel
+            alsa-lib-devel libpng-devel libjpeg-turbo-devel cairo-devel || {
+            echo "::error::required build packages could not be installed after 4 attempts (repository unreachable?)"
+            exit 1; }
           # cJSON is not in the base repos of every image; FreeRDP falls back
           # to its bundled copy when it is missing.
-          $PM -y install cjson-devel || echo "::notice::cjson-devel unavailable; FreeRDP will use its bundled cJSON"
+          pm_install cjson-devel || echo "::notice::cjson-devel unavailable; FreeRDP will use its bundled cJSON"
           if [ "${{ matrix.profile }}" = "full" ]; then
             # these decide WITH_X11/WITH_WAYLAND; report what is missing
             # instead of letting cmake fail later with "Could NOT find Wayland"
-            $PM -y install \
+            pm_install \
               libX11-devel libXext-devel libXrandr-devel libXinerama-devel \
               libXfixes-devel libXcursor-devel libXi-devel libXv-devel \
               libxkbfile-devel libxkbcommon-devel \
@@ -384,14 +411,14 @@ jobs:
               pkg-config --exists "$pc" || echo "::warning::$pc not available in this image"
             done
             # GTK/WebKit (the wlfreerdp/GTK bits) and SDL are optional here.
-            $PM -y install gtk3-devel SDL2-devel SDL2_ttf-devel || \
+            pm_install gtk3-devel SDL2-devel SDL2_ttf-devel || \
               echo "::notice::optional GUI packages unavailable in this image"
           fi
           for ch in $ENABLE_CHANNELS; do
             case "$ch" in
-              urbdrc)  $PM -y install libusbx-devel || true ;;
-              printer) $PM -y install cups-devel || true ;;
-              rdpecam) $PM -y install libv4l-devel || true ;;
+              urbdrc)  pm_install libusbx-devel || true ;;
+              printer) pm_install cups-devel || true ;;
+              rdpecam) pm_install libv4l-devel || true ;;
             esac
           done
           echo "PYFREERDP_IN_MANYLINUX=1" >> "$GITHUB_ENV"
