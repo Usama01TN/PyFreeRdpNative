@@ -5,7 +5,7 @@ ctypes and the struct/constant definitions from the header mirror apply.
 
     from pyfreerdpnative import load
     api = load()                      # finds pyfreerdpnative/_libs automatically
-    api.freerdp_get_version_string()  # -> b'3.32.2'
+    api.freerdp_get_version_string()  # -> b'3.33.0'
     ctx = api.freerdp_client_context_new(ctypes.byref(entry))
 
 `api.<name>` resolves the function in whichever library exports it (winpr,
@@ -18,7 +18,7 @@ import os
 import platform
 
 from ._core import constants, types
-from ._core.functions import bind
+from ._core.functions import PROTOTYPES, bind
 
 # Load order matters: each depends on the ones before it.
 LIBRARIES = ("winpr3", "freerdp3", "freerdp-client3", "freerdp-server3")
@@ -338,9 +338,34 @@ class FreeRDP(object):
                     return getattr(lib, name)
                 except AttributeError:
                     pass
+            # On Windows, WinPR does not export the Win32 APIs it implements
+            # elsewhere (WaitForMultipleObjects, CreateEventA, ...): its headers
+            # declare them only under #ifndef _WIN32 and the real ones live in
+            # kernel32. Serve them from there, typed by the same prototype.
+            win32 = self._win32_function(name)
+            if win32 is not None:
+                return win32
             raise AttributeError("{0} is not exported by any loaded FreeRDP "
                                  "library".format(name))
         return getattr(self.libs[stem], name)
+
+    def _win32_function(self, name):
+        if platform.system() != "Windows" or name not in PROTOTYPES:
+            return None
+        cache = self.__dict__.setdefault("_win32_cache", {})
+        if name in cache:
+            return cache[name]
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            fn = getattr(kernel32, name)
+        except (AttributeError, OSError):
+            return None
+        restype, argtypes, variadic = PROTOTYPES[name]
+        fn.restype = restype
+        if not variadic:
+            fn.argtypes = argtypes
+        cache[name] = fn
+        return fn
 
     def has(self, name):
         return name in self._lookup

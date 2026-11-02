@@ -1,7 +1,7 @@
 # Native build system
 
-> **FreeRDP 3.32.2.** The generated `pyfreerdpnative/` package is the
-> 3.32.2 one. The `bindings-up-to-date` job re-checks it on every push.
+> **FreeRDP 3.33.0.** The generated `pyfreerdpnative/` package is the
+> 3.33.0 one. The `bindings-up-to-date` job re-checks it on every push.
 
 
 > This document covers building the **FreeRDP libraries**. The Python side
@@ -93,7 +93,7 @@ opus, jpeg, png, webp, uriparser) from source, so they ignore
 ```bash
 # aFreeRDP APK  (needs a JDK and ANDROID_HOME; the NDK comes from the SDK
 # manager at the version client/Android/Studio/build.gradle asks for)
-python scripts/build_freerdp.py --target android-apk --ref 3.32.2
+python scripts/build_freerdp.py --target android-apk --ref 3.33.0
 #   -> build/android-apk/*.apk   (per-ABI splits + a universal APK)
 
 # iFreeRDP app  (macOS + Xcode)
@@ -253,25 +253,42 @@ including telemetry, rdpemsc and rdpecam. `--list-channels` prints the table;
 `--ios-platform` and `--abi` select mobile targets. `--deps-prefix auto`
 resolves to `build/deps/<label>` for the current target.
 
-## AAD / Entra ID login WebView
+## AAD / Entra ID login helpers
 
-The SDL client can open the Azure AD (Entra ID) login page in an embedded
-browser (`WITH_WEBVIEW`). It is enabled automatically in the **full** profile
-wherever `sdl-freerdp` is built and a backend exists:
+FreeRDP 3.33 signs in to Azure AD (Entra ID) through an **out-of-process
+helper**: a small program that shows the Microsoft login page and reports the
+redirect back over a JSON-RPC pipe pair (FreeRDP's
+`client/common/aad-helper-protocol.md`). It replaces 3.32's in-process
+`WITH_WEBVIEW`, which no longer exists. Both helpers are built in the **full**
+profile when their browser engine is found, and need winpr's JSON support:
 
-| Platform | Backend | Extra build dependency |
-|---|---|---|
-| Linux | WebKitGTK | `libgtk-3-dev`, `libwebkit2gtk-4.1-dev` (probed with pkg-config) — and an SDL client, see below |
-| macOS | WebKit (WKWebView) | none - system framework |
-| Windows | Edge WebView2 | none - loader fetched by the webview library |
+| Helper | CMake option | Browser engine | Build dependency |
+|---|---|---|---|
+| `freerdp-webview-aad-helper` | `WITH_WEBVIEW_AAD_AUTH_HELPER` | WebKitGTK (Linux), WKWebView (macOS), Edge WebView2 (Windows) | Linux: `libwebkit2gtk-4.1-dev` (or 4.0) + GTK 3; the `webview` library is fetched at configure time (network) |
+| `freerdp-qt-aad-helper` | `WITH_QT_AAD_AUTH_HELPER` | Qt 6 WebEngine | a Qt 6 with WebEngineWidgets: `--qt-prefix`, `QT_ROOT_DIR`, `Qt6_DIR` or a system Qt |
 
-The webview library itself is pulled in by CMake `FetchContent` at configure
-time, so the build host needs network access. Disable with `--no-webview`;
-force on with `--with-webview`. The minimal profile never builds it.
+Switches: `--with-webview` / `--no-webview`, `--with-qt-aad` / `--no-qt-aad`,
+`--qt-prefix DIR`. The build log says why each helper is on or off.
 
-**`WITH_WEBVIEW_QT` does not exist in FreeRDP 3.32.2** - it is a newer
-upstream option. If you move to a FreeRDP version that has it, it would be a
-one-line addition next to `WITH_WEBVIEW` in `profile_options()`.
+The helpers are staged into `_libs/` **last and without a dependency walk**:
+they load winpr from their own directory (`$ORIGIN`, `@executable_path`, the
+executable's folder on Windows) and their browser engine from the system - a
+bundled WebKit or Qt WebEngine would add hundreds of MB. `aad_helpers.json`
+lists what was staged and the Qt version the Qt helper was built against.
+
+At run time, `pyfreerdpnative.aad` finds them (FreeRDP's own autodetection looks
+next to `python.exe`) and, for the Qt helper, a Qt WebEngine at least as new as
+that version: an installed `PySide6-WebEngine` or `PyQt6-WebEngine-Qt6` (Qt
+WebEngine is a separate package of both since Qt 6.12/6.140), else the system's.
+On Linux under X11, Qt 6.5+ also needs the system's `libxcb-cursor0`.
+CI builds the Qt helper against Qt 6.5 LTS (aqtinstall): Qt 6 is binary
+compatible upwards, so it runs with any newer Qt 6. Verified: a helper built
+against Qt 6.4.2 passes FreeRDP's protocol test on PySide6's Qt 6.12 /
+Qt WebEngine 6.140.
+
+Known upstream issue (FreeRDP 3.33.0, WebKitGTK): restoring the browser's own
+User-Agent after an override *within one helper process* is racy. PyFreeRdpApp
+starts one helper per connection, so it never takes that path.
 
 ## Kerberos
 
@@ -396,7 +413,7 @@ Summary. Additionally the `links` job attaches every artifact to the rolling
 pre-release `freerdp-libs-<freerdp_ref>` on each push to `main`, on
 `workflow_dispatch` with `publish_release`, and on `release: published`, so
 there are permanent download URLs of the form
-`https://github.com/<owner>/<repo>/releases/download/freerdp-libs-3.32.2/freerdp-3.32.2-<platform>-<profile>.tar.gz`
+`https://github.com/<owner>/<repo>/releases/download/freerdp-libs-3.33.0/freerdp-3.33.0-<platform>-<profile>.tar.gz`
 (`.zip` on Windows).
 
 ## Reproducibility
@@ -404,7 +421,7 @@ there are permanent download URLs of the form
 Sources are pinned by version and SHA-256 (`KNOWN_HASHES`); `vcpkg.json` pins
 a registry baseline (resolved at build time against the runner's vcpkg clone,
 falling back to its HEAD if the pinned commit is absent - the chosen commit is
-printed and stored in the diagnostics); FreeRDP is pinned by tag (`--ref`, default 3.32.2). CI
+printed and stored in the diagnostics); FreeRDP is pinned by tag (`--ref`, default 3.33.0). CI
 caches `build/deps/<label>` keyed on the hash of `build_deps.py` +
 `vcpkg.json`, so a dependency change rebuilds everything and nothing else does.
 To bump a dependency: change the version in `SOURCES`, run
@@ -415,7 +432,7 @@ To bump a dependency: change the version in `SOURCES`, run
 * Windows `arm64` and `x86` FreeRDP builds are cross-compiled; the workflow
   load-tests arm64 natively on `windows-11-arm` and x86 with a 32-bit Python.
 * `rdpecam`'s client half has a capture backend only on Linux (V4L) in FreeRDP
-  3.32.2; the server half is built everywhere.
+  3.33.0; the server half is built everywhere.
 * GSM 6.10, MS-ADPCM, G.723.1 and A-law/µ-law audio go through FreeRDP's
   built-in codecs, not FFmpeg (upstream filters them out of the FFmpeg backend
   unless `WITH_DSP_EXPERIMENTAL`).

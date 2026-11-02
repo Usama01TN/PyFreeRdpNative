@@ -19,7 +19,7 @@ Cross-install from a desktop into the app's Python site-packages:
 ```bash
 pip install --platform android_24_arm64_v8a --only-binary :all: \
     --target app/src/main/python pyfreerdpnative \
-    --find-links https://github.com/Usama01TN/PyFreeRdpNative/releases/expanded_assets/freerdp-libs-3.32.2
+    --find-links https://github.com/Usama01TN/PyFreeRdpNative/releases/expanded_assets/freerdp-libs-3.33.0
 ```
 
 Then `load()` finds `pyfreerdpnative/_libs` inside the app and `dlopen`s from
@@ -55,9 +55,9 @@ arm64). Retag and install:
 
 ```bash
 pip install wheel
-wget https://github.com/…/pyfreerdpnative-0.2.0-py3-none-android_24_arm64_v8a.whl
-wheel tags --platform-tag any --remove pyfreerdpnative-0.2.0-py3-none-android_24_arm64_v8a.whl
-pip install pyfreerdpnative-0.2.0-py3-none-any.whl
+wget https://github.com/…/pyfreerdpnative-0.3.0-py3-none-android_24_arm64_v8a.whl
+wheel tags --platform-tag any --remove pyfreerdpnative-0.3.0-py3-none-android_24_arm64_v8a.whl
+pip install pyfreerdpnative-0.3.0-py3-none-any.whl
 ```
 
 Check `uname -m` first (`aarch64` → `arm64_v8a`). Do **not** use the

@@ -5,7 +5,6 @@ import sys
 
 from pyfreerdpnative import load
 from pyfreerdpnative.freerdp import client as CLIENT
-from pyfreerdpnative.freerdp import freerdp as F
 from pyfreerdpnative.freerdp import settings_keys as KEY
 
 
@@ -37,7 +36,8 @@ def new_context(api):
     entry = CLIENT.RDP_CLIENT_ENTRY_POINTS_V1()
     entry.Size = ctypes.sizeof(entry)
     entry.Version = CLIENT.RDP_CLIENT_INTERFACE_VERSION
-    entry.ContextSize = ctypes.sizeof(F.rdpContext)
+    # freerdp_client_context_new needs room for an rdpClientContext, not a bare rdpContext
+    entry.ContextSize = ctypes.sizeof(CLIENT.rdpClientContext)
     ctx = api.freerdp_client_context_new(ctypes.byref(entry))
     if not ctx:
         sys.exit("freerdp_client_context_new failed")

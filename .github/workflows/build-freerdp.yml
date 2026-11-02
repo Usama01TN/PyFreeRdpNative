@@ -60,7 +60,7 @@ on:
       freerdp_ref:
         description: "FreeRDP git ref (tag/branch/sha) to build"
         required: false
-        default: "3.32.2"
+        default: "3.33.0"
       profiles:
         description: "Which build profiles to produce"
         required: false
@@ -159,7 +159,7 @@ env:
   # Keep Python's own output in order with cmake's in the job log.
   PYTHONUNBUFFERED: "1"
   # Defaults for non-dispatch triggers. Dispatch inputs override below.
-  FREERDP_REF: ${{ inputs.freerdp_ref || '3.32.2' }}
+  FREERDP_REF: ${{ inputs.freerdp_ref || '3.33.0' }}
   PROFILES: ${{ inputs.profiles || 'both' }}
   EDITIONS: ${{ inputs.editions || 'all' }}
   # Default (non-dispatch triggers, and the ticked box) is to build it.
@@ -413,6 +413,10 @@ jobs:
             # GTK/WebKit (the wlfreerdp/GTK bits) and SDL are optional here.
             pm_install gtk3-devel SDL2-devel SDL2_ttf-devel || \
               echo "::notice::optional GUI packages unavailable in this image"
+            # WebKitGTK for the webview AAD login helper (FreeRDP 3.33): the 4.1
+            # API, else 4.0 (webkit2gtk3) - the webview library supports both.
+            pm_install webkit2gtk4.1-devel || pm_install webkit2gtk3-devel || \
+              echo "::notice::WebKitGTK unavailable in this image; the webview AAD helper is skipped"
           fi
           for ch in $ENABLE_CHANNELS; do
             case "$ch" in
@@ -613,6 +617,41 @@ jobs:
           if [ -n "${{ matrix.win_arch }}" ]; then args="$args --arch ${{ matrix.win_arch }}"; fi
           python scripts/build_freerdp.py --list-channels \
             --profile "${{ matrix.profile }}" --edition "${{ matrix.edition }}" $args
+
+      # ---- Qt 6 WebEngine for the Qt AAD login helper (FreeRDP 3.33) ---------
+      # Only the helper is shipped: at run time it uses the user's Qt (system,
+      # PySide6-WebEngine, PyQt6-WebEngine). Qt 6.5 LTS, because Qt 6 is binary
+      # compatible upwards - the oldest practical Qt reaches the most users.
+      - name: Cache Qt 6.5 (Qt AAD helper)
+        if: matrix.profile == 'full' && matrix.win_arch != 'x86' && matrix.win_arch != 'arm64'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/Qt
+          key: qt-6.5.3-webengine-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Qt 6.5 with WebEngine (Qt AAD helper)
+        if: matrix.profile == 'full' && matrix.win_arch != 'x86' && matrix.win_arch != 'arm64'
+        shell: bash
+        run: |
+          set -uo pipefail
+          case "${RUNNER_OS}-${RUNNER_ARCH}" in
+            Linux-X64)   host=linux;   arch=gcc_64;            dir=gcc_64 ;;
+            macOS-*)     host=mac;     arch=clang_64;          dir=macos ;;
+            Windows-X64) host=windows; arch=win64_msvc2019_64; dir=msvc2019_64 ;;
+            *) echo "::notice::no official Qt 6.5 desktop build for ${RUNNER_OS}-${RUNNER_ARCH}: the Qt AAD helper is skipped"
+               exit 0 ;;
+          esac
+          root="${RUNNER_TEMP}/Qt/6.5.3/${dir}"
+          if [ ! -d "${root}/lib/cmake/Qt6WebEngineWidgets" ]; then
+            if ! { python -m pip install --disable-pip-version-check "aqtinstall>=3.1,<4" &&
+                   python -m aqt install-qt "$host" desktop 6.5.3 "$arch" \
+                     -m qtwebengine qtwebchannel qtpositioning -O "${RUNNER_TEMP}/Qt"; }; then
+              echo "::warning::Qt 6.5 could not be installed: the Qt AAD helper is skipped"
+              exit 0
+            fi
+          fi
+          echo "QT_ROOT_DIR=${root}" >> "$GITHUB_ENV"   # build_freerdp.py finds it there
+          echo "Qt for the Qt AAD helper: ${root}"
 
       - name: Build FreeRDP ${{ env.FREERDP_REF }}
         shell: bash
@@ -2200,7 +2239,7 @@ jobs:
               (cd "$d" && zip -qr "../../release/$name.zip" .)
             elif { has_app=false; for a in "$d"/*.app "$d"/*/*.app; do [ -d "$a" ] && has_app=true; done; $has_app; }; then
               # the iFreeRDP .app is a directory tree: ship it as one zip
-              # (e.g. ifreerdp-3.32.2-OS64.zip), unsigned unless --sign-ios-app
+              # (e.g. ifreerdp-3.33.0-OS64.zip), unsigned unless --sign-ios-app
               (cd "$d" && zip -qr --symlinks "../../release/$name.zip" .)
             else
               # wheels, sdists, the aFreeRDP .apk files: already plain files

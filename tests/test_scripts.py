@@ -1,5 +1,8 @@
 """The build/packaging scripts stay importable and version-consistent."""
 import os
+import pytest
+import shutil
+import json
 import subprocess
 import sys
 
@@ -106,3 +109,97 @@ def test_uniquify_sonames_rewrites_vendored_deps(tmp_path):
     needed = subprocess.check_output(["patchelf", "--print-needed", str(d / "libwinpr3.so")]).decode().split()
     assert "libcrypto-pyfrdp.so" in needed and "libcrypto.so" not in needed
     assert subprocess.check_output(["patchelf", "--print-soname", str(d / "libcrypto-pyfrdp.so")]).decode().strip() == "libcrypto-pyfrdp.so"
+
+
+# --- FreeRDP 3.33: the AAD (Entra ID) login helpers ------------------------------------------------
+
+def _build_script():
+    sys.path.insert(0, SCRIPTS)
+    try:
+        import build_freerdp
+    finally:
+        sys.path.remove(SCRIPTS)
+    return build_freerdp
+
+
+def test_aad_helper_options_decide_per_profile_and_json():
+    b = _build_script()
+    opts, why = b.aad_helper_options("Linux", "minimal", json_enabled=True)
+    assert "-DWITH_WEBVIEW_AAD_AUTH_HELPER=OFF" in opts and "full profile" in why["webview"]
+    opts, why = b.aad_helper_options("Linux", "full", json_enabled=False)
+    assert "-DWITH_AAD=OFF" in opts and "JSON" in why["qt"]
+    opts, why = b.aad_helper_options("Windows", "full", json_enabled=True, webview=True, qt=False)
+    assert {"-DWITH_AAD=ON", "-DWITH_WEBVIEW_AAD_AUTH_HELPER=ON", "-DWITH_QT_AAD_AUTH_HELPER=OFF"} <= set(opts)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="ELF rpath check")
+def test_stage_aad_helpers_points_them_at_their_directory(tmp_path):
+    """Staged last, no dependency walk: the browser engine stays the system's."""
+    b = _build_script()
+    prefix, libs = tmp_path / "prefix", tmp_path / "libs"
+    (prefix / "libexec").mkdir(parents=True)
+    libs.mkdir()
+    shutil.copy("/bin/true", str(prefix / "libexec" / "freerdp-webview-aad-helper"))
+    staged = b.stage_aad_helpers([str(prefix)], str(libs))
+    assert set(staged) == {"webview"}
+    rpath = subprocess.check_output(["patchelf", "--print-rpath", staged["webview"]]).decode().strip()
+    assert rpath == "$ORIGIN"
+    assert json.load(open(str(libs / "aad_helpers.json"))) == {"webview": {"file": "freerdp-webview-aad-helper"}}
+    assert sorted(os.listdir(str(libs))) == ["aad_helpers.json", "freerdp-webview-aad-helper"]
+
+
+def _libs_with_helpers(tmp_path, qt_version="6.4.2"):
+    libs = tmp_path / "libs"
+    libs.mkdir()
+    for kind in ("webview", "qt"):
+        (libs / "freerdp-{0}-aad-helper".format(kind)).write_text("")
+    (libs / "aad_helpers.json").write_text(json.dumps({
+        "webview": {"file": "freerdp-webview-aad-helper"},
+        "qt": {"file": "freerdp-qt-aad-helper", "qt_version": qt_version}}))
+    return str(libs)
+
+
+def test_aad_helper_selection(tmp_path, monkeypatch):
+    from pyfreerdpnative import aad
+    libs = _libs_with_helpers(tmp_path)
+    assert aad.helper("auto", libs_dir=libs)[0].endswith("freerdp-webview-aad-helper")
+    # Qt 6 is binary compatible upwards only: an older Qt is refused, with the reason.
+    monkeypatch.setattr(aad, "qt_runtimes", lambda: [{"source": "PySide6", "version": "6.3.1", "env": {}}])
+    with pytest.raises(LookupError, match="needs Qt 6.4.2 or newer"):
+        aad.helper("qt", libs_dir=libs)
+    # A new enough Qt missing a system library it needs is skipped for the next one.
+    monkeypatch.setattr(aad, "qt_runtimes", lambda: [
+        {"source": "PySide6", "version": "6.12.0", "env": {"QT": "pyside"}, "missing": "libxcb-cursor0"},
+        {"source": "system", "version": "6.4.2", "env": {}}])
+    assert aad.helper("qt", libs_dir=libs)[1] == {}
+    monkeypatch.setattr(aad, "qt_runtimes", lambda: [
+        {"source": "PySide6", "version": "6.12.0", "env": {"QT": "pyside"}, "missing": "libxcb-cursor0"}])
+    with pytest.raises(LookupError, match="libxcb-cursor0"):
+        aad.helper("qt", libs_dir=libs)
+    with pytest.raises(LookupError, match="not part of this FreeRDP build"):
+        aad.helper("auto", libs_dir=str(tmp_path))
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the Linux layout of the Python Qt bindings")
+def test_qt_runtime_found_from_marker_files(tmp_path, monkeypatch):
+    """The PySide6 / PyQt6 Qt WebEngine layout is discovered, not hard-coded."""
+    import importlib.util
+    from pyfreerdpnative import aad
+    qt = tmp_path / "PySide6" / "Qt"
+    for sub in ("lib", "libexec", "resources", "translations/qtwebengine_locales", "plugins"):
+        (qt / sub).mkdir(parents=True)
+    for f in ("lib/libQt6WebEngineCore.so.6", "lib/libQt6Core.so.6.12.0", "libexec/QtWebEngineProcess",
+              "resources/qtwebengine_resources.pak"):
+        (qt / f).write_text("")
+    spec = importlib.util.spec_from_loader("PySide6", loader=None, is_package=True)
+    spec.submodule_search_locations = [str(tmp_path / "PySide6")]
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: spec if name == "PySide6" else real(name, *a))
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")      # xcb's own requirement does not apply
+    runtime = aad._qt_from_package("PySide6", ("PySide6-Essentials",))
+    assert runtime["version"] == "6.12.0" and "missing" not in runtime
+    env = runtime["env"]
+    assert env["LD_LIBRARY_PATH"].split(os.pathsep)[0] == str(qt / "lib")
+    assert env["QTWEBENGINEPROCESS_PATH"] == str(qt / "libexec" / "QtWebEngineProcess")
+    assert env["QTWEBENGINE_RESOURCES_PATH"] == str(qt / "resources")
+    assert env["QTWEBENGINE_LOCALES_PATH"] == str(qt / "translations" / "qtwebengine_locales")

@@ -4,7 +4,7 @@ build_freerdp.py - fetch + compile FreeRDP (client + server), copy artifacts
                    into pyfreerdpnative/_libs/.
 
 Usage:
-    python -m pyfreerdpnative.scripts.build_freerdp [--ref v3.32.2]
+    python -m pyfreerdpnative.scripts.build_freerdp [--ref 3.33.0]
                                               [--prefix /opt/freerdp]
                                               [--target {host,android,ios}]
                                               [--abi arm64-v8a]
@@ -71,6 +71,8 @@ Style: Py2-compatible syntax. Runs on Python 3.
 """
 import argparse
 import glob
+import re
+import json
 import os
 import platform
 import shutil
@@ -79,7 +81,7 @@ import sys
 import tempfile
 
 REPO_URL = "https://github.com/FreeRDP/FreeRDP.git"
-DEFAULT_REF = "3.32.2"  # old version: "3.16.0"
+DEFAULT_REF = "3.33.0"  # old versions: "3.32.2", "3.16.0"
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +174,7 @@ def fetch_source(ref, dest):
 # ---------------------------------------------------------------------------
 
 # Channel table, taken from channels/*/ChannelOptions.cmake in FreeRDP
-# 3.32.2. Keys are the CMake channel names (CHANNEL_<NAME> after upper()).
+# 3.32.2 and 3.33.0 (same channel list). Keys are the CMake channel names (CHANNEL_<NAME> after upper()).
 #
 #   type    : "static" (goes over the MCS/static virtual channel layer),
 #             "dynamic" (needs drdynvc), "device" (needs rdpdr).
@@ -352,10 +354,10 @@ def profile_options(profile, host_os, sdl=False, windows_shadow=None,
                      "-DWITH_WIN_CONSOLE=ON"]
         if want_client and host_os in ("Linux", "Darwin", "Windows"):
             opts.append("-DWITH_CLIENT_SDL={0}".format("ON" if sdl else "OFF"))
-            # WITH_WEBVIEW only has an effect inside the SDL client.
-            use_webview = sdl and (webview if webview is not None
-                                   else webview_available(host_os))
-            opts.append("-DWITH_WEBVIEW={0}".format("ON" if use_webview else "OFF"))
+            # Client UDP multitransport (MS-RDPEUDP/-RDPEUDP2/-RDPEMT), new and
+            # experimental in 3.33.0, needs OpenSSL - every desktop build has it.
+            # Without it the client declines the server's UDP offer.
+            opts.append("-DWITH_RDPEUDP=ON")
         return opts
     # minimal / client-only / server-only: small.
     return [
@@ -363,7 +365,7 @@ def profile_options(profile, host_os, sdl=False, windows_shadow=None,
         "-DWITH_CLIENT_WINDOWS=OFF",
         "-DWITH_SHADOW=OFF", "-DWITH_PROXY=OFF", "-DWITH_PROXY_MODULES=OFF",
         "-DWITH_SAMPLE=OFF", "-DWITH_WINPR_TOOLS=OFF", "-DWITH_MANPAGES=OFF",
-        "-DWITH_WEBVIEW=OFF",
+        "-DWITH_WEBVIEW_AAD_AUTH_HELPER=OFF", "-DWITH_QT_AAD_AUTH_HELPER=OFF",
         "-DWITH_VERBOSE_WINPR_ASSERT=OFF", "-DWITH_CLIENT_SDL=OFF",
         "-DBUILD_TESTING=OFF",
     ]
@@ -389,29 +391,158 @@ def expected_libs(profile, host_os, windows_shadow=None):
     return libs
 
 
-# WebView backends the FreeRDP 3.32.2 SDL client can use for the AAD/Entra ID
-# login popup (client/SDL/common/aad, option WITH_WEBVIEW). The webview
-# library itself is pulled in with FetchContent at configure time, so the
-# build host needs network access. NB: WITH_WEBVIEW_QT does not exist in
-# 3.32.2 - it is a newer upstream addition.
+# AAD (Entra ID) login helpers, FreeRDP 3.33.0: out-of-process programs that show
+# the Microsoft login page and report the redirect back over a JSON-RPC pipe
+# pair (client/common/aad-helper-protocol.md). They replace 3.32's in-process
+# WITH_WEBVIEW, which no longer exists. Both need winpr's JSON support.
+#   webview  WITH_WEBVIEW_AAD_AUTH_HELPER  freerdp-webview-aad-helper
+#            the OS browser engine: WebKitGTK (Linux), WKWebView (macOS),
+#            Edge WebView2 (Windows). The webview library is fetched at
+#            configure time, so the build host needs network access.
+#   qt       WITH_QT_AAD_AUTH_HELPER       freerdp-qt-aad-helper
+#            Qt 6 (or 5.12+) WebEngineWidgets. Only the helper is shipped, not
+#            Qt WebEngine (far beyond a wheel's size): at run time it uses the
+#            system's Qt or the one of an installed PySide6 / PyQt6-WebEngine
+#            (see pyfreerdpnative.aad).
+AAD_HELPERS = ("webview", "qt")
+AAD_HELPER_BINARIES = {"webview": "freerdp-webview-aad-helper",
+                       "qt": "freerdp-qt-aad-helper"}
 LINUX_WEBVIEW_PC = ("webkit2gtk-4.1", "webkit2gtk-4.0", "webkitgtk-6.0")
+QT_WEBENGINE_CMAKE = "Qt6WebEngineWidgets"
 
 
 def webview_available(host_os):
-    """Can the SDL client's AAD WebView be built on this platform?"""
+    """Can the webview AAD helper be built on this platform?"""
     if host_os == "Linux":
         return any(_pkg_config_has(pc) for pc in LINUX_WEBVIEW_PC)
     if host_os == "Darwin":
         return True          # WKWebView from the system WebKit framework
     if host_os == "Windows":
-        return True          # Edge WebView2 (loader fetched by the webview lib)
+        return True          # Edge WebView2 (loader built into the webview lib)
     return False
+
+
+def qt_webengine_prefix(explicit=None):
+    """
+    Where Qt 6 WebEngineWidgets is, for the Qt AAD helper: a prefix to add to
+    CMAKE_PREFIX_PATH, "" when CMake finds it on its own (a system Qt), or
+    None when there is none. Looked up in: the explicit --qt-prefix, then
+    QT_ROOT_DIR (set by aqtinstall / install-qt-action) and Qt6_DIR, then the
+    usual system and Homebrew locations.
+    """
+    def has(prefix):
+        return bool(glob.glob(os.path.join(prefix, "lib*", "cmake", QT_WEBENGINE_CMAKE))
+                    or glob.glob(os.path.join(prefix, "lib", "*", "cmake", QT_WEBENGINE_CMAKE)))
+    for candidate in (explicit, os.environ.get("QT_ROOT_DIR")):
+        if candidate and has(candidate):
+            return candidate
+    qt6_dir = os.environ.get("Qt6_DIR")  # <prefix>/lib/cmake/Qt6
+    if qt6_dir:
+        prefix = os.path.normpath(os.path.join(qt6_dir, "..", "..", ".."))
+        if has(prefix):
+            return prefix
+    if platform.system() != "Windows":
+        for prefix in ("/usr", "/usr/local", "/opt/homebrew", "/opt/homebrew/opt/qt"):
+            if has(prefix):
+                return ""
+    return None
+
+
+def qt_version(prefix=None):
+    """
+    The Qt 6 version CMake finds in prefix ("" = the system's): read from
+    Qt6ConfigVersion.cmake. None when there is none.
+    """
+    roots = [prefix] if prefix else ["/usr", "/usr/local", "/opt/homebrew", "/opt/homebrew/opt/qt"]
+    pattern = re.compile(r'set\(PACKAGE_VERSION "([0-9.]+)"\)')
+    for root in roots:  # Qt6ConfigVersion.cmake includes Qt6ConfigVersionImpl.cmake, which has it
+        for path in (glob.glob(os.path.join(root, "lib*", "cmake", "Qt6", "Qt6ConfigVersion*.cmake"))
+                     + glob.glob(os.path.join(root, "lib", "*", "cmake", "Qt6", "Qt6ConfigVersion*.cmake"))):
+            with open(path) as fh:
+                m = pattern.search(fh.read())
+            if m:
+                return m.group(1)
+    return None
+
+
+def aad_helper_options(host_os, profile, json_enabled, webview=None, qt=None,
+                       qt_prefix=None):
+    """
+    -D switches for the two AAD helpers (and WITH_AAD), with the reason for
+    each decision. webview/qt: True forces, False disables, None = when the
+    dependencies are found. Returns (options, decisions dict).
+    """
+    off = ["-DWITH_WEBVIEW_AAD_AUTH_HELPER=OFF", "-DWITH_QT_AAD_AUTH_HELPER=OFF"]
+    if profile != "full" or host_os not in ("Linux", "Darwin", "Windows"):
+        return off, {"webview": "no (desktop full profile only)", "qt": "no (desktop full profile only)"}
+    if not json_enabled:
+        return off + ["-DWITH_AAD=OFF"], {k: "no (needs winpr JSON / cJSON)" for k in AAD_HELPERS}
+    decisions, opts, prefixes = {}, ["-DWITH_AAD=ON"], []
+    want_wv = webview if webview is not None else webview_available(host_os)
+    decisions["webview"] = "yes" if want_wv else "no (no WebKitGTK found)"
+    opts.append("-DWITH_WEBVIEW_AAD_AUTH_HELPER={0}".format("ON" if want_wv else "OFF"))
+    found = qt_webengine_prefix(qt_prefix)
+    want_qt = qt if qt is not None else found is not None
+    if want_qt and found:
+        prefixes.append(found)
+    decisions["qt"] = ("yes ({0})".format(found or "system Qt") if want_qt
+                       else "no (no Qt 6 WebEngineWidgets found; --qt-prefix)")
+    opts.append("-DWITH_QT_AAD_AUTH_HELPER={0}".format("ON" if want_qt else "OFF"))
+    if prefixes:  # merged with the other prefixes by dedupe_defines()
+        opts.append("-DCMAKE_PREFIX_PATH={0}".format(prefixes[0]))
+        if host_os == "Linux":
+            # A downloaded Qt's WebEngine libraries depend on desktop libraries (NSS, ALSA, X11
+            # extensions...) a build container lacks; ld would refuse to link the helper against
+            # them. They are only needed at run time, on the user's machine.
+            opts.append("-DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined")
+    return opts, decisions
+
+
+def stage_aad_helpers(prefixes, libs_dir, qt_prefix=None):
+    """
+    Copy the AAD helpers (installed to <prefix>/libexec) next to the libraries
+    and point them at them ($ORIGIN / @executable_path; Windows resolves DLLs
+    from the executable's directory). Deliberately AFTER every dependency
+    walk and WITHOUT one: their browser engine (WebKitGTK, Qt WebEngine,
+    WebView2, WKWebView) stays the system's - bundling it would add hundreds
+    of MB. Writes aad_helpers.json describing what was staged.
+    """
+    sysname = platform.system()
+    staged = {}
+    for pfx in prefixes:
+        for kind, name in AAD_HELPER_BINARIES.items():
+            for libexec in ("libexec", "bin"):
+                src = os.path.join(pfx, libexec, name + (".exe" if sysname == "Windows" else ""))
+                if kind not in staged and os.path.isfile(src):
+                    dst = os.path.join(libs_dir, os.path.basename(src))
+                    shutil.copy2(src, dst)
+                    if sysname == "Windows":  # a WebView2Loader.dll or similar next to it
+                        for dll in glob.glob(os.path.join(pfx, libexec, "WebView2Loader*.dll")):
+                            shutil.copy2(dll, libs_dir)
+                    staged[kind] = dst
+    if sysname == "Linux":
+        pe = _ensure_patchelf() if staged else None
+        for p in staged.values():
+            subprocess.check_call([pe, "--set-rpath", "$ORIGIN", p])
+    elif sysname == "Darwin":
+        for p in staged.values():
+            _macho_add_rpath(p, "@executable_path", replace_prefix="@executable_path")
+    manifest = {kind: {"file": os.path.basename(p)} for kind, p in staged.items()}
+    if "qt" in manifest:  # The oldest Qt it runs with: the one it was built against.
+        manifest["qt"]["qt_version"] = qt_version(qt_webengine_prefix(qt_prefix))
+    with open(os.path.join(libs_dir, "aad_helpers.json"), "w") as fh:
+        json.dump(manifest, fh, indent=2, sort_keys=True)
+    for kind, p in sorted(staged.items()):
+        print("[aad] {0} helper: {1}".format(kind, p))
+    if not staged:
+        print("[aad] no AAD helper was built")
+    return staged
 
 
 def sdl_available(host_os, deps_prefix=None):
     """
     Which SDL the sdl-freerdp client can be built against: "sdl3", "sdl2" or
-    False. FreeRDP 3.32.2 prefers SDL3 and keeps a deprecated SDL2 client as a
+    False. FreeRDP 3.33.0 prefers SDL3 and keeps a deprecated SDL2 client as a
     fallback (client/SDL/CMakeLists.txt auto-detects both); distributions
     older than SDL3 - Ubuntu 24.04, for instance - only ship SDL2.
     """
@@ -696,6 +827,8 @@ def verify_channel_cache(build_dir, expected):
 # prefix, deps prefix) may each contribute, so merge rather than override.
 _LIST_DEFINES = ("CMAKE_PREFIX_PATH", "CMAKE_FIND_ROOT_PATH",
                  "CMAKE_MODULE_PATH")
+# Flag strings several sources may each add to: merged with spaces.
+_FLAG_DEFINES = ("CMAKE_EXE_LINKER_FLAGS",)
 
 
 def dedupe_defines(opts):
@@ -714,9 +847,9 @@ def dedupe_defines(opts):
     for i, o in enumerate(opts):
         if o.startswith("-D") and "=" in o:
             k = key_of(o)
-            if k in _LIST_DEFINES:
+            if k in _LIST_DEFINES or k in _FLAG_DEFINES:
                 vals = merged.setdefault(k, [])
-                for v in o.split("=", 1)[1].split(";"):
+                for v in o.split("=", 1)[1].split(";" if k in _LIST_DEFINES else " "):
                     if v and v not in vals:
                         vals.append(v)
             last[k] = i
@@ -725,11 +858,11 @@ def dedupe_defines(opts):
     for i, o in enumerate(opts):
         if o.startswith("-D") and "=" in o:
             k = key_of(o)
-            if k in _LIST_DEFINES:
+            if k in _LIST_DEFINES or k in _FLAG_DEFINES:
                 if k in emitted:
                     continue
                 emitted.add(k)
-                out.append("-D{0}={1}".format(k, ";".join(merged[k])))
+                out.append("-D{0}={1}".format(k, (";" if k in _LIST_DEFINES else " ").join(merged[k])))
                 continue
             if last[k] != i:
                 continue
@@ -829,9 +962,9 @@ def media_channels(deps_prefix, host_os, target="host"):
     chans = []
     if deps_has(deps_prefix, "libusb-1.0") and target != "ios":
         chans.append("urbdrc")
-    # rdpecam client: needs swscale and a capture backend; only Linux has
-    # one (V4L) in FreeRDP 3.32.2. Server side is always on.
-    if host_os == "Linux" and target == "host" and deps_has_ffmpeg(deps_prefix):
+    # rdpecam client: needs swscale and a capture backend - V4L on Linux and,
+    # new in FreeRDP 3.33.0, AVFoundation on macOS. Server side is always on.
+    if host_os in ("Linux", "Darwin") and target == "host" and deps_has_ffmpeg(deps_prefix):
         chans.append("rdpecam")
     return chans
 
@@ -1352,7 +1485,7 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
                disable_channels=None, channels_enabled=True, arch="host",
                deps_prefix=None, executables=False, with_krb5=None,
                windows_shadow=None, webview=None, win_target="10",
-               win_toolset=None, win_crt="auto"):
+               win_toolset=None, win_crt="auto", qt_aad=None, qt_prefix=None):
     require_tools(["cmake", "git"])
     host_os = platform.system()
     if host_os != "Windows" and arch not in (None, "", "host"):
@@ -1373,12 +1506,13 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
         print("[build] SDL client: {0}".format(
             "{0} (deprecated upstream)".format(sdl) if sdl == "sdl2"
             else sdl if sdl else "no (neither SDL3 nor SDL2 + ttf found)"))
-        want_wv = webview if webview is not None else webview_available(host_os)
-        if sdl:
-            print("[build] AAD WebView: {0}".format(
-                "yes" if want_wv else "no (no WebKit/WebView2 backend found)"))
-        elif want_wv:
-            print("[build] AAD WebView: skipped (needs the SDL client)")
+        aad_opts, aad_decisions = aad_helper_options(
+            host_os, profile, json_enabled=True, webview=webview,
+            qt=qt_aad, qt_prefix=qt_prefix)
+        for kind in AAD_HELPERS:
+            print("[build] AAD {0} helper: {1}".format(kind, aad_decisions[kind]))
+    else:
+        aad_opts = aad_helper_options(host_os, profile, json_enabled=False)[0]
     opts = cmake_options_for(profile, host_os=host_os,
                              enable_channels=enable_channels,
                              disable_channels=disable_channels,
@@ -1386,6 +1520,7 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
                              deps_prefix=deps_prefix, executables=executables,
                              sdl=sdl, windows_shadow=windows_shadow,
                              webview=webview)
+    opts += aad_opts
     build_host.windows_shadow = windows_shadow
     opts += host_dependency_probe(host_os, arch, deps_prefix)
     if host_os == "Windows":
@@ -1494,7 +1629,8 @@ def build_sample_client(src, prefix, host_os, arch, deps_prefix, jobs,
     client/CMakeLists.txt only adds it in the non-WIN32 branch (wfreerdp
     takes that slot), so we build it separately. client/Sample supports
     standalone builds via find_package(WinPR/FreeRDP/FreeRDP-Client), but
-    3.32.2 forgets to include InstallFreeRDPDesktop.cmake, which is why
+    3.32.2 forgets to include InstallFreeRDPDesktop.cmake (fixed in 3.33.0;
+    kept for an older --ref), which is why
     CMAKE_PROJECT_sfreerdp_INCLUDE points at it.
     """
     sample_src = os.path.join(src, "client", "Sample")
@@ -3457,15 +3593,25 @@ def main():
                         "profile, standard for the others.")
     p.add_argument("--with-webview", dest="webview", action="store_true",
                    default=None,
-                   help="Force the SDL client's AAD/Entra ID login WebView on "
-                        "(WITH_WEBVIEW). Enabled automatically in the full "
-                        "profile wherever a backend exists: WebKitGTK on "
-                        "Linux, WebKit on macOS, Edge WebView2 on Windows. "
-                        "The webview library is fetched at configure time, so "
-                        "the host needs network access. (WITH_WEBVIEW_QT does "
-                        "not exist in FreeRDP 3.32.2.)")
+                   help="Force the webview AAD/Entra ID login helper on "
+                        "(WITH_WEBVIEW_AAD_AUTH_HELPER, FreeRDP 3.33). Enabled "
+                        "automatically in the full profile wherever a browser "
+                        "engine exists: WebKitGTK on Linux, WKWebView on "
+                        "macOS, Edge WebView2 on Windows. The webview library "
+                        "is fetched at configure time (network access).")
     p.add_argument("--no-webview", dest="webview", action="store_false",
-                   help="Build the SDL client without the AAD login WebView.")
+                   help="Build without the webview AAD login helper.")
+    p.add_argument("--with-qt-aad", dest="qt_aad", action="store_true", default=None,
+                   help="Force the Qt AAD/Entra ID login helper on "
+                        "(WITH_QT_AAD_AUTH_HELPER). Enabled automatically when "
+                        "Qt 6 WebEngineWidgets is found (--qt-prefix, "
+                        "QT_ROOT_DIR, Qt6_DIR or a system Qt). Only the helper "
+                        "is shipped; Qt WebEngine comes from the system or an "
+                        "installed PySide6 / PyQt6-WebEngine at run time.")
+    p.add_argument("--no-qt-aad", dest="qt_aad", action="store_false",
+                   help="Build without the Qt AAD login helper.")
+    p.add_argument("--qt-prefix", metavar="DIR",
+                   help="Qt 6 installation (with WebEngine) for the Qt AAD helper.")
     p.add_argument("--with-windows-shadow", dest="with_windows_shadow",
                    action="store_true", default=None,
                    help="Force-build the Windows shadow server. It is already "
@@ -3621,7 +3767,8 @@ def main():
                    with_krb5=args.with_krb5,
                    windows_shadow=args.with_windows_shadow,
                    webview=args.webview, win_target=args.win_target,
-                   win_toolset=args.win_toolset, win_crt=args.win_crt)
+                   win_toolset=args.win_toolset, win_crt=args.win_crt,
+                   qt_aad=args.qt_aad, qt_prefix=args.qt_prefix)
         # Legacy Windows targets build DLLs again (static CRT or older
         # toolset), so the normal DLL collection applies.
         static_win = False
@@ -3649,6 +3796,8 @@ def main():
                 verify_executables(staged, out, args.profile, host_os,
                                    windows_shadow=args.with_windows_shadow)
                 verify_proxy_modules(out, args.profile, host_os)
+        # Last: after every dependency walk, so no browser engine is bundled.
+        stage_aad_helpers([prefix], out, qt_prefix=args.qt_prefix)
         if static_win:
             print("\n[verify] static build: {0} .lib archive(s) staged - for "
                   "linking into your own application.\n"

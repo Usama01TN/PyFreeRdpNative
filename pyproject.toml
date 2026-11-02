@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "PyFreeRdpNative"
-version = "0.2.0"
+version = "0.3.0"
 description = "ctypes bindings generated 1:1 from the FreeRDP/WinPR headers, with prebuilt FreeRDP libraries."
 readme = "README.md"
 # 3.8 floor: pyfreerdpnative itself is Py-3-only, but we deliberately keep the

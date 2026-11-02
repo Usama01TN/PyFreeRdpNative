@@ -62,7 +62,8 @@ every later field of large structs like `rdpContext` and `rdpSettings`:
 
 The check: a C program compiled against the same headers prints `sizeof`
 and `offsetof` for every nameable struct, and the generated `ctypes.sizeof`
-must equal it. For FreeRDP 3.32.2 on x86-64: **767 / 767**. Types are emitted
+must equal it. For FreeRDP 3.33.0 on x86-64: **884 / 884** - every struct and union of the
+bindings that C can name, compiled against all public headers (3.32.2: 767 / 767). Types are emitted
 symbolically (`ctypes.c_long`, not a fixed width), so Windows LLP64 resolves
 correctly at import time.
 

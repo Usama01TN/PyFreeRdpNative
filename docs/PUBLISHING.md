@@ -5,7 +5,7 @@ Two workflows; the second consumes the first.
 ## `build-freerdp.yml` — build, generate, package, release
 
 Runs on push to `main`, on release, and manually. For the FreeRDP tag it is
-given (default `3.32.2`) it:
+given (default `3.33.0`) it:
 
 1. builds the libraries for every desktop platform, Android ABI and iOS
    platform, in every `profile × edition` combination selected;
@@ -30,7 +30,7 @@ Windows), `apk_abis`.
 
 | Want | Where |
 |---|---|
-| a wheel for one platform | run → Artifacts → `pyfreerdpnative-0.2.0-py3-none-<tag>.whl` |
+| a wheel for one platform | run → Artifacts → `pyfreerdpnative-0.3.0-py3-none-<tag>.whl` |
 | raw libraries | run → Artifacts → `freerdp-<tag>-<platform>-<profile>-<edition>` (unzips to `_libs/`) |
 | permanent links | Releases → `freerdp-libs-<tag>` |
 | the summary table | run → Summary |
