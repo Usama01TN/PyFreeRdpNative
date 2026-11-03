@@ -426,6 +426,12 @@ jobs:
             # API, else 4.0 (webkit2gtk3) - the webview library supports both.
             pm_install webkit2gtk4.1-devel || pm_install webkit2gtk3-devel || \
               echo "::notice::WebKitGTK unavailable in this image; the webview AAD helper is skipped"
+            # NSS/NSPR: Qt WebEngine (Chromium) uses the system's for certificates -
+            # libQt6WebEngineCore needs libnss3/libsmime3/libnssutil3/libnspr4, and
+            # Qt's own wheels do not bundle them either. Runtime packages only: the
+            # validation resolves the Qt AAD helper against a complete Qt runtime.
+            pm_install nss nspr || \
+              echo "::notice::NSS/NSPR unavailable in this image; the Qt AAD helper cannot be validated"
           fi
           for ch in $ENABLE_CHANNELS; do
             case "$ch" in

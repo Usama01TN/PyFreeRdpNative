@@ -304,6 +304,12 @@ Build details that keep this working (each was a CI failure):
   helper that Qt. `validate_build.py` checks the helper against the Qt it was
   built with (`QT_ROOT_DIR` in CI, looked up exactly like `PYFREERDP_QT_DIR`):
   every Qt library must resolve, and a named Qt that is unusable fails.
+  On Linux, Qt WebEngine also needs the system's **NSS/NSPR** (`libnss3`,
+  `libsmime3`, `libnssutil3`, `libnspr4`; Chromium's certificate handling) -
+  not part of Qt, and not bundled by Qt's own wheels either. CI installs
+  `nss nspr` in the manylinux containers; `pyfreerdpnative.aad` reports a
+  missing NSS (and, under X11, `libxcb-cursor0`) instead of starting a helper
+  that cannot run.
 * The Qt helper is **optional**: with no usable Qt it is skipped with a CMake
   warning that gives the reason, and the rest of FreeRDP builds.
 * Qt's AUTOMOC needs **Ninja 1.10+**; with an older one (AlmaLinux 8 ships

@@ -49,7 +49,9 @@ pip install "pyfreerdpnative[qt-aad]"      # the official PySide6-WebEngine whee
 ```
 
 or use the system's Qt 6 WebEngine, or point `PYFREERDP_QT_DIR` at a Qt
-installation (e.g. `~/Qt/6.5.3/gcc_64`).
+installation (e.g. `~/Qt/6.5.3/gcc_64`). On Linux, Qt WebEngine also needs the
+system's NSS (`libnss3`, present on every desktop) and, under X11,
+`libxcb-cursor0`; `pyfreerdpnative.aad` says so when either is missing.
 
 ## Installation
 

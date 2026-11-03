@@ -835,6 +835,8 @@ def unresolved_deps(path, libs, extra_dirs=()):
 
 
 QT_HELPER = "freerdp-qt-aad-helper"
+# What Qt WebEngine needs from the system (Qt's own wheels bundle none of it).
+QT_WEBENGINE_SYSTEM_LIBS = ("libnss3", "libsmime3", "libnssutil3", "libnspr4", "libplc4", "libplds4")
 
 
 def _is_qt_library(name):
@@ -918,7 +920,11 @@ def check_executables(bins, libs, tmp):
                 miss = [m for m in miss if not _is_qt_library(m)]
             tested += 1
         if miss:
-            problems.append("{0}: unresolved {1}".format(name, miss))
+            hint = ""
+            if name == QT_HELPER and any(m.startswith(QT_WEBENGINE_SYSTEM_LIBS) for m in miss):
+                hint = (" - Qt WebEngine's system libraries (NSS/NSPR for certificates, not part of "
+                        "Qt): install the nss and nspr packages")
+            problems.append("{0}: unresolved {1}{2}".format(name, miss, hint))
             continue
         if name == "winpr-makecert":
             out_dir = os.path.join(tmp, "cert")

@@ -356,3 +356,31 @@ def test_qt_installation_layouts_per_os(tmp_path, monkeypatch, system, files, li
     assert runtime is not None, system
     assert runtime["version"] == "6.5.3" and runtime["libdir"] == str(qt / libdir)
     assert runtime["env"]["QTWEBENGINEPROCESS_PATH"].endswith("QtWebEngineProcess" + aad._EXE)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the Linux dynamic loader")
+def test_system_library_check_trusts_files_not_the_loader_cache(tmp_path, monkeypatch):
+    """ldconfig's cache can outlive a removed package: an entry only counts if its file exists."""
+    from pyfreerdpnative import aad
+    real = tmp_path / "libnss3.so"
+    real.write_text("")
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+    for path, present in ((tmp_path / "gone" / "libnss3.so", False), (real, True)):
+        cache = "1 libs found in cache\n\tlibnss3.so (libc6,x86-64) => {0}\n".format(path).encode()
+        monkeypatch.setattr(aad.subprocess, "check_output", lambda *a, _cache=cache, **k: _cache)
+        assert aad._system_library_present("nss3") is present, path
+    monkeypatch.setattr(aad.subprocess, "check_output", lambda *a, **k: b"")
+    monkeypatch.setenv("LD_LIBRARY_PATH", str(tmp_path))  # the helper inherits it
+    assert aad._system_library_present("nss3") is True
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Qt WebEngine's Linux system libraries")
+def test_every_qt_runtime_needs_nss(monkeypatch):
+    """Qt WebEngine links libnss3/libnspr4 and Qt's own wheels do not bundle them: a runtime
+    without them - the system's included - is reported, never silently used."""
+    from pyfreerdpnative import aad
+    monkeypatch.setattr(aad, "_system_library_present", lambda stem: stem not in ("nss3", "nspr4"))
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    assert "NSS/NSPR" in aad._missing_system_libraries("6.5.3")
+    monkeypatch.setattr(aad, "_system_library_present", lambda stem: True)
+    assert aad._missing_system_libraries("6.5.3") is None
