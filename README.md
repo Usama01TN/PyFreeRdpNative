@@ -7,6 +7,8 @@ from FreeRDP's own C headers: each `.h` becomes a `.py` with the same name in th
 same folder, carrying that header's `#define`s, enums, struct layouts and function
 prototypes. The wheels bundle the matching FreeRDP libraries, so `pip install`
 gives you a working RDP client *and* server stack with no system dependencies.
+The only hand-written parts are `examples/` and `aad.py` (finding the AAD login
+helpers), listed in `HANDWRITTEN` in `scripts/gen_bindings.py`.
 
 ```python
 import ctypes

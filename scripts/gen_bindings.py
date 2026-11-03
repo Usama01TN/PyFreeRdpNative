@@ -1586,13 +1586,26 @@ ROOTS = [
 ]
 
 
+# The package's top-level entries this generator writes; the header-tree mirrors (freerdp/,
+# winpr/, ...) come on top, one per include root.
+GENERATED = ("__init__.py", "_loader.py", "_core")
+# Everything else under pyfreerdpnative/ is HAND-WRITTEN and must survive every regeneration:
+# CI's bindings check (ci.yml) and the release build (build-freerdp.yml) keep exactly these
+# (`python scripts/gen_bindings.py --print-handwritten`), and tests/test_scripts.py fails when
+# the package holds an entry that is neither generated nor listed here. A new hand-written
+# module goes in this list - nowhere else.
+HANDWRITTEN = ("_libs", "examples", "aad.py")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--include", action="append", required=True,
+    ap.add_argument("--include", action="append",
                     help="include directory (repeat); must cover freerdp/, "
                          "winpr/ and the generated config/version headers")
-    ap.add_argument("--out", required=True, help="output package directory")
+    ap.add_argument("--out", help="output package directory")
+    ap.add_argument("--print-handwritten", action="store_true",
+                    help="print the package entries that are not generated (one per line) and exit")
     ap.add_argument("--version", default="", help="label for the file headers")
     ap.add_argument("--fake-libc", metavar="DIR",
                     help="pycparser's utils/fake_libc_include directory "
@@ -1601,6 +1614,11 @@ def main():
                     help="extra -D for the preprocessor")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+    if args.print_handwritten:
+        print("\n".join(HANDWRITTEN))
+        return 0
+    if not args.include or not args.out:
+        ap.error("--include and --out are required")
     if not HAVE_PYCPARSER:
         sys.exit("pycparser is required to generate bindings: pip install pycparser")
 

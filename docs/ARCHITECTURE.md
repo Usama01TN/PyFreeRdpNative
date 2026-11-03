@@ -42,6 +42,15 @@ Headers that cannot coexist in one translation unit (`winpr/asn1.h` declares
 an enum `ER_TAG_BOOLEAN`; `freerdp/crypto/er.h` `#define`s the same name) are
 parsed in a separate unit and merged.
 
+### Hand-written entries
+
+A regeneration (CI's bindings check, the release build) replaces the package with
+fresh generator output and keeps only the entries listed in `HANDWRITTEN` in
+`scripts/gen_bindings.py` (`--print-handwritten`; today `_libs`, `examples`,
+`aad.py`). A new hand-written module must be added there:
+`test_every_package_entry_is_generated_or_declared_handwritten` fails until it is,
+because an unlisted module would be deleted - and on `main`, the deletion committed.
+
 ### Why the layouts are right
 
 Three things silently corrupt a naive header translation, and each shifts
