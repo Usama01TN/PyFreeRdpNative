@@ -36,6 +36,21 @@ api.freerdp_client_context_free(ctx)
 If you know FreeRDP's C API, you already know this one. The names, argument
 orders and constants are FreeRDP's; only the syntax is Python.
 
+
+### Azure AD (Entra ID) login helpers - FreeRDP 3.33
+
+The wheels ship FreeRDP's AAD login helpers (`pyfreerdpnative.aad`). The
+**webview** helper uses the system's browser engine (WebKitGTK on Linux,
+WKWebView on macOS, Edge WebView2 on Windows). The **Qt** helper needs a Qt 6
+WebEngine runtime, which is too large to bundle; install it with:
+
+```bash
+pip install "pyfreerdpnative[qt-aad]"      # the official PySide6-WebEngine wheels
+```
+
+or use the system's Qt 6 WebEngine, or point `PYFREERDP_QT_DIR` at a Qt
+installation (e.g. `~/Qt/6.5.3/gcc_64`).
+
 ## Installation
 
 Wheels are attached to the `freerdp-libs-<version>` GitHub release. One wheel

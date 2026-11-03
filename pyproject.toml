@@ -40,6 +40,13 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+# The Qt runtime of the Qt AAD (Entra ID) login helper: the official Qt WebEngine wheels. They are
+# not bundled (~150 MB compressed, beyond PyPI's file limit). Wheels exist for Windows x64/arm64,
+# macOS 14+, Linux x86-64 glibc 2.34+ and aarch64 glibc 2.39+; elsewhere use the system's Qt 6
+# WebEngine or PYFREERDP_QT_DIR. The webview helper needs none of this.
+qt-aad = [
+    "PySide6-WebEngine>=6.12; python_version >= '3.10'",
+]
 dev = [
     "pytest>=7",
     "pytest-cov>=4",

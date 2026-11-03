@@ -299,3 +299,60 @@ def test_tools_run_by_their_resolved_path(monkeypatch):
     monkeypatch.setattr(b, "tool_path", lambda tool: os.path.join(os.sep, "no", "such", tool))
     assert b._pkg_config_has("webkit2gtk-4.1") is False
     assert b.usable_ninja() is False
+
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the Linux layout of a Qt installation")
+def test_qt_runtime_from_an_explicit_qt_directory(tmp_path, monkeypatch):
+    """PYFREERDP_QT_DIR: a Qt installation (Qt installer / aqtinstall layout) is found first."""
+    from pyfreerdpnative import aad
+    qt = tmp_path / "Qt" / "6.5.3" / "gcc_64"
+    for sub in ("lib/cmake/Qt6", "libexec", "resources", "translations/qtwebengine_locales", "plugins"):
+        (qt / sub).mkdir(parents=True)
+    for f in ("lib/libQt6WebEngineCore.so.6", "lib/libQt6Core.so.6.5.3", "libexec/QtWebEngineProcess",
+              "resources/qtwebengine_resources.pak"):
+        (qt / f).write_text("")
+    monkeypatch.setenv("PYFREERDP_QT_DIR", str(qt))
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    first = aad.qt_runtimes()[0]
+    assert first["source"] == "PYFREERDP_QT_DIR" and first["version"] == "6.5.3"
+    assert first["libdir"] == str(qt / "lib")
+    assert first["env"]["QTWEBENGINEPROCESS_PATH"] == str(qt / "libexec" / "QtWebEngineProcess")
+
+
+def test_validation_rejects_a_named_qt_that_is_not_usable(tmp_path, monkeypatch):
+    """A Qt named for the check must be used: falling back would hide what is checked."""
+    sys.path.insert(0, SCRIPTS)
+    try:
+        import validate_build as v
+    finally:
+        sys.path.remove(SCRIPTS)
+    not_qt = tmp_path / "not-a-qt"
+    not_qt.mkdir()
+    monkeypatch.delenv("PYFREERDP_QT_DIR", raising=False)
+    monkeypatch.setenv("QT_ROOT_DIR", str(not_qt))
+    runtime, note, error = v.qt_runtime_for_helper(str(tmp_path))
+    assert runtime is None and "not a Qt WebEngine runtime" in error
+
+
+@pytest.mark.parametrize("system, files, libdir", [
+    ("Darwin", ["lib/QtWebEngineCore.framework/Versions/A/Helpers/QtWebEngineProcess.app/Contents/MacOS/"
+                "QtWebEngineProcess", "lib/QtWebEngineCore.framework/Versions/A/QtWebEngineCore"], "lib"),
+    ("Windows", ["bin/QtWebEngineProcess.exe", "bin/Qt6WebEngineCore.dll", "bin/Qt6Core.dll"], "bin"),
+])
+def test_qt_installation_layouts_per_os(tmp_path, monkeypatch, system, files, libdir):
+    """The Qt installer / aqtinstall layouts of macOS (framework, process 8 levels deep) and
+    Windows (DLLs in bin): found from marker files, with the version from Qt's CMake files."""
+    from pyfreerdpnative import aad
+    monkeypatch.setattr(aad.platform, "system", lambda: system)
+    monkeypatch.setattr(aad, "_EXE", ".exe" if system == "Windows" else "")
+    qt = tmp_path / "Qt" / "6.5.3" / system
+    (qt / "lib" / "cmake" / "Qt6").mkdir(parents=True)
+    (qt / "lib" / "cmake" / "Qt6" / "Qt6ConfigVersionImpl.cmake").write_text('set(PACKAGE_VERSION "6.5.3")\n')
+    for f in files:
+        (qt / f).parent.mkdir(parents=True, exist_ok=True)
+        (qt / f).write_text("")
+    runtime = aad._qt_from_directory(str(qt))
+    assert runtime is not None, system
+    assert runtime["version"] == "6.5.3" and runtime["libdir"] == str(qt / libdir)
+    assert runtime["env"]["QTWEBENGINEPROCESS_PATH"].endswith("QtWebEngineProcess" + aad._EXE)

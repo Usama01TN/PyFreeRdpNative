@@ -296,6 +296,14 @@ Build details that keep this working (each was a CI failure):
   (`undefined symbol u_errorName_74`); as `Qt6_DIR`, Qt could not find its
   `Qt6CoreTools`-style packages (they are looked up through the prefix path),
   so Qt 6 was "not found" and FreeRDP fell back to a required Qt 5.
+* **Qt is not bundled** - its WebEngine runtime is ~150 MB compressed per
+  wheel (204 MB for `libQt6WebEngineCore.so.6` alone), beyond PyPI's 100 MB
+  file limit. Users get it with `pip install "pyfreerdpnative[qt-aad]"` (the
+  official `PySide6-WebEngine` wheels), the system's Qt 6 WebEngine, or a Qt
+  installation named by `PYFREERDP_QT_DIR`; `pyfreerdpnative.aad` hands the
+  helper that Qt. `validate_build.py` checks the helper against the Qt it was
+  built with (`QT_ROOT_DIR` in CI, looked up exactly like `PYFREERDP_QT_DIR`):
+  every Qt library must resolve, and a named Qt that is unusable fails.
 * The Qt helper is **optional**: with no usable Qt it is skipped with a CMake
   warning that gives the reason, and the rest of FreeRDP builds.
 * Qt's AUTOMOC needs **Ninja 1.10+**; with an older one (AlmaLinux 8 ships

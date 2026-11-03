@@ -779,9 +779,10 @@ EXE_SMOKE = {
 }
 
 
-def windows_missing_imports(path, libs):
+def windows_missing_imports(path, libs, extra_dirs=()):
     """Transitively walk PE imports; report names not found next to the
-    executable, in the Windows system directories, or as API sets."""
+    executable, in extra_dirs (a Qt runtime), in the Windows system
+    directories, or as API sets."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import build_freerdp
     sysdirs = [os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), d)
@@ -799,24 +800,31 @@ def windows_missing_imports(path, libs):
             if low in seen or low.startswith(("api-ms-", "ext-ms-")):
                 continue
             seen.add(low)
-            local = os.path.join(libs, dll)
-            if os.path.isfile(local):
-                queue.append(local)
+            local = [os.path.join(d, dll) for d in [libs] + list(extra_dirs)
+                     if os.path.isfile(os.path.join(d, dll))]
+            if local:
+                queue.append(local[0])
             elif not any(os.path.isfile(os.path.join(d, dll)) for d in sysdirs):
                 missing.append(dll)
     return sorted(set(missing))
 
 
-def unresolved_deps(path, libs):
-    """Return dynamic dependencies the loader will not find."""
+def unresolved_deps(path, libs, extra_dirs=()):
+    """Return dynamic dependencies the loader will not find; extra_dirs are
+    searched too (the Qt runtime the Qt AAD helper is given at run time)."""
     if SYS == "Linux":
-        rc, out = run(["ldd", path])
-        return [l.split()[0] for l in out.splitlines() if "not found" in l]
+        env = dict(os.environ)
+        if extra_dirs:
+            env["LD_LIBRARY_PATH"] = os.pathsep.join(list(extra_dirs) + [env.get("LD_LIBRARY_PATH", "")])
+        rc, out = run(["ldd", path], env=env)
+        missing = [l.split()[0] for l in out.splitlines() if "not found" in l]
+        return sorted(set(missing), key=missing.index)  # ldd repeats a name per library needing it
     if SYS == "Darwin":
         missing = []
         for d in dyn_deps(path):
             if d.startswith("@rpath/"):
-                if not os.path.exists(os.path.join(libs, d[len("@rpath/"):])):
+                rest = d[len("@rpath/"):]
+                if not any(os.path.exists(os.path.join(base, rest)) for base in [libs] + list(extra_dirs)):
                     missing.append(d)
             elif d.startswith(("/usr/lib/", "/System/Library/")):
                 continue  # OS libraries: in the dyld shared cache, not on disk
@@ -824,6 +832,52 @@ def unresolved_deps(path, libs):
                 missing.append(d)
         return missing
     return []  # Windows: PATH-based; the smoke run below is the check
+
+
+QT_HELPER = "freerdp-qt-aad-helper"
+
+
+def _is_qt_library(name):
+    base = os.path.basename(name).lower()
+    return base.startswith(("libqt6", "qt6")) or ".framework" in name.lower() and "/qt" in name.lower()
+
+
+def qt_runtime_for_helper(libs):
+    """
+    The Qt runtime the Qt AAD helper is checked against: (runtime, note, error).
+    Qt is not shipped (Qt WebEngine is ~150 MB compressed, beyond PyPI's file
+    limit); at run time pyfreerdpnative.aad gives the helper the user's Qt. In
+    CI that Qt is the one it was built with (QT_ROOT_DIR, aqtinstall), looked
+    up the way users' PYFREERDP_QT_DIR is. A Qt named explicitly must be usable:
+    falling back to another would hide exactly what is being checked.
+    """
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    if not os.environ.get("PYFREERDP_QT_DIR") and os.environ.get("QT_ROOT_DIR"):
+        os.environ["PYFREERDP_QT_DIR"] = os.environ["QT_ROOT_DIR"]
+    from pyfreerdpnative import aad
+    needed = aad.helpers(libs).get("qt", {}).get("qt_version")
+    explicit = os.environ.get("PYFREERDP_QT_DIR")
+    if explicit:
+        candidates = [aad._qt_from_directory(explicit)]
+        if candidates[0] is None:
+            return None, None, ("{0}: the Qt at {1} is not a Qt WebEngine runtime (no "
+                                "QtWebEngineProcess / Qt6WebEngineCore)".format(QT_HELPER, explicit))
+    else:
+        candidates = aad.qt_runtimes()
+    for runtime in candidates:
+        if runtime.get("libdir") and (not needed or not runtime["version"]
+                                      or aad._version_tuple(runtime["version"]) >= aad._version_tuple(needed)):
+            note = "{0} resolves against {1} Qt {2}".format(QT_HELPER, runtime["source"], runtime["version"] or "?")
+            if runtime.get("missing"):
+                note += " (to show its window it also needs {0})".format(runtime["missing"])
+            return runtime, note, None
+        if explicit:
+            return None, None, "{0}: the Qt at {1} is {2}, older than the {3} it was built with".format(
+                QT_HELPER, explicit, runtime["version"], needed)
+    return None, ("{0}: no Qt {1}+ runtime here (PYFREERDP_QT_DIR / QT_ROOT_DIR, PySide6-WebEngine) - "
+                  "its Qt libraries were not checked".format(QT_HELPER, needed or "6")), None
 
 
 def check_executables(bins, libs, tmp):
@@ -842,12 +896,27 @@ def check_executables(bins, libs, tmp):
         return
     env = exe_env(libs)
     problems = []
+    notes = []
     tested = 0
     for p in exes:
         name = os.path.basename(p)
         if name.lower().endswith(".exe"):
             name = name[:-4]
-        miss = unresolved_deps(p, libs)
+        extra_dirs = []
+        if name == QT_HELPER:
+            runtime, note, error = qt_runtime_for_helper(libs)
+            if error:
+                problems.append(error)
+                continue
+            notes.append(note)
+            extra_dirs = [runtime["libdir"]] if runtime else []
+        miss = unresolved_deps(p, libs, extra_dirs)
+        if name == QT_HELPER:
+            if SYS == "Windows":  # no loader dry run there: walk the imports
+                miss = windows_missing_imports(p, libs, extra_dirs)
+            if not extra_dirs:  # no Qt here: everything but Qt itself must resolve
+                miss = [m for m in miss if not _is_qt_library(m)]
+            tested += 1
         if miss:
             problems.append("{0}: unresolved {1}".format(name, miss))
             continue
@@ -885,8 +954,8 @@ def check_executables(bins, libs, tmp):
     if problems:
         fail("executables", "; ".join(problems))
     else:
-        ok("executables", "{0} staged, {1} smoke-tested, all deps resolve".format(
-            len(exes), tested))
+        ok("executables", "{0} staged, {1} smoke-tested, all deps resolve{2}".format(
+            len(exes), tested, "".join("; " + n for n in notes)))
 
 
 # ---------------------------------------------------------------------------
