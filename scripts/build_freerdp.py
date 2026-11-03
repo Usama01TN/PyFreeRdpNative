@@ -458,9 +458,9 @@ def webview_available(host_os):
 def qt_webengine_prefix(explicit=None):
     """
     Where Qt 6 WebEngineWidgets is, for the Qt AAD helper: an install prefix
-    (passed to CMake as Qt6_DIR=<prefix>/lib/cmake/Qt6 - never on
-    CMAKE_PREFIX_PATH, see aad_helper_options), "" when CMake finds it on its
-    own (a system Qt), or None when there is none. Looked up in: the explicit --qt-prefix, then
+    (given to the Qt helper's directory only, as PYFREERDPNATIVE_QT_PREFIX -
+    see aad_helper_options), "" when CMake finds it on its own (a system Qt),
+    or None when there is none. Looked up in: the explicit --qt-prefix, then
     QT_ROOT_DIR (set by aqtinstall / install-qt-action) and Qt6_DIR, then the
     usual system and Homebrew locations.
     """
@@ -523,16 +523,16 @@ def aad_helper_options(host_os, profile, json_enabled, webview=None, qt=None,
                        else "no (no Qt 6 WebEngineWidgets found; --qt-prefix)")
     opts.append("-DWITH_QT_AAD_AUTH_HELPER={0}".format("ON" if want_qt else "OFF"))
     if prefixes:
-        # Qt6_DIR, NOT CMAKE_PREFIX_PATH: a binary Qt carries its own copies of
-        # libraries FreeRDP also looks for (Qt/lib/libicu*.so.56 ...). On the
-        # prefix path, FindICU took Qt's ICU 56 library with the system's ICU 74
-        # headers, and libwinpr3 failed to load ("undefined symbol
-        # u_errorName_74" / "libicui18n.so.56: cannot open"). Qt6_DIR only
-        # tells find_package(Qt6) where Qt's own CMake files are.
-        qt6_dirs = (glob.glob(os.path.join(prefixes[0], "lib*", "cmake", "Qt6"))
-                    + glob.glob(os.path.join(prefixes[0], "lib", "*", "cmake", "Qt6")))
-        if qt6_dirs:
-            opts.append("-DQt6_DIR={0}".format(qt6_dirs[0]))
+        # The Qt location reaches ONLY the Qt helper's directory (patched in by
+        # _patch_qt_helper_scope). Neither global choice works:
+        # * CMAKE_PREFIX_PATH: a binary Qt carries its own copies of libraries
+        #   FreeRDP also looks for (Qt/lib/libicu*.so.56); FindICU took Qt's ICU
+        #   library with the system's ICU headers and libwinpr3 failed to load
+        #   ("undefined symbol u_errorName_74").
+        # * Qt6_DIR: Qt finds its *Tools packages (Qt6CoreTools ...) through the
+        #   prefix path, not through Qt6_DIR - Qt 6 is then "not found" and
+        #   FreeRDP falls back to a required Qt 5.
+        opts.append("-DPYFREERDPNATIVE_QT_PREFIX={0}".format(prefixes[0].replace("\\", "/")))
         if host_os == "Linux":
             # A downloaded Qt's WebEngine libraries depend on desktop libraries (NSS, ALSA, X11
             # extensions...) a build container lacks; ld would refuse to link the helper against
@@ -577,8 +577,9 @@ def stage_aad_helpers(prefixes, libs_dir, qt_prefix=None):
         json.dump(manifest, fh, indent=2, sort_keys=True)
     for kind, p in sorted(staged.items()):
         print("[aad] {0} helper: {1}".format(kind, p))
-    if not staged:
-        print("[aad] no AAD helper was built")
+    for kind in AAD_HELPERS:
+        if kind not in staged:
+            print("[aad] {0} helper: not built (its reason is in the CMake output)".format(kind))
     return staged
 
 
@@ -1526,13 +1527,56 @@ def _patch_webview_helper_threads(src):
     print("[patch] webview-aad-helper: links Threads::Threads")
 
 
+def _patch_qt_helper_scope(src):
+    """
+    The Qt AAD helper (FreeRDP 3.33) looks for Qt with the build's global
+    package search. Give it the Qt location (PYFREERDPNATIVE_QT_PREFIX) on
+    CMAKE_PREFIX_PATH inside its own directory - CMake directory scope keeps it
+    from every other find_package/find_library (see aad_helper_options). And
+    the helper is optional: with no usable Qt it is skipped with a warning
+    giving Qt's reason, instead of failing the build on a required Qt 5.
+    """
+    path = os.path.join(src, "client", "common", "qt-aad-helper", "CMakeLists.txt")
+    if not os.path.isfile(path):
+        return
+    with open(path) as fh:
+        text = fh.read()
+    if "PYFREERDPNATIVE_QT_PREFIX" in text:
+        return
+    lookup = "find_package(Qt6 QUIET COMPONENTS Widgets WebEngineWidgets)"
+    required = "  find_package(Qt5 5.12 REQUIRED COMPONENTS Widgets WebEngineWidgets)\n"
+    if lookup not in text or required not in text:
+        print("[patch] qt-aad-helper: anchors not found, left unchanged")
+        return
+    text = text.replace(lookup, """# pyfreerdpnative: the Qt to use, visible in this directory only.
+if(PYFREERDPNATIVE_QT_PREFIX)
+  list(PREPEND CMAKE_PREFIX_PATH "${PYFREERDPNATIVE_QT_PREFIX}")
+endif()
+""" + lookup, 1)
+    text = text.replace(required, """  find_package(Qt5 5.12 QUIET COMPONENTS Widgets WebEngineWidgets)
+  if(NOT Qt5_FOUND)
+    # pyfreerdpnative: an optional helper never fails the whole build.
+    if(NOT Qt6_NOT_FOUND_MESSAGE)  # Qt sets it only when its config was found
+      set(Qt6_NOT_FOUND_MESSAGE "no Qt6Config.cmake (Qt6_DIR=${Qt6_DIR}, PYFREERDPNATIVE_QT_PREFIX=${PYFREERDPNATIVE_QT_PREFIX})")
+    endif()
+    message(WARNING "freerdp-qt-aad-helper skipped: no Qt 6 (or Qt 5.12+) with "
+                    "WebEngineWidgets. Qt 6: ${Qt6_NOT_FOUND_MESSAGE}")
+    return()
+  endif()
+""", 1)
+    with open(path, "w") as fh:
+        fh.write(text)
+    print("[patch] qt-aad-helper: Qt location scoped to its directory; optional")
+
+
 def patch_source_tree(src, host_os, profile, windows_shadow=None):
     """
     Fix upstream bugs in the fetched FreeRDP tree that would otherwise make a
     supported configuration fail to build.
 
-    0. Everywhere: winpr's Objective-C BOOL guard and the webview AAD
-       helper's missing thread library (see the two _patch_ functions).
+    0. Everywhere: winpr's Objective-C BOOL guard, the webview AAD helper's
+       missing thread library, and the Qt AAD helper's Qt lookup (scoped to
+       its directory, optional) - see the three _patch_ functions.
     1. Windows shadow subsystem (server/shadow/Win): FreeRDP's top-level
        CMakeLists.txt does add_compile_definitions(NONAMELESSUNION), which
        renames the Windows SDK's anonymous unions to DUMMYUNIONNAME - but
@@ -1545,6 +1589,7 @@ def patch_source_tree(src, host_os, profile, windows_shadow=None):
     # Upstream bugs the AAD helpers expose, on every platform.
     _patch_winpr_objc_bool(src)
     _patch_webview_helper_threads(src)
+    _patch_qt_helper_scope(src)
     if host_os == "Windows-static-crt":
         _patch_msvc_static_crt_guard(src)
         return

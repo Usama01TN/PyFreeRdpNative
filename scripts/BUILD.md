@@ -288,14 +288,20 @@ Qt WebEngine 6.140.
 
 Build details that keep this working (each was a CI failure):
 
-* A downloaded Qt is given to CMake as **`Qt6_DIR`**, never on
-  `CMAKE_PREFIX_PATH`: a binary Qt ships its own libraries (`lib/libicu*.so.56`),
-  and on the prefix path FindICU took Qt's ICU library with the system's ICU
-  headers - libwinpr3 then failed to load (`undefined symbol u_errorName_74`).
+* A downloaded Qt's location (`PYFREERDPNATIVE_QT_PREFIX`) is put on
+  `CMAKE_PREFIX_PATH` **inside the Qt helper's directory only** (a patch to its
+  CMakeLists; CMake directory scope keeps it from everything else). Both global
+  choices failed: on the global `CMAKE_PREFIX_PATH`, FindICU took Qt's bundled
+  `libicu*.so.56` with the system's ICU headers and libwinpr3 failed to load
+  (`undefined symbol u_errorName_74`); as `Qt6_DIR`, Qt could not find its
+  `Qt6CoreTools`-style packages (they are looked up through the prefix path),
+  so Qt 6 was "not found" and FreeRDP fell back to a required Qt 5.
+* The Qt helper is **optional**: with no usable Qt it is skipped with a CMake
+  warning that gives the reason, and the rest of FreeRDP builds.
 * Qt's AUTOMOC needs **Ninja 1.10+**; with an older one (AlmaLinux 8 ships
   1.8.2) the build uses CMake's default generator. CI installs a current Ninja
   in the manylinux containers.
-* Two upstream bugs are patched in the fetched tree (`patch_source_tree`):
+* Upstream bugs patched in the fetched tree (`patch_source_tree`):
   winpr's `wtypes.h` picked the opposite `BOOL` of Objective-C's when `objc.h`
   came first (the macOS webview helper failed with *typedef redefinition*), and
   the webview helper did not link the thread library glibc < 2.34 needs.

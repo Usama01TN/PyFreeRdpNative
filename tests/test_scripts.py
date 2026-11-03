@@ -209,9 +209,9 @@ def test_qt_runtime_found_from_marker_files(tmp_path, monkeypatch):
 
 # --- FreeRDP 3.33 CI failures: each test pins the cause of one ----------------------------------
 
-def test_qt_located_by_qt6_dir_not_the_prefix_path(tmp_path):
-    """A binary Qt carries its own ICU: on CMAKE_PREFIX_PATH, winpr linked Qt's ICU 56
-    against the system's ICU 74 headers (undefined symbol u_errorName_74)."""
+def test_qt_prefix_reaches_only_the_qt_helper(tmp_path):
+    """Globally, Qt's prefix leaked its ICU into winpr (u_errorName_74); as Qt6_DIR,
+    Qt could not find its Tools packages. It goes to the Qt helper's directory only."""
     b = _build_script()
     qt = tmp_path / "Qt" / "6.5.3" / "gcc_64"
     for d in ("lib/cmake/Qt6", "lib/cmake/Qt6WebEngineWidgets"):
@@ -219,8 +219,23 @@ def test_qt_located_by_qt6_dir_not_the_prefix_path(tmp_path):
     # webview=False: this test is about Qt; do not probe the host for WebKitGTK
     opts, why = b.aad_helper_options("Linux", "full", json_enabled=True, webview=False, qt=True,
                                      qt_prefix=str(qt))
-    assert "-DQt6_DIR={0}".format(qt / "lib" / "cmake" / "Qt6") in opts
-    assert not [o for o in opts if o.startswith("-DCMAKE_PREFIX_PATH=")]
+    assert "-DPYFREERDPNATIVE_QT_PREFIX={0}".format(str(qt).replace("\\", "/")) in opts
+    assert not [o for o in opts if o.startswith(("-DCMAKE_PREFIX_PATH=", "-DQt6_DIR="))]
+
+
+def test_qt_helper_patch_scopes_qt_and_makes_it_optional(tmp_path):
+    b = _build_script()
+    cmake = tmp_path / "client" / "common" / "qt-aad-helper" / "CMakeLists.txt"
+    cmake.parent.mkdir(parents=True)
+    cmake.write_text("find_package(Qt6 QUIET COMPONENTS Widgets WebEngineWidgets)\nif(Qt6_FOUND)\n"
+                     "  set(L Qt6::Widgets)\nelse()\n"
+                     "  find_package(Qt5 5.12 REQUIRED COMPONENTS Widgets WebEngineWidgets)\n"
+                     "  set(L Qt5::Widgets)\nendif()\n")
+    b._patch_qt_helper_scope(str(tmp_path))
+    b._patch_qt_helper_scope(str(tmp_path))
+    text = cmake.read_text()
+    assert text.count('list(PREPEND CMAKE_PREFIX_PATH "${PYFREERDPNATIVE_QT_PREFIX}")') == 1
+    assert "REQUIRED" not in text and "return()" in text
 
 
 def test_ninja_older_than_1_10_is_not_used(tmp_path, monkeypatch):
