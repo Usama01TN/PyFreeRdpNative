@@ -1,10 +1,11 @@
 """The build/packaging scripts stay importable and version-consistent."""
-import os
-import pytest
-import shutil
 import json
+import os
+import shutil
 import subprocess
 import sys
+
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS = os.path.join(ROOT, "scripts")
@@ -184,6 +185,7 @@ def test_aad_helper_selection(tmp_path, monkeypatch):
 def test_qt_runtime_found_from_marker_files(tmp_path, monkeypatch):
     """The PySide6 / PyQt6 Qt WebEngine layout is discovered, not hard-coded."""
     import importlib.util
+
     from pyfreerdpnative import aad
     qt = tmp_path / "PySide6" / "Qt"
     for sub in ("lib", "libexec", "resources", "translations/qtwebengine_locales", "plugins"):
@@ -203,3 +205,68 @@ def test_qt_runtime_found_from_marker_files(tmp_path, monkeypatch):
     assert env["QTWEBENGINEPROCESS_PATH"] == str(qt / "libexec" / "QtWebEngineProcess")
     assert env["QTWEBENGINE_RESOURCES_PATH"] == str(qt / "resources")
     assert env["QTWEBENGINE_LOCALES_PATH"] == str(qt / "translations" / "qtwebengine_locales")
+
+
+# --- FreeRDP 3.33 CI failures: each test pins the cause of one ----------------------------------
+
+def test_qt_located_by_qt6_dir_not_the_prefix_path(tmp_path):
+    """A binary Qt carries its own ICU: on CMAKE_PREFIX_PATH, winpr linked Qt's ICU 56
+    against the system's ICU 74 headers (undefined symbol u_errorName_74)."""
+    b = _build_script()
+    qt = tmp_path / "Qt" / "6.5.3" / "gcc_64"
+    for d in ("lib/cmake/Qt6", "lib/cmake/Qt6WebEngineWidgets"):
+        (qt / d).mkdir(parents=True)
+    opts, why = b.aad_helper_options("Linux", "full", json_enabled=True, qt=True, qt_prefix=str(qt))
+    assert "-DQt6_DIR={0}".format(qt / "lib" / "cmake" / "Qt6") in opts
+    assert not [o for o in opts if o.startswith("-DCMAKE_PREFIX_PATH=")]
+
+
+def test_ninja_older_than_1_10_is_not_used(tmp_path, monkeypatch):
+    """Ninja 1.8.2 (AlmaLinux 8) rejects Qt AUTOMOC's multi-output rules."""
+    b = _build_script()
+    fake = tmp_path / "ninja"
+    for version, usable in (("1.8.2", False), ("1.11.1", True)):
+        fake.write_text("#!/bin/sh\necho {0}\n".format(version))
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", "{0}{1}{2}".format(tmp_path, os.pathsep, os.environ["PATH"]))
+        assert b.usable_ninja() is usable, version
+
+
+def test_winpr_objc_bool_patch(tmp_path):
+    """objc.h first, then winpr: BOOL must follow OBJC_BOOL_IS_BOOL (macOS arm64 and x86-64)."""
+    b = _build_script()
+    header = tmp_path / "winpr" / "include" / "winpr" / "wtypes.h"
+    header.parent.mkdir(parents=True)
+    header.write_text("#if defined(OBJC_BOOL_IS_BOOL) && (OBJC_BOOL_IS_CHAR != 0)\ntypedef bool BOOL;\n#endif\n")
+    b._patch_winpr_objc_bool(str(tmp_path))
+    b._patch_winpr_objc_bool(str(tmp_path))
+    text = header.read_text()
+    assert text.count("defined(OBJC_BOOL_IS_BOOL) && OBJC_BOOL_IS_BOOL") == 1
+    assert "OBJC_BOOL_IS_CHAR != 0" not in text
+
+
+def test_webview_helper_links_threads(tmp_path):
+    """glibc < 2.34 keeps pthread_create in libpthread: the helper must link it."""
+    b = _build_script()
+    cmake = tmp_path / "client" / "common" / "webview-aad-helper" / "CMakeLists.txt"
+    cmake.parent.mkdir(parents=True)
+    cmake.write_text("target_link_libraries(${PROJECT_NAME} PRIVATE winpr webview::core)\n")
+    b._patch_webview_helper_threads(str(tmp_path))
+    b._patch_webview_helper_threads(str(tmp_path))
+    text = cmake.read_text()
+    assert text.count("Threads::Threads") == 1 and "find_package(Threads REQUIRED)" in text
+
+
+def test_h264_encoder_expectation_per_platform():
+    """FreeRDP 3.33's VideoToolbox backend encodes H.264 on macOS in every edition."""
+    sys.path.insert(0, SCRIPTS)
+    try:
+        import validate_build as v
+    finally:
+        sys.path.remove(SCRIPTS)
+    vt = ["/System/Library/Frameworks/VideoToolbox.framework/Versions/A/VideoToolbox"]
+    assert v.expected_h264_encoder("Darwin", True, False, vt) is True        # macOS + VideoToolbox
+    assert v.expected_h264_encoder("Darwin", True, False, []) is False       # FreeRDP < 3.33 on macOS
+    assert v.expected_h264_encoder("Windows", True, False, []) is True       # Media Foundation
+    assert v.expected_h264_encoder("Linux", True, False, []) is False        # LGPL FFmpeg: no encoder
+    assert v.expected_h264_encoder("Linux", False, True, []) is True         # OpenH264

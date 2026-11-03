@@ -313,6 +313,15 @@ jobs:
           "$py/python" --version
           # some images have python3 but no `python`
           [ -x "$py/python" ] || ln -sf "$py/python3" "$py/python"
+          # A current Ninja: AlmaLinux 8 (manylinux_2_28) ships 1.8.2, which cannot
+          # build Qt's AUTOMOC rules (the Qt AAD helper). It lands in $py, first on
+          # PATH; if it cannot be installed, build_freerdp.py's version check falls
+          # back to Makefiles on its own.
+          if "$py/python" -m pip install --disable-pip-version-check --quiet "ninja>=1.11"; then
+            echo "ninja $("$py/ninja" --version) from pip"
+          else
+            echo "::notice::could not install a current ninja; build_freerdp.py checks the system one"
+          fi
 
       # Skipped inside the manylinux container: it ships CPython at
       # /opt/python/cp312-cp312/bin (added to PATH by the dnf step), and

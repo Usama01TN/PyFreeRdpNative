@@ -71,10 +71,10 @@ Style: Py2-compatible syntax. Runs on Python 3.
 """
 import argparse
 import glob
-import re
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -128,6 +128,27 @@ def save_diagnostics(cmd=None):
         if os.path.isfile(p):
             shutil.copy2(p, os.path.join(out, os.path.basename(p)))
     print("[diagnostics] CMake logs copied to {0}".format(out))
+
+
+def usable_ninja():
+    """
+    Ninja, when it is new enough: Qt's AUTOMOC (the Qt AAD helper, FreeRDP 3.33)
+    writes rules with several outputs and a depfile, which Ninja < 1.10 rejects
+    ("multiple outputs aren't (yet?) supported by depslog") - AlmaLinux 8
+    (manylinux_2_28) ships 1.8.2. Older Ninja -> CMake's default generator.
+    """
+    if not have("ninja"):
+        return False
+    try:
+        out = subprocess.check_output(["ninja", "--version"], stderr=subprocess.STDOUT).decode().strip()
+    except (OSError, subprocess.CalledProcessError):
+        return False
+    version = tuple(int(p) for p in re.findall(r"\d+", out)[:2])
+    if version >= (1, 10):
+        return True
+    print("[build] ninja {0} is too old (needs 1.10+ for Qt's AUTOMOC): using "
+          "CMake's default generator instead".format(out))
+    return False
 
 
 def have(tool):
@@ -424,9 +445,10 @@ def webview_available(host_os):
 
 def qt_webengine_prefix(explicit=None):
     """
-    Where Qt 6 WebEngineWidgets is, for the Qt AAD helper: a prefix to add to
-    CMAKE_PREFIX_PATH, "" when CMake finds it on its own (a system Qt), or
-    None when there is none. Looked up in: the explicit --qt-prefix, then
+    Where Qt 6 WebEngineWidgets is, for the Qt AAD helper: an install prefix
+    (passed to CMake as Qt6_DIR=<prefix>/lib/cmake/Qt6 - never on
+    CMAKE_PREFIX_PATH, see aad_helper_options), "" when CMake finds it on its
+    own (a system Qt), or None when there is none. Looked up in: the explicit --qt-prefix, then
     QT_ROOT_DIR (set by aqtinstall / install-qt-action) and Qt6_DIR, then the
     usual system and Homebrew locations.
     """
@@ -488,8 +510,17 @@ def aad_helper_options(host_os, profile, json_enabled, webview=None, qt=None,
     decisions["qt"] = ("yes ({0})".format(found or "system Qt") if want_qt
                        else "no (no Qt 6 WebEngineWidgets found; --qt-prefix)")
     opts.append("-DWITH_QT_AAD_AUTH_HELPER={0}".format("ON" if want_qt else "OFF"))
-    if prefixes:  # merged with the other prefixes by dedupe_defines()
-        opts.append("-DCMAKE_PREFIX_PATH={0}".format(prefixes[0]))
+    if prefixes:
+        # Qt6_DIR, NOT CMAKE_PREFIX_PATH: a binary Qt carries its own copies of
+        # libraries FreeRDP also looks for (Qt/lib/libicu*.so.56 ...). On the
+        # prefix path, FindICU took Qt's ICU 56 library with the system's ICU 74
+        # headers, and libwinpr3 failed to load ("undefined symbol
+        # u_errorName_74" / "libicui18n.so.56: cannot open"). Qt6_DIR only
+        # tells find_package(Qt6) where Qt's own CMake files are.
+        qt6_dirs = (glob.glob(os.path.join(prefixes[0], "lib*", "cmake", "Qt6"))
+                    + glob.glob(os.path.join(prefixes[0], "lib", "*", "cmake", "Qt6")))
+        if qt6_dirs:
+            opts.append("-DQt6_DIR={0}".format(qt6_dirs[0]))
         if host_os == "Linux":
             # A downloaded Qt's WebEngine libraries depend on desktop libraries (NSS, ALSA, X11
             # extensions...) a build container lacks; ld would refuse to link the helper against
@@ -1434,11 +1465,58 @@ def _patch_opus_download(src):
             fh.write(dtext)
         print("[patch] cmake/DepVersions: OPUS_HASH -> the v-tagged archive's")
 
+def _patch_winpr_objc_bool(src):
+    """
+    winpr/wtypes.h picks BOOL to match Objective-C's when objc.h came first,
+    but tests the wrong macro: defined(OBJC_BOOL_IS_BOOL) && OBJC_BOOL_IS_CHAR
+    is false on arm64 (objc: bool, winpr: signed char) and true on x86-64
+    (objc: signed char, winpr: bool) - the opposite every time. FreeRDP 3.33's
+    webview AAD helper is the first non-ObjC code to include objc.h before
+    winpr, and fails with "typedef redefinition with different types". Follow
+    objc.h's own decision. Unchanged when objc.h is not included (no ABI change).
+    """
+    path = os.path.join(src, "winpr", "include", "winpr", "wtypes.h")
+    if not os.path.isfile(path):
+        return
+    with open(path) as fh:
+        text = fh.read()
+    old = "#if defined(OBJC_BOOL_IS_BOOL) && (OBJC_BOOL_IS_CHAR != 0)"
+    if old not in text:
+        return  # fixed upstream, or a different version
+    with open(path, "w") as fh:
+        fh.write(text.replace(old, "#if defined(OBJC_BOOL_IS_BOOL) && OBJC_BOOL_IS_BOOL "
+                                   "/* pyfreerdpnative: follow objc.h */", 1))
+    print("[patch] winpr/wtypes.h: BOOL follows objc.h's OBJC_BOOL_IS_BOOL")
+
+
+def _patch_webview_helper_threads(src):
+    """
+    The webview AAD helper (FreeRDP 3.33) links only winpr and webview::core;
+    libstdc++ needs pthread_create, which glibc < 2.34 keeps in a separate
+    libpthread ("DSO missing from command line" on manylinux_2_28). Link the
+    Threads package into that one target.
+    """
+    path = os.path.join(src, "client", "common", "webview-aad-helper", "CMakeLists.txt")
+    if not os.path.isfile(path):
+        return
+    with open(path) as fh:
+        text = fh.read()
+    old = "target_link_libraries(${PROJECT_NAME} PRIVATE winpr webview::core)"
+    if "Threads::Threads" in text or old not in text:
+        return
+    with open(path, "w") as fh:
+        fh.write(text.replace(old, "find_package(Threads REQUIRED) # pyfreerdpnative: libpthread on glibc < 2.34\n"
+                                   "target_link_libraries(${PROJECT_NAME} PRIVATE winpr webview::core Threads::Threads)", 1))
+    print("[patch] webview-aad-helper: links Threads::Threads")
+
+
 def patch_source_tree(src, host_os, profile, windows_shadow=None):
     """
     Fix upstream bugs in the fetched FreeRDP tree that would otherwise make a
     supported configuration fail to build.
 
+    0. Everywhere: winpr's Objective-C BOOL guard and the webview AAD
+       helper's missing thread library (see the two _patch_ functions).
     1. Windows shadow subsystem (server/shadow/Win): FreeRDP's top-level
        CMakeLists.txt does add_compile_definitions(NONAMELESSUNION), which
        renames the Windows SDK's anonymous unions to DUMMYUNIONNAME - but
@@ -1448,6 +1526,9 @@ def patch_source_tree(src, host_os, profile, windows_shadow=None):
        compile; named vs nameless unions have identical layout, so mixing
        the two across translation units is ABI-safe.
     """
+    # Upstream bugs the AAD helpers expose, on every platform.
+    _patch_winpr_objc_bool(src)
+    _patch_webview_helper_threads(src)
     if host_os == "Windows-static-crt":
         _patch_msvc_static_crt_guard(src)
         return
@@ -1559,7 +1640,7 @@ def build_host(src, prefix, jobs, profile, enable_channels=None,
         cfg += ["-A", vs_arch]
         if cfg_extra_toolset:
             cfg += ["-T", cfg_extra_toolset[0]]
-    elif have("ninja"):
+    elif usable_ninja():
         cfg += ["-G", "Ninja"]
 
     run(cfg, env=env)
@@ -1663,7 +1744,7 @@ def build_sample_client(src, prefix, host_os, arch, deps_prefix, jobs,
     cfg = dedupe_defines(cfg)
     if host_os == "Windows":
         cfg += ["-A", WINDOWS_ARCHS[host_windows_arch(arch)][0]]
-    elif have("ninja"):
+    elif usable_ninja():
         cfg += ["-G", "Ninja"]
     if host_os == "Linux" and deps_prefix:
         cfg.append("-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,{0}".format(
@@ -3038,7 +3119,7 @@ def build_ios(src, jobs, profile, enable_channels=None,
     # phases for the tool executables, and much slower builds. Prefer Ninja
     # (single-config, plain install); fall back to Xcode only if ninja is
     # missing, in which case disable code signing.
-    if have("ninja"):
+    if usable_ninja():
         generator = ["-G", "Ninja"]
     else:
         print("[ios] ninja not found; falling back to the Xcode generator")

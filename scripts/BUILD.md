@@ -286,6 +286,23 @@ compatible upwards, so it runs with any newer Qt 6. Verified: a helper built
 against Qt 6.4.2 passes FreeRDP's protocol test on PySide6's Qt 6.12 /
 Qt WebEngine 6.140.
 
+Build details that keep this working (each was a CI failure):
+
+* A downloaded Qt is given to CMake as **`Qt6_DIR`**, never on
+  `CMAKE_PREFIX_PATH`: a binary Qt ships its own libraries (`lib/libicu*.so.56`),
+  and on the prefix path FindICU took Qt's ICU library with the system's ICU
+  headers - libwinpr3 then failed to load (`undefined symbol u_errorName_74`).
+* Qt's AUTOMOC needs **Ninja 1.10+**; with an older one (AlmaLinux 8 ships
+  1.8.2) the build uses CMake's default generator. CI installs a current Ninja
+  in the manylinux containers.
+* Two upstream bugs are patched in the fetched tree (`patch_source_tree`):
+  winpr's `wtypes.h` picked the opposite `BOOL` of Objective-C's when `objc.h`
+  came first (the macOS webview helper failed with *typedef redefinition*), and
+  the webview helper did not link the thread library glibc < 2.34 needs.
+* FreeRDP 3.33's **VideoToolbox** backend encodes H.264 on macOS in every
+  edition; `validate_build.py` expects an encoder whenever libfreerdp3 links
+  that framework.
+
 Known upstream issue (FreeRDP 3.33.0, WebKitGTK): restoring the browser's own
 User-Agent after an override *within one helper process* is racy. PyFreeRdpApp
 starts one helper per connection, so it never takes that path.

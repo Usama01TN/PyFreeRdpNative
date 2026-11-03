@@ -394,6 +394,17 @@ DSP_FORMATS = {"AAC": (0xA106, 2, 44100, 16), "Opus": (0x704F, 2, 48000, 16),
                "PCM": (0x0001, 2, 44100, 16)}
 
 
+def expected_h264_encoder(system, ffmpeg, openh264, deps):
+    """
+    Whether h264_context_new(compressor=1) must succeed. FFmpeg alone has no
+    H.264 *encoder* in an LGPL build, so it comes from OpenH264 or the OS:
+    Media Foundation on Windows (FFmpeg's h264_mf), and - FreeRDP 3.33+ -
+    Apple VideoToolbox on macOS, whenever libfreerdp3 links its framework.
+    """
+    videotoolbox = system == "Darwin" and any("VideoToolbox.framework" in d for d in deps)
+    return bool(openh264 or (system == "Windows" and ffmpeg) or videotoolbox)
+
+
 def check_media(libs, paths, edition="media"):
     ffmpeg = edition in ("ffmpeg", "media")
     openh264 = edition in ("openh264", "media")
@@ -434,10 +445,7 @@ def check_media(libs, paths, edition="media"):
         results.append(bool(ctx))
         if ctx:
             lib.h264_context_free(ctx)
-    # FFmpeg alone has no H.264 *encoder* in an LGPL build - except on
-    # Windows, where FFmpeg wraps Media Foundation (h264_mf) - so the ffmpeg
-    # edition must decode and, off Windows, must have no encoder context.
-    expect_enc = openh264 or (SYS == "Windows" and ffmpeg)
+    expect_enc = expected_h264_encoder(SYS, ffmpeg, openh264, deps)
     if results[0] and (results[1] == expect_enc or (SYS == "Windows" and results[1])):
         ok("media.h264", "h264_context_new(): decoder yes, encoder {0} - as "
                          "expected for edition {1}".format(
