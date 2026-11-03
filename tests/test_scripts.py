@@ -216,7 +216,9 @@ def test_qt_located_by_qt6_dir_not_the_prefix_path(tmp_path):
     qt = tmp_path / "Qt" / "6.5.3" / "gcc_64"
     for d in ("lib/cmake/Qt6", "lib/cmake/Qt6WebEngineWidgets"):
         (qt / d).mkdir(parents=True)
-    opts, why = b.aad_helper_options("Linux", "full", json_enabled=True, qt=True, qt_prefix=str(qt))
+    # webview=False: this test is about Qt; do not probe the host for WebKitGTK
+    opts, why = b.aad_helper_options("Linux", "full", json_enabled=True, webview=False, qt=True,
+                                     qt_prefix=str(qt))
     assert "-DQt6_DIR={0}".format(qt / "lib" / "cmake" / "Qt6") in opts
     assert not [o for o in opts if o.startswith("-DCMAKE_PREFIX_PATH=")]
 
@@ -224,9 +226,11 @@ def test_qt_located_by_qt6_dir_not_the_prefix_path(tmp_path):
 def test_ninja_older_than_1_10_is_not_used(tmp_path, monkeypatch):
     """Ninja 1.8.2 (AlmaLinux 8) rejects Qt AUTOMOC's multi-output rules."""
     b = _build_script()
-    fake = tmp_path / "ninja"
+    # A fake that this OS can run: Windows only runs extension-less scripts via PATHEXT types.
+    fake, script = ((tmp_path / "ninja.cmd", "@echo {0}\r\n") if os.name == "nt"
+                    else (tmp_path / "ninja", "#!/bin/sh\necho {0}\n"))
     for version, usable in (("1.8.2", False), ("1.11.1", True)):
-        fake.write_text("#!/bin/sh\necho {0}\n".format(version))
+        fake.write_text(script.format(version))
         fake.chmod(0o755)
         monkeypatch.setenv("PATH", "{0}{1}{2}".format(tmp_path, os.pathsep, os.environ["PATH"]))
         assert b.usable_ninja() is usable, version
@@ -270,3 +274,13 @@ def test_h264_encoder_expectation_per_platform():
     assert v.expected_h264_encoder("Windows", True, False, []) is True       # Media Foundation
     assert v.expected_h264_encoder("Linux", True, False, []) is False        # LGPL FFmpeg: no encoder
     assert v.expected_h264_encoder("Linux", False, True, []) is True         # OpenH264
+
+
+
+def test_tools_run_by_their_resolved_path(monkeypatch):
+    """have() may find a tool that cannot run as a bare name (Windows .bat/.cmd): the
+    resolved path is what runs, and an unrunnable tool counts as absent, not a crash."""
+    b = _build_script()
+    monkeypatch.setattr(b, "tool_path", lambda tool: os.path.join(os.sep, "no", "such", tool))
+    assert b._pkg_config_has("webkit2gtk-4.1") is False
+    assert b.usable_ninja() is False

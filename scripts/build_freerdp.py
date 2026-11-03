@@ -137,10 +137,11 @@ def usable_ninja():
     ("multiple outputs aren't (yet?) supported by depslog") - AlmaLinux 8
     (manylinux_2_28) ships 1.8.2. Older Ninja -> CMake's default generator.
     """
-    if not have("ninja"):
+    ninja = tool_path("ninja")
+    if not ninja:
         return False
     try:
-        out = subprocess.check_output(["ninja", "--version"], stderr=subprocess.STDOUT).decode().strip()
+        out = subprocess.check_output([ninja, "--version"], stderr=subprocess.STDOUT).decode().strip()
     except (OSError, subprocess.CalledProcessError):
         return False
     version = tuple(int(p) for p in re.findall(r"\d+", out)[:2])
@@ -153,6 +154,17 @@ def usable_ninja():
 
 def have(tool):
     return shutil.which(tool) is not None
+
+
+def tool_path(tool):
+    """
+    The file to run for a tool: shutil.which's answer. On Windows which() also
+    finds .bat/.cmd files (PATHEXT, e.g. Strawberry Perl's pkg-config.bat),
+    but CreateProcess only adds .exe to a bare name - running "pkg-config"
+    then fails with FileNotFoundError although have() said yes. Running the
+    resolved path works everywhere.
+    """
+    return shutil.which(tool)
 
 
 def require_tools(tools):
@@ -1313,11 +1325,15 @@ def host_dependency_probe(host_os, arch="host", deps_prefix=None):
 
 
 def _pkg_config_has(module):
-    if not have("pkg-config"):
+    pkg_config = tool_path("pkg-config")
+    if not pkg_config:
         return False
-    return subprocess.run(["pkg-config", "--exists", module],
-                          stdout=subprocess.DEVNULL,
-                          stderr=subprocess.DEVNULL).returncode == 0
+    try:
+        return subprocess.run([pkg_config, "--exists", module],
+                              stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL).returncode == 0
+    except OSError:  # found but not runnable: as good as absent
+        return False
 
 
 def deps_env(deps_prefix, cross=False):
