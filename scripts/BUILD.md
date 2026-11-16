@@ -1,0 +1,479 @@
+# Native build system
+
+> **FreeRDP 3.33.1.** The generated `pyfreerdpnative/` package is the
+> 3.33.1 one. The `bindings-up-to-date` job re-checks it on every push.
+
+
+> This document covers building the **FreeRDP libraries**. The Python side
+> (`pyfreerdpnative/` — bindings generated from the headers) is described in
+> [../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md); how both are packaged
+> and published in [../docs/PUBLISHING.md](../docs/PUBLISHING.md).
+
+
+`pyfreerdpnative` ships FreeRDP 3 together with the media and USB stack it needs.
+Three scripts under `scripts/` build, package and prove it, on every platform,
+from pinned sources:
+
+| Step | Script | Produces |
+|---|---|---|
+| 1 | `build_deps.py` | libusb 1.0.30, OpenH264 2.6.0, FFmpeg 7.1.5 → `build/deps/<label>/` |
+| 2 | `build_freerdp.py` | libfreerdp3 / -client3 / -server3 / winpr3 (+ shadow, proxy) with all channels, H.264, DSP audio, USB + camera redirection, and the executables → `pyfreerdpnative/_libs/`, `pyfreerdpnative/_bin/` |
+| 3 | `validate_build.py` | pass/fail report: cold loads, channel symbols, live codec backends, FFmpeg/OpenH264 round trips, libusb, every executable, and a real RDP loopback session |
+
+Everything is driven by `.github/workflows/build-freerdp.yml` (all platforms,
+artifacts + optional release) and `ci.yml` (Linux, every push/PR).
+
+
+Wayland and X11 are **detected**, not required: `build_freerdp.py` checks
+`wayland-client`/`wayland-scanner`/`x11` with pkg-config and turns the
+matching feature off with a warning when they are absent (FreeRDP's
+`uwac/CMakeLists.txt` otherwise treats Wayland as required and
+hard-fails, which is what happened on manylinux2014).
+
+## macOS: toolchain
+
+FreeRDP 3.31+ is C23 code (`nullptr` appears in ~270 winpr source files
+alone), and Apple clang accepts that only from **Xcode 16**. The workflow's
+*Select Xcode* step keeps the runner image's default Xcode when it is already
+16+, switches to the newest release Xcode otherwise (betas excluded), and
+fails immediately with a clear message if the runner has none - instead of
+every file failing to compile. It also exports `CC`, `CXX` and `SDKROOT`, so
+the Intel (`macos-15-intel`) and arm64 (`macos-15`) cells build with an
+explicitly identical toolchain.
+
+## Linux: two glibc floors
+
+Linux is built four times per profile/edition:
+
+| label | where | wheel tag | installs on |
+|---|---|---|---|
+| `linux-x86_64`, `linux-aarch64` | ubuntu-24.04 runners | `manylinux_2_39_*` | glibc 2.39+ (Ubuntu 24.04, Fedora 40, Debian 13) |
+| `linux-x86_64-glibc234`, `linux-aarch64-glibc234` | `quay.io/pypa/manylinux_2_34_*` container | `manylinux_2_34_*` | glibc 2.34+ (RHEL/Alma 9, Debian 12, Ubuntu 22.04) |
+| `linux-x86_64-glibc228`, `linux-aarch64-glibc228` | `quay.io/pypa/manylinux_2_28_*` container | `manylinux_2_28_*` | glibc 2.28+ (RHEL/Alma 8, Ubuntu 18.04+, Debian 10+, SLES 15) |
+| (separate `linux-legacy` job) | `docker run quay.io/pypa/manylinux2014_x86_64` | `manylinux2014_*` | glibc 2.17 - **disabled**, not buildable for FreeRDP 3.31 (see below) |
+
+glibc 2.17 cannot use a job-level `container:`. Every GitHub JS action
+(checkout, setup-python, cache, upload-artifact) runs on Node, and Node 20+
+needs glibc >= 2.28 - inside a CentOS 7 image they abort with
+`version GLIBC_2.28 not found`. The `linux-legacy` job therefore stays on the
+runner, where the actions work, and puts only the build inside the image via
+`docker run`. **This floor does not work with FreeRDP 3.31 and is disabled.** Two blockers,
+both from build logs: the sources use the C23 keyword `nullptr` (needs GCC 13+
+/ clang 16+, while CentOS 7 tops out at devtoolset-11), and CentOS 7 ships
+OpenSSL 1.0.2 whereas FreeRDP calls 1.1.0+ APIs. `manylinux_2_28` is the
+lowest floor FreeRDP 3.31 can target. The job is kept for the day those
+requirements change; set `LEGACY_LINUX: yes` to try it.
+
+Inside the image it writes explicit `vault.centos.org` repositories (CentOS 7
+is EOL; the stock repo files carry only a dead mirrorlist) and installs
+**devtoolset-11**: GCC 10, the image default, rejects FreeRDP 3.31's
+`_Pragma()` use in `winpr/platform.h`. devtoolset was only ever published for
+x86_64, which is why this floor is x86_64-only. It is **enabled by default** but marked `continue-on-error`: the image is
+end-of-life, so if it breaks the other three floors still publish. Set
+`LEGACY_LINUX: no` in the workflow env to skip it entirely.
+
+Not covered: musl systems (Alpine) need `musllinux` wheels from an Alpine
+toolchain.
+
+pip installs the highest tag a system satisfies, so a modern machine still
+gets the 2.39 wheel and older distributions fall back to 2.34. The container
+cells run as root with `dnf` instead of `apt`, use the image's CPython
+(`/opt/python/cp312-cp312/bin`, so `actions/setup-python` is skipped), and
+keep a separate dependency cache so a glibc-2.39 prefix is never reused for
+a 2.34 build.
+
+## Mobile applications (aFreeRDP APK / iFreeRDP.app)
+
+Separate from the library matrix, two targets build FreeRDP's own mobile
+clients. Both are **self-contained super-builds**: their Gradle/CMake projects
+compile FreeRDP *and* every dependency (OpenSSL, FFmpeg, OpenH264, cJSON,
+opus, jpeg, png, webp, uriparser) from source, so they ignore
+`build/deps/` and `pyfreerdpnative/_libs` entirely — and take up to an hour each.
+
+```bash
+# aFreeRDP APK  (needs a JDK and ANDROID_HOME; the NDK comes from the SDK
+# manager at the version client/Android/Studio/build.gradle asks for)
+python scripts/build_freerdp.py --target android-apk --ref 3.33.1
+#   -> build/android-apk/*.apk   (per-ABI splits + a universal APK)
+
+# iFreeRDP app  (macOS + Xcode)
+python scripts/build_freerdp.py --target ios-app --ios-platform OS64
+#   -> build/ios-app/OS64/iFreeRDP.app
+```
+
+The APK is built for four ABIs by default — `armeabi-v7a`, `arm64-v8a`,
+`x86`, `x86_64` — producing one APK per ABI plus a universal APK that runs on
+any of them. `--apk-abis` narrows or extends that list (`all` adds `riscv64`);
+each ABI is a full native build of FreeRDP + OpenSSL + FFmpeg + OpenH264, so
+the list drives the build time. Note `--abi` is the *library* build's
+single-ABI switch and does not apply here.
+
+Other options: `--apk-build-type Debug` builds the debug variant, `--ios-platform SIMULATORARM64` targets the simulator, and
+`--sign-ios-app` lets Xcode sign the bundle (needs a provisioning profile).
+
+The iOS bundle is **unsigned by default** so it builds on a runner with no
+signing identity; sign it before installing on a device. In FreeRDP 3.28+ the
+iOS client is a standalone project — there is no `WITH_CLIENT_IOS` option any
+more, which is why this is its own target rather than a library-build flag.
+
+In CI both run as the `android-apk` and `ios-app` jobs, controlled by the
+`mobile_apps` dispatch input (on by default).
+
+## Editions (media stack)
+
+Every platform x architecture is built in four editions, selected with
+`--edition` on both `build_deps.py` and `build_freerdp.py` (workflow input
+`editions: all|standard|ffmpeg|openh264|media`):
+
+| Edition | Third-party libs | H.264 | Audio DSP | Scaler | Camera (`rdpecam`) | USB (`urbdrc`) |
+|---|---|---|---|---|---|---|
+| `standard` | none | built-in only (no H.264) | built-in (PCM/ADPCM/G.711) | cairo | server side only | no |
+| `ffmpeg` | FFmpeg (LGPL) + libusb | **decode** only (FFmpeg has no LGPL H.264 encoder) | + AAC, Opus | swscale | client (Linux/V4L) + server | yes |
+| `openh264` | OpenH264 + libusb | encode + decode | built-in | cairo | server side only | yes |
+| `media` | FFmpeg (with libopenh264) + OpenH264 + libusb | encode + decode | + AAC, Opus | swscale | client (Linux/V4L) + server | yes |
+
+Dependency prefixes are per edition: `build/deps/<platform>-<edition>`. The
+validator adapts to the edition: for `ffmpeg` it expects an H.264 *decoder*
+context but no encoder and round-trips MJPEG + AAC; for `openh264` it encodes
+with `h264enc` and decodes with `h264dec`; for `media` it does both. All four
+were built and validated on Linux x86_64 (media 16/16, ffmpeg 13/13,
+openh264 12/12, standard 4/4).
+
+Artifacts are named `freerdp-<ref>-<platform>-<profile>-<edition>`.
+
+## Two profiles, built independently
+
+| | `minimal` | `full` |
+|---|---|---|
+| Purpose | what the Python wheel ships | everything FreeRDP can do on the platform |
+| Libraries | libwinpr3, libfreerdp3, libfreerdp-client3, libfreerdp-server3 (+ librdtk0) | those plus FFmpeg, OpenH264, libusb, shadow (Linux), proxy |
+| Channels | every channel with no external dependency (20 client / 17 server) | all of them, incl. `urbdrc` (USB) and `rdpecam` client (Linux camera) |
+| Media | none | H.264 encode/decode (OpenH264 + FFmpeg), AAC/Opus DSP, swscale |
+| Executables | none | platform client(s), `sfreerdp` (the sample client from `client/Sample`, on Windows built as a standalone project against the installed prefix), `sdl-freerdp` where SDL3 is available, `sfreerdp-server`, `freerdp-proxy`, `freerdp-shadow-cli` (Linux), `winpr-makecert`, `winpr-hash`, `ffmpeg`, `ffprobe`, `h264enc`, `h264dec` (not on Windows: vcpkg ships no tools), `listdevs` |
+| Build type | `MinSizeRel`, stripped, one SONAME file per library | `Release`, dev links kept |
+| Linux x86_64 size | **3.5 MB** | 28 MB `_libs` + 3.7 MB `_bin` |
+| Command | `build_freerdp.py --profile minimal --edition <e>` | `build_deps.py --edition <e>` then `build_freerdp.py --profile full --edition <e>` |
+
+The profiles share nothing at build time except the FreeRDP source checkout;
+each one wipes and repopulates `pyfreerdpnative/_libs` (and `_bin` for full), so
+build the one you want to ship last. In CI every platform produces both as
+separate artifacts (`freerdp-<ref>-<platform>-minimal` / `-full`).
+
+`--profile full` defaults to `--edition media` and implies `--with-executables`;
+`--profile minimal` defaults to `--edition standard`. Any profile can be paired
+with any edition. On Windows every edition consumes a vcpkg prefix (at least
+OpenSSL/zlib/cJSON); media activation is driven by what the prefix actually
+contains, and the script refuses a prefix that does not match the edition.
+
+### What "full" means per platform
+
+Facts from FreeRDP's own CMake (`server/CMakeLists.txt`, upstream CI presets),
+encoded once in `FULL_PLATFORM` in `build_freerdp.py`:
+
+| Platform | shadow server | proxy | sample server | winpr tools | client executables |
+|---|---|---|---|---|---|
+| Linux | yes (X11 subsystem) | yes | yes | yes | xfreerdp, wlfreerdp, sdl-freerdp (if SDL3) |
+| macOS | **no** - upstream: "Mac shadow server implementation no longer compiles" | yes | yes | yes | sdl-freerdp (brew sdl3 + sdl3_ttf) |
+| Windows | **on by default** (DXGI capture; upstream marks it unmaintained). Disable with `--no-windows-shadow` / untick the `windows_shadow` dispatch input | yes | yes | yes | wfreerdp, sdl-freerdp (vcpkg sdl3 + sdl3-ttf) |
+| Android | no | no | no | no | none (libraries only; media + channels included) |
+| iOS | no | no | no | no | none (static libraries only; no libusb - no USB host API) |
+
+## Quick start (Linux / macOS)
+
+```bash
+# 1. system toolchain (Debian/Ubuntu; the script prints the exact list)
+sudo apt-get install -y build-essential cmake ninja-build git pkg-config nasm patchelf \
+    libssl-dev zlib1g-dev libkrb5-dev libcjson-dev libicu-dev libudev-dev libv4l-dev \
+    libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxfixes-dev libxcursor-dev \
+    libxi-dev libxv-dev libxkbfile-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+    libasound2-dev libpng-dev libjpeg-dev libcairo2-dev xvfb
+
+# minimal: libraries only, ~10 min
+python scripts/build_freerdp.py --target host --profile minimal
+python scripts/validate_build.py --profile minimal          # expect 4 passed
+
+# full: dependencies (~10 min, cached by CI) + FreeRDP with everything (~15 min)
+python scripts/build_deps.py --target host
+python scripts/build_freerdp.py --target host --profile full
+python scripts/validate_build.py --media --executables --loopback   # expect 16 passed
+```
+
+## What ends up in the package
+
+```
+pyfreerdpnative/_libs/        libwinpr3, libfreerdp3, libfreerdp-client3, libfreerdp-server3,
+                        libfreerdp-shadow3, libfreerdp-server-proxy3, librdtk0, libuwac0,
+                        libavcodec, libavutil, libswscale, libswresample, libavformat,
+                        libavfilter, libavdevice, libopenh264, libusb-1.0
+                        (+ OpenSSL/zlib DLLs on Windows; freerdp3/proxy/ modules on Linux)
+pyfreerdpnative/_bin/         xfreerdp, wlfreerdp (Linux) / wfreerdp (Windows), sfreerdp-server,
+                        freerdp-shadow-cli, freerdp-proxy, winpr-makecert, winpr-hash,
+                        ffmpeg, ffprobe, h264enc, h264dec (+ openh264-config/), listdevs
+                        (Windows: executables live in _libs/ next to their DLLs)
+```
+
+Every shared object is relocatable (`$ORIGIN` / `@loader_path`), every
+executable finds `../_libs`. Nothing needs `LD_LIBRARY_PATH`. The only
+external requirements are the OS itself and, on Windows, the VC++ 2015-2022
+redistributable that Python already installs.
+
+### Channels
+
+All FreeRDP channels are compiled into the libraries (FreeRDP 3 has no
+plugin files). Client side: drdynvc, rdpdr, cliprdr, rdpsnd, audin, rdpgfx,
+disp, rail, rdpei, ainput, location, echo, encomsp, remdesk, drive, smartcard,
+video, geometry, serial/parallel (Linux), **urbdrc** (USB, via libusb) and
+**rdpecam** (camera, Linux/V4L). Server side: everything with a server half,
+including telemetry, rdpemsc and rdpecam. `--list-channels` prints the table;
+`--enable-channel` / `--disable-channel` adjust it; the script re-reads
+`CMakeCache.txt` after configure and fails if CMake dropped one.
+
+### Media
+
+* **OpenH264** is FreeRDP's H.264 encoder/decoder (`WITH_OPENH264`) and
+  FFmpeg's `libopenh264` encoder.
+* **FFmpeg** provides H.264/MJPEG decode, the AAC/Opus DSP path
+  (`WITH_DSP_FFMPEG`), pixel conversion (`WITH_SWSCALE`) and the `ffmpeg` /
+  `ffprobe` tools. The build is LGPL-only and scoped to exactly the components
+  FreeRDP and the validation suite use (`FFMPEG_COMPONENTS` in
+  `build_deps.py`); add names there to extend it.
+* **libusb** backs the `urbdrc` channel and `rdpecam`'s V4L backend.
+
+## Per-platform notes
+
+| Target | How deps are built | Library type |
+|---|---|---|
+| Linux x86_64 / aarch64 | source (autotools/make) | shared |
+| macOS arm64 / x86_64 | source; `@rpath` install names; SDL3 via Homebrew | shared |
+| Windows x64 / x86 / arm64 | vcpkg manifest (`scripts/vcpkg.json`: core + `media` + `sdl` features, pinned baseline); x86 + arm64 cross-compiled with `-A Win32` / `-A ARM64` | shared |
+| Android arm64-v8a / armeabi-v7a / x86_64 / x86 | NDK cross; OpenSSL cross-built in the workflow; LTO off (NDK `--fatal-warnings`); OpenH264 x86 built with `ENABLEPIC=Yes` | shared |
+| iOS OS64 (device, both profiles) / SIMULATORARM64 (minimal only) | **shared `.dylib` by default** (embed in a signed app bundle / framework, loadable with dlopen or ctypes); `--ios-static` for `.a` archives; media deps are linked into the dylibs; libusb skipped (no USB host API); OpenH264/FFmpeg build for the device SDK only | shared |
+
+`build_freerdp.py --arch {x64,x86,arm64}` selects the Windows target;
+`--ios-platform` and `--abi` select mobile targets. `--deps-prefix auto`
+resolves to `build/deps/<label>` for the current target.
+
+## AAD / Entra ID login helpers
+
+FreeRDP 3.33 signs in to Azure AD (Entra ID) through an **out-of-process
+helper**: a small program that shows the Microsoft login page and reports the
+redirect back over a JSON-RPC pipe pair (FreeRDP's
+`client/common/aad-helper-protocol.md`). It replaces 3.32's in-process
+`WITH_WEBVIEW`, which no longer exists. Both helpers are built in the **full**
+profile when their browser engine is found, and need winpr's JSON support:
+
+| Helper | CMake option | Browser engine | Build dependency |
+|---|---|---|---|
+| `freerdp-webview-aad-helper` | `WITH_WEBVIEW_AAD_AUTH_HELPER` | WebKitGTK (Linux), WKWebView (macOS), Edge WebView2 (Windows) | Linux: `libwebkit2gtk-4.1-dev` (or 4.0) + GTK 3; the `webview` library is fetched at configure time (network) |
+| `freerdp-qt-aad-helper` | `WITH_QT_AAD_AUTH_HELPER` | Qt 6 WebEngine | a Qt 6 with WebEngineWidgets: `--qt-prefix`, `QT_ROOT_DIR`, `Qt6_DIR` or a system Qt |
+
+Switches: `--with-webview` / `--no-webview`, `--with-qt-aad` / `--no-qt-aad`,
+`--qt-prefix DIR`. The build log says why each helper is on or off.
+
+The helpers are staged into `_libs/` **last and without a dependency walk**:
+they load winpr from their own directory (`$ORIGIN`, `@executable_path`, the
+executable's folder on Windows) and their browser engine from the system - a
+bundled WebKit or Qt WebEngine would add hundreds of MB. `aad_helpers.json`
+lists what was staged and the Qt version the Qt helper was built against.
+
+At run time, `pyfreerdpnative.aad` finds them (FreeRDP's own autodetection looks
+next to `python.exe`) and, for the Qt helper, a Qt WebEngine at least as new as
+that version: an installed `PySide6-WebEngine` or `PyQt6-WebEngine-Qt6` (Qt
+WebEngine is a separate package of both since Qt 6.12/6.140), else the system's.
+On Linux under X11, Qt 6.5+ also needs the system's `libxcb-cursor0`.
+CI builds the Qt helper against Qt 6.5 LTS (aqtinstall): Qt 6 is binary
+compatible upwards, so it runs with any newer Qt 6. Verified: a helper built
+against Qt 6.4.2 passes FreeRDP's protocol test on PySide6's Qt 6.12 /
+Qt WebEngine 6.140.
+
+Build details that keep this working (each was a CI failure):
+
+* A downloaded Qt's location (`PYFREERDPNATIVE_QT_PREFIX`) is put on
+  `CMAKE_PREFIX_PATH` **inside the Qt helper's directory only** (a patch to its
+  CMakeLists; CMake directory scope keeps it from everything else). Both global
+  choices failed: on the global `CMAKE_PREFIX_PATH`, FindICU took Qt's bundled
+  `libicu*.so.56` with the system's ICU headers and libwinpr3 failed to load
+  (`undefined symbol u_errorName_74`); as `Qt6_DIR`, Qt could not find its
+  `Qt6CoreTools`-style packages (they are looked up through the prefix path),
+  so Qt 6 was "not found" and FreeRDP fell back to a required Qt 5.
+* **Qt is not bundled** - its WebEngine runtime is ~150 MB compressed per
+  wheel (204 MB for `libQt6WebEngineCore.so.6` alone), beyond PyPI's 100 MB
+  file limit. Users get it with `pip install "pyfreerdpnative[qt-aad]"` (the
+  official `PySide6-WebEngine` wheels), the system's Qt 6 WebEngine, or a Qt
+  installation named by `PYFREERDP_QT_DIR`; `pyfreerdpnative.aad` hands the
+  helper that Qt. `validate_build.py` checks the helper against the Qt it was
+  built with (`QT_ROOT_DIR` in CI, looked up exactly like `PYFREERDP_QT_DIR`):
+  every Qt library must resolve, and a named Qt that is unusable fails.
+  On Linux, Qt WebEngine also needs the system's **NSS/NSPR** (`libnss3`,
+  `libsmime3`, `libnssutil3`, `libnspr4`; Chromium's certificate handling) -
+  not part of Qt, and not bundled by Qt's own wheels either. CI installs
+  `nss nspr` in the manylinux containers; `pyfreerdpnative.aad` reports a
+  missing NSS (and, under X11, `libxcb-cursor0`) instead of starting a helper
+  that cannot run.
+* The Qt helper is **optional**: with no usable Qt it is skipped with a CMake
+  warning that gives the reason, and the rest of FreeRDP builds.
+* Qt's AUTOMOC needs **Ninja 1.10+**; with an older one (AlmaLinux 8 ships
+  1.8.2) the build uses CMake's default generator. CI installs a current Ninja
+  in the manylinux containers.
+* Upstream bugs patched in the fetched tree (`patch_source_tree`):
+  winpr's `wtypes.h` picked the opposite `BOOL` of Objective-C's when `objc.h`
+  came first (the macOS webview helper failed with *typedef redefinition*), and
+  the webview helper did not link the thread library glibc < 2.34 needs.
+* FreeRDP 3.33's **VideoToolbox** backend encodes H.264 on macOS in every
+  edition; `validate_build.py` expects an encoder whenever libfreerdp3 links
+  that framework.
+
+Known upstream issue (FreeRDP 3.33.0, WebKitGTK): restoring the browser's own
+User-Agent after an override *within one helper process* is racy. PyFreeRdpApp
+starts one helper per connection, so it never takes that path.
+
+## Kerberos
+
+Kerberos authentication (NLA with a domain account, SSO) goes through winpr's
+SSPI layer. Whether and how it is available is decided per platform, from
+FreeRDP's own support matrix, in `krb5_options()` in `build_freerdp.py`:
+
+| Platform | Kerberos | Source | Ships in package |
+|---|---|---|---|
+| Linux (both profiles) | **on** | MIT krb5 via `WITH_KRB5=ON` (FreeRDP's default; upstream CI builds it) | full: `libkrb5`, `libk5crypto`, `libcom_err`, `libkrb5support` bundled into `_libs`. minimal: uses the distro's krb5 runtime (part of every mainstream base install) — zero size cost |
+| Windows (both) | **on** | the OS: winpr forwards to native SSPI (`WITH_NATIVE_SSPI` is forced on for WIN32), Kerberos/Negotiate come from `secur32.dll` | nothing needed |
+| macOS | **off** by default | FreeRDP's `FindKRB5` rejects Apple's system Kerberos ("MITKerberosShim is deprecated and not supported") and upstream's macOS CI builds with `WITH_KRB5=OFF`. Homebrew MIT krb5 works but is not upstream-verified: `brew install krb5 && build_freerdp.py --with-krb5` (dylibs are then bundled) | — |
+| Android, iOS | **off** | upstream CI sets `WITH_KRB5=OFF`; no supported krb5 build | — |
+
+Full on Linux **requires** krb5 (`libkrb5-dev` / `krb5-devel`) and fails with a
+clear message otherwise; minimal falls back to `WITH_KRB5=OFF` with a loud
+warning. `--without-krb5` disables it anywhere. After configure the script
+re-reads `CMakeCache.txt` and fails if `WITH_KRB5` didn't resolve as intended.
+
+`validate_build.py --kerberos on|off|auto` proves it at runtime without a KDC:
+it enumerates winpr's SSPI packages (must list `Kerberos`) and calls
+`AcquireCredentialsHandle("Kerberos")` with no identity. A live krb5 backend
+goes into libkrb5 and returns e.g. `SEC_E_NO_CREDENTIALS` instantly; a build
+without krb5 returns `SEC_E_UNSUPPORTED_FUNCTION`. Configuration at runtime is
+the standard `/etc/krb5.conf` / `KRB5_CONFIG`; a ticket cache from `kinit` (or
+`/u:user@REALM /p:...`) is used by the client as usual.
+
+## Targeting older Windows (experimental)
+
+FreeRDP 3.31 declares no Windows version floor of its own — the blockers are
+in the toolchain. `--win-target {10,8.1,7}` (workflow input `win_target`)
+switches them:
+
+Legacy targets always build **DLLs** (`BUILD_SHARED_LIBS=ON`); what changes
+is where the C runtime comes from (`--win-crt`, workflow input `win_crt`):
+
+| | default `10` | `7`/`8.1` + `--win-crt static` (default) | `7`/`8.1` + `--win-crt dynamic` |
+|---|---|---|---|
+| `CMAKE_SYSTEM_VERSION` | host's | `6.1` / `6.3` | `6.1` / `6.3` |
+| `_WIN32_WINNT` | `0x0A00` | `0x0601` / `0x0603` | `0x0601` / `0x0603` |
+| CRT | dynamic | **static, linked in** | dynamic |
+| Output | DLLs | DLLs | DLLs |
+| Needs redistributable | yes (already present) | **no** | yes — and `--win-toolset v142` |
+| Dependencies | `<arch>-windows` | **`<arch>-windows-static`** | `<arch>-windows` (v142-built) |
+| Tested | yes | no | no |
+
+**Why static is the default for legacy targets.** VS 2022's redistributable
+dropped Windows 7/8.1 at v14.40, so a DLL importing `vcruntime140.dll` cannot
+load there. Linking the CRT statically removes that dependency entirely and
+works with the toolchain GitHub runners already have.
+
+FreeRDP normally forbids this combination (`cmake/MSVCRuntime.cmake`: "Static
+CRT is only supported in a fully static build"). The build patches that guard
+down to a warning, because the rule exists to prevent *mixing* runtimes — it
+is safe when every component uses the same static CRT, which is what the
+`-windows-static` vcpkg triplet arranges. Get that wrong and the symptom is
+random crashes when memory is freed across a DLL boundary, not a link error,
+so build the dependencies with `build_deps.py --win-crt static` (the workflow
+does this automatically).
+
+The `dynamic` route is the alternative: keep `vcruntime140.dll` but build
+with `--win-toolset v142` (VS 2019), whose redistributable still supports
+those systems. It needs those build tools installed — GitHub's `windows-2022`
+image ships v143 only.
+
+Two things this does **not** solve, so treat the result as an experiment:
+vcpkg's OpenSSL/zlib in the deps prefix are built for modern Windows and
+would need rebuilding with a matching toolset (VS 2019 / v142 or older), and
+nothing — upstream or here — tests these systems; there is no CI runner for
+them. arm64 rejects the option, since Windows on ARM starts at Windows 10.
+
+## Viewing logs
+
+FreeRDP logs through WinPR's WLog. On Linux/macOS every executable prints to
+the terminal. On Windows `wfreerdp.exe` is built with `WITH_WIN_CONSOLE=ON`
+(console subsystem) so its output appears in the cmd/PowerShell window too;
+`/log-level:DEBUG` raises verbosity, `/log-filters:com.freerdp.core:TRACE`
+targets modules. To capture to a file on any platform:
+
+```
+WLOG_APPENDER=FILE  WLOG_FILEAPPENDER_OUTPUT_FILE_PATH=<dir>
+WLOG_FILEAPPENDER_OUTPUT_FILE_NAME=freerdp.log  WLOG_LEVEL=INFO
+```
+
+(set as environment variables before launching).
+
+## Validation
+
+`validate_build.py` is the executable definition of "works":
+
+* `libs` — each core library loads by absolute path in a fresh interpreter with
+  library paths scrubbed.
+* `channels.*` — server contexts exported; every client channel resolves through FreeRDP's own `freerdp_channels_load_static_addin_entry()` (strip-proof).
+* `kerberos` — SSPI package list + live-backend probe (see the Kerberos section).
+* `media.linked / media.h264 / media.dsp` — libfreerdp3 imports FFmpeg and
+  OpenH264 and they are staged; `h264_context_new()` returns a context for both
+  decoder and encoder; `freerdp_dsp_supports_format()` accepts AAC and Opus.
+* `ffmpeg.*` — test pattern → `libopenh264` → Annex-B → ffprobe counts 25
+  frames; sine → AAC → PCM.
+* `openh264.*` — `WelsGetCodecVersion`; `h264dec` decodes to the exact byte count.
+* `libusb.*` — `libusb_init` / `libusb_get_device_list` (0 devices is fine on CI).
+* `executables` — all dynamic deps resolve; each answers `/version` etc.;
+  `winpr-makecert` produces a certificate.
+* `loopback` (Linux) — `sfreerdp-server` + `xfreerdp` under Xvfb: TLS session
+  activates, RDPSND is negotiated, dynamic channels open.
+
+## When a CI leg fails
+
+Every build job uploads a `diagnostics-<platform>-<profile>` artifact on
+failure containing `CMakeCache.txt`, `CMakeConfigureLog.yaml` /
+`CMakeError.log` and the resolved `vcpkg.json` (Windows). The real cause of a
+CMake configure failure is almost always in those files rather than in the
+console log; attach them when reporting a problem.
+
+Every job also starts with a version handshake (`--require-version N`) so a
+stale `scripts/` directory fails immediately with an explanation.
+
+## Releases
+
+Artifacts (30-day retention) are listed with direct links in each run's
+Summary. Additionally the `links` job attaches every artifact to the rolling
+pre-release `freerdp-libs-<freerdp_ref>` on each push to `main`, on
+`workflow_dispatch` with `publish_release`, and on `release: published`, so
+there are permanent download URLs of the form
+`https://github.com/<owner>/<repo>/releases/download/freerdp-libs-3.33.1/freerdp-3.33.1-<platform>-<profile>.tar.gz`
+(`.zip` on Windows).
+
+## Reproducibility
+
+Sources are pinned by version and SHA-256 (`KNOWN_HASHES`); `vcpkg.json` pins
+a registry baseline (resolved at build time against the runner's vcpkg clone,
+falling back to its HEAD if the pinned commit is absent - the chosen commit is
+printed and stored in the diagnostics); FreeRDP is pinned by tag (`--ref`, default 3.33.1). CI
+caches `build/deps/<label>` keyed on the hash of `build_deps.py` +
+`vcpkg.json`, so a dependency change rebuilds everything and nothing else does.
+To bump a dependency: change the version in `SOURCES`, run
+`build_deps.py --print-hashes`, paste the hashes, commit.
+
+## Known limits
+
+* Windows `arm64` and `x86` FreeRDP builds are cross-compiled; the workflow
+  load-tests arm64 natively on `windows-11-arm` and x86 with a 32-bit Python.
+* `rdpecam`'s client half has a capture backend only on Linux (V4L) in FreeRDP
+  3.33.1; the server half is built everywhere.
+* GSM 6.10, MS-ADPCM, G.723.1 and A-law/µ-law audio go through FreeRDP's
+  built-in codecs, not FFmpeg (upstream filters them out of the FFmpeg backend
+  unless `WITH_DSP_EXPERIMENTAL`).
+* The Linux path of all three scripts has been exercised end to end; the
+  macOS, Windows, Android and iOS paths are written against upstream build
+  documentation and FreeRDP's CMake and are verified by the workflow's own
+  per-platform validation steps.
