@@ -1769,7 +1769,7 @@ PROTOTYPES = {
     'freerdp_client_print_version_ex': (BOOL, [ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)], False),
     'freerdp_client_send_button_event': (BOOL, [ctypes.POINTER(rdpClientContext), BOOL, UINT16, INT32, INT32], False),
     'freerdp_client_send_extended_button_event': (BOOL, [ctypes.POINTER(rdpClientContext), BOOL, UINT16, INT32, INT32], False),
-    'freerdp_client_send_key_as_unicode': (BOOL, [ctypes.POINTER(rdpClientContext), UINT16, ctypes.c_char_p, UINT32, FREERDP_CLIENT_KBD_MOD], False),
+    'freerdp_client_send_key_as_unicode': (BOOL, [ctypes.POINTER(rdpClientContext), UINT16, ctypes.c_char_p, UINT32, UINT32], False),
     'freerdp_client_send_wheel_event': (BOOL, [ctypes.POINTER(rdpClientContext), UINT16], False),
     'freerdp_client_settings_command_line_status_print': (ctypes.c_int, [ctypes.POINTER(rdpSettings), ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_char_p)], False),
     'freerdp_client_settings_command_line_status_print_ex': (ctypes.c_int, [ctypes.POINTER(rdpSettings), ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_char_p), ctypes.POINTER(COMMAND_LINE_ARGUMENT_A)], False),

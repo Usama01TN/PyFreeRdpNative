@@ -102,7 +102,7 @@ FUNCTIONS = (
     'freerdp_client_pen_cancel_all',  # BOOL (ctypes.POINTER(rdpClientContext))
     'freerdp_client_send_button_event',  # BOOL (ctypes.POINTER(rdpClientContext), BOOL, UINT16, INT32, INT32)
     'freerdp_client_send_extended_button_event',  # BOOL (ctypes.POINTER(rdpClientContext), BOOL, UINT16, INT32, INT32)
-    'freerdp_client_send_key_as_unicode',  # BOOL (ctypes.POINTER(rdpClientContext), UINT16, ctypes.c_char_p, UINT32, FREERDP_CLIENT_KBD_MOD)
+    'freerdp_client_send_key_as_unicode',  # BOOL (ctypes.POINTER(rdpClientContext), UINT16, ctypes.c_char_p, UINT32, UINT32)
     'freerdp_client_send_wheel_event',  # BOOL (ctypes.POINTER(rdpClientContext), UINT16)
     'freerdp_client_settings_parse_assistance_file',  # ctypes.c_int (ctypes.POINTER(rdpSettings), ctypes.c_int, ctypes.POINTER(ctypes.c_char_p))
     'freerdp_client_settings_parse_command_line',  # ctypes.c_int (ctypes.POINTER(rdpSettings), ctypes.c_int, ctypes.POINTER(ctypes.c_char_p), BOOL)
